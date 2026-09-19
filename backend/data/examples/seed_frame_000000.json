@@ -1,0 +1,189 @@
+{
+  "media": {
+    "id": "sperm2",
+    "name": "sperm2.mp4",
+    "type": "video",
+    "width": 640.0,
+    "height": 432.0
+  },
+  "frame": {
+    "frameIndex": 0,
+    "timestampMs": 0
+  },
+  "coordinateSystem": {
+    "source": "frontend-pixel",
+    "target": "pixel",
+    "bbox": "[x1, y1, x2, y2]"
+  },
+  "annotations": [
+    {
+      "id": "manual-1789483928035-og5t9",
+      "name": "rare sperm 1",
+      "source": "manual",
+      "frameIndex": 0,
+      "timestampMs": 0,
+      "bbox": [
+        25,
+        184,
+        56,
+        208
+      ]
+    },
+    {
+      "id": "manual-1789483929183-aw9g5",
+      "name": "rare sperm 2",
+      "source": "manual",
+      "frameIndex": 0,
+      "timestampMs": 0,
+      "bbox": [
+        56,
+        166,
+        107,
+        183
+      ]
+    },
+    {
+      "id": "manual-1789483930157-4myra",
+      "name": "rare sperm 3",
+      "source": "manual",
+      "frameIndex": 0,
+      "timestampMs": 0,
+      "bbox": [
+        53,
+        130,
+        97,
+        150
+      ]
+    },
+    {
+      "id": "manual-1789483931598-0k7ko",
+      "name": "rare sperm 4",
+      "source": "manual",
+      "frameIndex": 0,
+      "timestampMs": 0,
+      "bbox": [
+        101,
+        184,
+        145,
+        205
+      ]
+    },
+    {
+      "id": "manual-1789483933094-pddkj",
+      "name": "rare sperm 5",
+      "source": "manual",
+      "frameIndex": 0,
+      "timestampMs": 0,
+      "bbox": [
+        194,
+        122,
+        237,
+        152
+      ]
+    },
+    {
+      "id": "manual-1789483934483-fdh15",
+      "name": "rare sperm 6",
+      "source": "manual",
+      "frameIndex": 0,
+      "timestampMs": 0,
+      "bbox": [
+        264,
+        110,
+        300,
+        129
+      ]
+    },
+    {
+      "id": "manual-1789483936118-f2ds2",
+      "name": "rare sperm 7",
+      "source": "manual",
+      "frameIndex": 0,
+      "timestampMs": 0,
+      "bbox": [
+        358,
+        178,
+        391,
+        194
+      ]
+    },
+    {
+      "id": "manual-1789483937338-be7z4",
+      "name": "rare sperm 8",
+      "source": "manual",
+      "frameIndex": 0,
+      "timestampMs": 0,
+      "bbox": [
+        371,
+        190,
+        411,
+        219
+      ]
+    },
+    {
+      "id": "manual-1789483938382-419d0",
+      "name": "rare sperm 9",
+      "source": "manual",
+      "frameIndex": 0,
+      "timestampMs": 0,
+      "bbox": [
+        415,
+        201,
+        438,
+        221
+      ]
+    },
+    {
+      "id": "manual-1789483939321-mcbkz",
+      "name": "rare sperm 10",
+      "source": "manual",
+      "frameIndex": 0,
+      "timestampMs": 0,
+      "bbox": [
+        452,
+        191,
+        484,
+        216
+      ]
+    },
+    {
+      "id": "manual-1789483941345-c9zqo",
+      "name": "rare sperm 11",
+      "source": "manual",
+      "frameIndex": 0,
+      "timestampMs": 0,
+      "bbox": [
+        533,
+        166,
+        562,
+        186
+      ]
+    },
+    {
+      "id": "manual-1789483942553-5e97r",
+      "name": "rare sperm 12",
+      "source": "manual",
+      "frameIndex": 0,
+      "timestampMs": 0,
+      "bbox": [
+        553,
+        197,
+        588,
+        224
+      ]
+    },
+    {
+      "id": "manual-1789483943790-roirh",
+      "name": "rare sperm 13",
+      "source": "manual",
+      "frameIndex": 0,
+      "timestampMs": 0,
+      "bbox": [
+        463,
+        83,
+        497,
+        104
+      ]
+    }
+  ]
+}
