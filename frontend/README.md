@@ -83,3 +83,24 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 3000
 ### Tracking implementation note
 The SAM3 path is aligned with the validated `01_test` reference: default processing FPS is 15, source-frame/sample-frame mapping is preserved, and the same SAM3 session / propagation / mask decoding flow is used. The FastAPI process keeps the SAM3 model cached; each click creates a new video inference session.
 
+
+
+## AI Tracking 新流程
+
+视频页点击 AI Tracking 后：
+
+```text
+当前帧
+  ↓
+保存当前帧 seed JSON
+  ↓
+后端 Frame Difference Planner
+  ↓
+计算 recommendedTrackFrames
+  ↓
+原 SAM3 Tracking
+  ↓
+定位新目标候选帧
+```
+
+前端不直接运行 OpenCV；所有 MP4 帧差分析均由 FastAPI 后端完成。

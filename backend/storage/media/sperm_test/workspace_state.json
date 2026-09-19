@@ -1,0 +1,24 @@
+{
+  "format": "annotation-workspace-v1",
+  "frontendMediaId": "server-sperm_test",
+  "updatedAt": "2026-09-26T18:21:31.867Z",
+  "currentFrame": 0,
+  "manualAnnotations": [],
+  "manualBaselines": [],
+  "deletedTrackingIds": [],
+  "anomalyFrames": [],
+  "pausedAnomalies": [],
+  "lastPausedContext": null,
+  "display": {
+    "brightness": 100,
+    "contrast": 100,
+    "zoom": 1
+  },
+  "editor": {
+    "activeTool": "select",
+    "objectNameInput": "rare sperm",
+    "selectedObjectId": null
+  },
+  "mediaId": "sperm_test",
+  "updatedBy": 3
+}

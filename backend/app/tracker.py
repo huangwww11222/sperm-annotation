@@ -33,8 +33,15 @@ def _load_seed(
     if source_start < 0 or source_start >= source_frame_count:
         raise ValueError(f"seed frame {source_start} outside source video range")
 
+    annotations = data.get("annotations", [])
+    if not isinstance(annotations, list):
+        raise ValueError("seed annotation JSON annotations must be a list")
+
     objects: list[dict[str, Any]] = []
-    for i, ann in enumerate(data.get("annotations", []), start=1):
+    seen_ids: set[int] = set()
+    for idx, ann in enumerate(annotations):
+        if not isinstance(ann, dict):
+            raise ValueError(f"annotations[{idx}] must be an object")
         ann_frame = int(ann.get("frameIndex", source_start))
         if ann_frame != source_start:
             raise ValueError(
@@ -44,7 +51,26 @@ def _load_seed(
         if not isinstance(bbox, list) or len(bbox) != 4:
             continue
 
-        x1, y1, x2, y2 = [float(v) for v in bbox]
+        object_id_raw = ann.get("object_id", ann.get("objectId"))
+        if object_id_raw is None:
+            raise ValueError(
+                f"annotation {ann.get('id', idx)} is missing object_id; "
+                "identity must be persisted explicitly and never derived from array order"
+            )
+        try:
+            object_id = int(object_id_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"annotation {ann.get('id', idx)} has invalid object_id={object_id_raw!r}") from exc
+        if object_id <= 0:
+            raise ValueError(f"annotation {ann.get('id', idx)} has non-positive object_id={object_id}")
+        if object_id in seen_ids:
+            raise ValueError(f"duplicate object_id={object_id} in seed annotations")
+        seen_ids.add(object_id)
+
+        try:
+            x1, y1, x2, y2 = [float(v) for v in bbox]
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"annotation {ann.get('id', idx)} bbox contains non-numeric values") from exc
         x1, x2 = sorted((x1, x2))
         y1, y2 = sorted((y1, y2))
         x1 = max(0.0, min(float(max(0, width - 1)), x1))
@@ -54,16 +80,11 @@ def _load_seed(
         if x2 <= x1 or y2 <= y1:
             continue
 
-        try:
-            object_id = int(ann.get("object_id", i))
-        except Exception:
-            object_id = i
-
         objects.append(
             {
                 "object_id": object_id,
-                "source_id": ann.get("id", f"object-{i}"),
-                "id": ann.get("id", f"object-{i}"),
+                "source_id": ann.get("id", f"object-{object_id}"),
+                "id": ann.get("id", f"object-{object_id}"),
                 "name": ann.get("name", "object"),
                 "label": ann.get("name", "object"),
                 "bbox": [x1, y1, x2, y2],
@@ -99,6 +120,74 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     if text:
         text += "\n"
     path.write_text(text, encoding="utf-8")
+
+
+def rewind_tracking_results(
+    path: Path,
+    video_file: Path,
+    cutoff_frame: int,
+    meta: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Drop only stale future SAM3 rows *after* ``cutoff_frame``.
+
+    Frame N is the user's new authoritative branch point. It must be kept so
+    existing AI boxes on that frame can be combined with human edits/additions
+    and then submitted as the next SAM3 seed. Rows strictly before N are also
+    retained. The replacement tracking run will upsert/replace frame N when its
+    new result is written.
+    """
+    cutoff = int(cutoff_frame)
+    if cutoff < 0:
+        raise ValueError("cutoff_frame must be >= 0")
+
+    rows = _read_jsonl(path)
+    kept: list[dict[str, Any]] = []
+    removed = 0
+    for row in rows:
+        try:
+            frame = int(row.get("source_frame_index", row.get("frame_index", -1)))
+        except Exception:
+            continue
+        if frame <= cutoff:
+            kept.append(row)
+        else:
+            removed += 1
+
+    _write_jsonl(path, kept)
+
+    overlay_path = path.parent / OVERLAY_FILE_NAME
+    if video_file.is_file():
+        video_meta = dict(meta or {})
+        if not video_meta:
+            video_meta = _probe_video(video_file)
+        try:
+            _render_overlay_video(video_file, overlay_path, video_meta, kept)
+        except Exception as exc:
+            print(f"[tracking-rewind] overlay regeneration failed: {exc}")
+
+    # 删除已经不再属于当前分支的旧 seed JSON。保留 cutoff 本身及之前，
+    # cutoff 的最新 seed 将由下一次 /track/annotations 覆盖写入。
+    deleted_seed_files = 0
+    for seed_file in sorted(path.parent.glob("annotations_frame_*.json")):
+        try:
+            frame = int(seed_file.stem.rsplit("_", 1)[1])
+        except Exception:
+            continue
+        if frame > cutoff:
+            seed_file.unlink(missing_ok=True)
+            deleted_seed_files += 1
+
+    print(
+        f"[tracking-rewind] cutoff={cutoff} kept_rows={len(kept)} "
+        f"removed_rows={removed} deleted_future_seeds={deleted_seed_files}"
+    )
+    return {
+        "cutoffFrame": cutoff,
+        "keptRows": len(kept),
+        "removedRows": removed,
+        "deletedFutureSeedFiles": deleted_seed_files,
+        "overlayRegenerated": video_file.is_file(),
+    }
 
 
 def track_video(
@@ -169,12 +258,36 @@ def track_video(
         fps=source_fps,
         frame_width=width,
         frame_height=height,
+        all_object_ids=[int(o["object_id"]) for o in objects],
     )
 
     # object_id → name 映射，让 tracking 结果继承用户标注的名字
     object_names: dict[int, str] = {int(o["object_id"]): o.get("name") or f"object-{o['object_id']}" for o in objects}
 
-    new_rows: list[dict[str, Any]] = []
+    # 把 Tracking 的 seed 帧也写入 tracker_results.json。
+    # 以前这里直接跳过 seed frame，导致常见的第 0 帧标注根本不会进入结果文件。
+    seed_source_idx = source_indices[seed_frame]
+    seed_rows = [{
+        "object_id": int(obj["object_id"]),
+        "name": object_names.get(int(obj["object_id"]), obj.get("name") or f"object-{obj['object_id']}"),
+        "bbox": _json_bbox(obj["bbox"]),
+        "score": None,
+        "source": "manual_seed",
+        "mask_area": None,
+        "sam3_object_id": int(obj["object_id"]),
+    } for obj in objects]
+    new_rows: list[dict[str, Any]] = [{
+        "frame_index": seed_frame,
+        "source_frame_index": seed_source_idx,
+        "objects": seed_rows,
+    }]
+
+    # 用 seed frame 初始化异常检测器历史，但不在 seed 本身触发暂停。
+    detector.push(
+        seed_frame,
+        {int(obj["object_id"]): list(obj["bbox"]) for obj in objects},
+    )
+
     for output in engine.propagate_manual(
         session,
         max_frames=requested,
@@ -208,17 +321,6 @@ def track_video(
             }
             object_rows.append(obj_row)
 
-        row = {
-            "frame_index": frame_idx,
-            "source_frame_index": source_idx,
-            "objects": object_rows,
-        }
-        new_rows.append(row)
-        print(
-            f"[sam3] frame={frame_idx} source={source_idx} "
-            f"tracked_objects={len(object_rows)}"
-        )
-
         # ── 异常检测 ──
         frame_objs_for_detector: dict[int, list[float]] = {}
         for obj_row in object_rows:
@@ -235,23 +337,60 @@ def track_video(
                     obj_row["anomaly_details"] = af.details
                     break
 
-        # HARD 异常 → 提前终止 tracking
+        row = {
+            "frame_index": frame_idx,
+            "source_frame_index": source_idx,
+            "objects": object_rows,
+            "anomalies": [
+                {
+                    "object_id": int(af.object_id),
+                    "level": af.level.value,
+                    "reasons": af.reasons,
+                    "details": af.details,
+                }
+                for af in anomaly_report.frames
+                if af.level in (AnomalyLevel.ANOMALY, AnomalyLevel.DISAPPEARED)
+            ],
+        }
+        new_rows.append(row)
+        print(
+            f"[sam3] frame={frame_idx} source={source_idx} "
+            f"tracked_objects={len(object_rows)}"
+        )
+
+        # HARD 异常 → 在当前异常帧保存结果后立即暂停。
         if anomaly_report.should_pause:
-            pause_reasons = []
+            pause_objects = []
             for af in anomaly_report.frames:
                 if af.level in (AnomalyLevel.ANOMALY, AnomalyLevel.DISAPPEARED):
-                    pause_reasons.append(
-                        f"object #{af.object_id}: {', '.join(af.reasons)}"
+                    details = af.details or {}
+                    pause_type = (
+                        "edge_exit" if af.level == AnomalyLevel.DISAPPEARED
+                        else "overlap" if any("bbox_overlap_with=" in r for r in af.reasons)
+                        else "size_growth" if any(
+                            any(k in r for k in ("area_ratio", "width_ratio", "height_ratio"))
+                            for r in af.reasons
+                        )
+                        else "tracking_motion"
                     )
-            print(f"[anomaly] HARD detected → pause frame={frame_idx}: {pause_reasons}")
+                    pause_objects.append({
+                        "object_id": int(af.object_id),
+                        "type": pause_type,
+                        "reasons": list(af.reasons),
+                        "details": details,
+                        "ratio": details.get("area_ratio"),
+                        "prevArea": details.get("baseline_area"),
+                        "currArea": details.get("current_area"),
+                    })
+            print(f"[anomaly] HARD detected → pause frame={frame_idx}: {pause_objects}")
             result_anomaly_paused = {
                 "frame_index": frame_idx,
-                "reasons": pause_reasons,
+                "reasons": pause_objects,
                 "levels": {str(k): v.value for k, v in anomaly_report.object_levels.items()},
             }
             break
 
-    merged_rows = _merge_rows(Path(output_json), new_rows)
+    merged_rows = _merge_rows(Path(output_json), new_rows, keep_before_source_frame=seed_source_idx)
     overlay_path = Path(output_json).parent / OVERLAY_FILE_NAME
     _render_overlay_video(video_file, overlay_path, meta, merged_rows)
 
@@ -286,15 +425,29 @@ def track_video(
     return result
 
 
-def _merge_rows(path: Path, new_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _merge_rows(
+    path: Path,
+    new_rows: list[dict[str, Any]],
+    keep_before_source_frame: int | None = None,
+) -> list[dict[str, Any]]:
+    """Merge a new tracking segment into the result file.
+
+    When a tracking run starts/resumes at a seed frame, stale rows at or after
+    that seed must be removed; otherwise a newly paused run could still expose
+    old future tracking results after the pause frame. Rows strictly before the
+    new seed are retained, while the new segment owns the seed-and-later range.
+    """
     merged: dict[int, dict[str, Any]] = {}
     for row in _read_jsonl(path):
         try:
             key = int(row.get("source_frame_index", row.get("frame_index", -1)))
         except Exception:
             continue
-        if key >= 0:
-            merged[key] = row
+        if key < 0:
+            continue
+        if keep_before_source_frame is not None and key >= int(keep_before_source_frame):
+            continue
+        merged[key] = row
 
     for row in new_rows:
         key = int(row["source_frame_index"])

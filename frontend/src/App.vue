@@ -3,7 +3,6 @@ import { computed, onMounted, watch } from 'vue'
 import AppLayout from './layouts/AppLayout.vue'
 import AnnotatePage from './pages/AnnotatePage.vue'
 import ResultsPage from './pages/ResultsPage.vue'
-import EffectsPage from './pages/EffectsPage.vue'
 import LoginPage from './pages/LoginPage.vue'
 import { useRouter } from './router'
 import { useAuth } from './stores/auth'
@@ -33,6 +32,5 @@ watch(isAuthenticated, syncRoute)
   <AppLayout v-else>
     <AnnotatePage v-if="currentPath === '/annotate'" />
     <ResultsPage v-else-if="currentPath === '/results'" />
-    <EffectsPage v-else-if="currentPath === '/effects'" />
   </AppLayout>
 </template>

@@ -10,10 +10,17 @@ from typing import Any
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from .auth import current_user, hash_password, sign_jwt, verify_password
-from .config import DB_FILE, DEVICE, DTYPE, HOST, JWT_SECRET, MAX_VIDEO_BYTES, MODEL_ID, PORT, TRACK_DATA_DIR, TRACK_FRAMES
+from .config import (
+    DB_FILE, DEVICE, DTYPE, HOST, JWT_SECRET, MAX_VIDEO_BYTES, MODEL_ID, PORT,
+    TRACK_DATA_DIR, TRACK_FRAMES, FRAME_DIFF_MAX_SEARCH_FRAMES,
+    FRAME_DIFF_CONFIRM_FRAMES, FRAME_DIFF_MAX_CONFIRM_MISS, FRAME_DIFF_THRESHOLD,
+    FRAME_DIFF_KNOWN_MARGIN, FRAME_DIFF_MIN_AREA, FRAME_DIFF_MIN_AREA_RATIO,
+    FRAME_DIFF_TEMPLATE_THRESHOLD, FRAME_DIFF_ROI_RECT, FRAME_DIFF_VERBOSE_LOG,
+)
 from .db import create_user, delete_annotation, get_user, get_user_by_id, init_db, insert_annotations, list_annotations
 from .schemas import (
     AnomalyFrameOut,
@@ -22,13 +29,17 @@ from .schemas import (
     AuthRequest,
     ManualAnnotationRequest,
     TrackRequest,
+    TrackPlanRequest,
+    TrackPlanResponse,
 )
+from .services.frame_difference import find_next_new_object_frame
 from .tracker import (
     OVERLAY_FILE_NAME,
     RESULT_FILE_NAME,
     _probe_video,
     get_tracker_engine,
     track_video,
+    rewind_tracking_results,
 )
 
 app = FastAPI(title="SAM3 Annotation Backend", version="3.0.0")
@@ -171,33 +182,44 @@ def save_manual(req: ManualAnnotationRequest, user: dict[str, Any] = Depends(cur
     batch_id = f"batch-{user['uid']}-{uuid.uuid4().hex[:10]}"
     rows = []
     for obj in req.objects:
+        # 数据库只记录人工新增/人工修改后的对象；AI Tracking 结果不进入人工结果库。
+        if obj.get("source") != "manual":
+            continue
         px = _px(obj, width, height)
         bbox = obj.get("bbox") if isinstance(obj.get("bbox"), dict) else None
         point = obj.get("point") if isinstance(obj.get("point"), dict) else None
+        # 逐对象取 frameIndex/timestampMs：一次保存可能包含多个视频帧，不能把请求当前帧覆盖所有对象。
+        obj_frame_index = int(obj.get("frameIndex", req.frameIndex) or 0)
+        obj_timestamp_ms = int(round(float(obj.get("timestampMs", req.timestampMs) or 0)))
         rows.append({
-            "user_id": user["uid"], "batch_id": batch_id, "object_id": str(obj.get("id", "")),
+            "user_id": user["uid"], "batch_id": batch_id,
+            "object_id": str(obj.get("objectId") if obj.get("objectId") is not None else obj.get("id", "")),
             "media_id": req.mediaId, "media_name": req.mediaName, "media_type": req.mediaType,
             "media_width": int(width) if width else None, "media_height": int(height) if height else None,
-            "frame_index": req.frameIndex, "timestamp_ms": int(req.timestampMs or 0),
+            "frame_index": obj_frame_index, "timestamp_ms": obj_timestamp_ms,
             "object_name": obj.get("name"), "source": obj.get("source", "manual"),
             "confidence": _num(obj.get("confidence")), "shape_type": "bbox" if bbox else "point",
             "pct_x": _num((bbox or point or {}).get("x")), "pct_y": _num((bbox or point or {}).get("y")),
             "pct_w": _num((bbox or {}).get("width")), "pct_h": _num((bbox or {}).get("height")),
             **px, "annotation_version": req.annotationVersion, "raw_json": raw,
         })
+    if not rows:
+        raise HTTPException(400, "没有可保存的人工标注对象（AI Tracking 结果不会写入人工标注数据库）")
     insert_annotations(rows)
     return {"id": f"annotation-{batch_id}", "batchId": batch_id, "ok": True, "count": len(rows)}
 
 
 @app.get("/api/annotation/projects/{project_id}/results")
 def results(project_id: str, mediaId: str | None = Query(default=None), user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
-    rows = list_annotations(user["uid"], mediaId)
+    # 标注结果页查看的是整张人工标注记录表，因此这里不按当前用户限制；
+    # 结果仍然只允许已登录用户访问，并且严格只返回 source=manual。
+    rows = list_annotations(None, mediaId, source="manual")
     return {"items": rows, "total": len(rows)}
 
 
 @app.get("/api/annotation/media/{media_id}")
 def results_by_media(media_id: str, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
-    rows = list_annotations(user["uid"], media_id)
+    rows = list_annotations(None, media_id, source="manual")
     return {"items": rows, "total": len(rows)}
 
 
@@ -354,13 +376,37 @@ def save_frame_annotations(req: dict[str, Any], user: dict[str, Any] = Depends(c
     annotations = req.get("annotations")
     if not req.get("mediaId") or frame < 0 or not isinstance(annotations, list) or not annotations:
         raise HTTPException(400, "mediaId/frameIndex/annotations 无效")
+
+    # Seed identity 必须由前端显式传递并保持稳定；严禁按数组顺序重新编号。
+    normalized_annotations: list[dict[str, Any]] = []
+    seen_object_ids: set[int] = set()
+    for idx, raw in enumerate(annotations):
+        if not isinstance(raw, dict):
+            raise HTTPException(400, f"annotations[{idx}] 无效")
+        object_id_raw = raw.get("object_id", raw.get("objectId"))
+        try:
+            object_id = int(object_id_raw)
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"annotations[{idx}] 缺少有效 object_id")
+        if object_id <= 0:
+            raise HTTPException(400, f"annotations[{idx}] object_id 必须大于 0")
+        if object_id in seen_object_ids:
+            raise HTTPException(400, f"当前帧存在重复 object_id={object_id}")
+        seen_object_ids.add(object_id)
+        ann = dict(raw)
+        ann["object_id"] = object_id
+        ann["objectId"] = object_id
+        ann["frameIndex"] = int(ann.get("frameIndex", frame))
+        if ann["frameIndex"] != frame:
+            raise HTTPException(400, f"annotations[{idx}] frameIndex 与当前 seed frame 不一致")
+        normalized_annotations.append(ann)
     directory = media_dir(str(req["mediaId"]))
     directory.mkdir(parents=True, exist_ok=True)
     payload = {
         "media": {"id": str(req["mediaId"]), "name": req.get("mediaName") or f"{req['mediaId']}.mp4", "type": "video", "width": req.get("mediaWidth"), "height": req.get("mediaHeight")},
         "frame": {"frameIndex": frame, "timestampMs": req.get("timestampMs", 0)},
         "coordinateSystem": {"source": "frontend-pixel", "target": "pixel", "bbox": "[x1, y1, x2, y2]"},
-        "annotations": annotations,
+        "annotations": normalized_annotations,
     }
     filename = f"annotations_frame_{frame:06d}.json"
     (directory / filename).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -402,6 +448,123 @@ def _run_tracking_task(task_id: str, req: TrackRequest, video: Path, seed_file: 
         _set_task(task_id, status="failed", message=str(exc))
 
 
+
+@app.post("/api/track/rewind")
+def rewind_tracking(req: dict[str, Any], user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+    """Start a new tracking branch from the current human-corrected frame.
+
+    Only rows strictly after startFrame in the previous SAM3 JSONL branch are deleted;
+    the start frame itself remains as the new authoritative seed anchor. This is deliberately separate
+    from /track/annotations so that only an explicit AI Tracking click rewinds the
+    previous future branch.
+    """
+    if tracking_is_busy():
+        raise HTTPException(409, "已有 SAM3 Tracking 任务正在运行，请等待完成")
+    media_id = str(req.get("mediaId") or "").strip()
+    try:
+        start_frame = int(req.get("startFrame"))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "startFrame 无效")
+    if not media_id or start_frame < 0:
+        raise HTTPException(400, "mediaId/startFrame 无效")
+
+    directory = media_dir(media_id)
+    video = find_video(directory)
+    if not video:
+        raise HTTPException(404, "视频文件不存在，请重新上传")
+    result_file = directory / RESULT_FILE_NAME
+    if result_file.exists():
+        try:
+            meta = json.loads((directory / "media.json").read_text(encoding="utf-8")) if (directory / "media.json").is_file() else {}
+        except Exception:
+            meta = {}
+        info = rewind_tracking_results(result_file, video, start_frame, meta)
+    else:
+        info = {
+            "cutoffFrame": start_frame,
+            "keptRows": 0,
+            "removedRows": 0,
+            "deletedFutureSeedFiles": 0,
+            "overlayRegenerated": False,
+        }
+    return {"ok": True, "mediaId": media_id, **info}
+
+
+@app.post("/api/track/plan", response_model=TrackPlanResponse)
+def plan_tracking(req: TrackPlanRequest, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+    """Run frame-difference planning before SAM3.
+
+    The frontend first saves the current-frame seed JSON, then this endpoint uses
+    that JSON plus the original MP4 to find the first persistent new-object cue.
+    The returned recommendedTrackFrames includes the seed frame itself.
+    """
+    directory = media_dir(req.mediaId)
+    video = find_video(directory)
+    if not video:
+        raise HTTPException(404, "视频文件不存在，请重新上传")
+
+    seed_name = req.seedFilename or f"annotations_frame_{req.startFrame:06d}.json"
+    # Prevent path traversal: only a filename produced inside this media directory is accepted.
+    seed_path = (directory / Path(seed_name).name).resolve()
+    try:
+        seed_path.relative_to(directory.resolve())
+    except ValueError:
+        raise HTTPException(400, "seedFilename 无效")
+    if not seed_path.is_file():
+        raise HTTPException(404, f"当前帧 JSON 不存在：{seed_path.name}")
+
+    roi_rect = None
+    if FRAME_DIFF_ROI_RECT.strip():
+        try:
+            vals = [int(v.strip()) for v in FRAME_DIFF_ROI_RECT.split(",")]
+            if len(vals) == 4:
+                roi_rect = tuple(vals)
+        except ValueError:
+            roi_rect = None
+
+    try:
+        result = find_next_new_object_frame(
+            str(video),
+            str(seed_path),
+            req.startFrame,
+            diff_threshold=FRAME_DIFF_THRESHOLD,
+            known_margin=FRAME_DIFF_KNOWN_MARGIN,
+            min_area=FRAME_DIFF_MIN_AREA,
+            min_area_ratio=FRAME_DIFF_MIN_AREA_RATIO,
+            confirm_frames=FRAME_DIFF_CONFIRM_FRAMES,
+            max_search_frames=FRAME_DIFF_MAX_SEARCH_FRAMES,
+            template_match_threshold=FRAME_DIFF_TEMPLATE_THRESHOLD,
+            max_confirm_miss=FRAME_DIFF_MAX_CONFIRM_MISS,
+            roi_rect=roi_rect,
+            verbose_log=FRAME_DIFF_VERBOSE_LOG,
+        )
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    recommended = max(1, min(result.recommended_track_frames, TRACK_FRAMES))
+    message = result.message
+    if result.frame_offset is not None and recommended < result.recommended_track_frames:
+        message = (
+            f"{message} 但 SAM3 单次安全上限为 {TRACK_FRAMES} 帧，"
+            f"本次实际提交 {recommended} 帧。"
+        )
+
+    return {
+        "mediaId": req.mediaId,
+        "startFrame": req.startFrame,
+        "status": result.status,
+        "newObjectFrame": result.frame_index,
+        "frameOffset": result.frame_offset,
+        "recommendedTrackFrames": recommended,
+        "searchFrames": result.search_frames,
+        "knownBoxCount": result.known_box_count,
+        "bbox": list(result.bbox) if result.bbox is not None else None,
+        "score": result.score,
+        "message": message,
+        "seedFilename": seed_path.name,
+        "willReachNewObject": result.frame_offset is not None and recommended == result.recommended_track_frames,
+    }
+
 @app.post("/api/track", status_code=202)
 def start_tracking(req: TrackRequest, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     if tracking_is_busy():
@@ -410,6 +573,32 @@ def start_tracking(req: TrackRequest, user: dict[str, Any] = Depends(current_use
         raise HTTPException(400, f"单次 Tracking 最多 {TRACK_FRAMES} 帧")
     if not req.annotations:
         raise HTTPException(400, "没有 Tracking seed bbox")
+
+    # 与 /track/annotations 相同的强校验：直接调用 /track 也不能绕过稳定 ID 约束。
+    seen_object_ids: set[int] = set()
+    normalized_request_annotations: list[dict[str, Any]] = []
+    for idx, raw in enumerate(req.annotations):
+        if not isinstance(raw, dict):
+            raise HTTPException(400, f"annotations[{idx}] 无效")
+        raw_id = raw.get("object_id", raw.get("objectId"))
+        try:
+            object_id = int(raw_id)
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"annotations[{idx}] 缺少有效 object_id")
+        if object_id <= 0:
+            raise HTTPException(400, f"annotations[{idx}] object_id 必须大于 0")
+        if object_id in seen_object_ids:
+            raise HTTPException(400, f"当前 Tracking seed 存在重复 object_id={object_id}")
+        seen_object_ids.add(object_id)
+        ann = dict(raw)
+        ann["object_id"] = object_id
+        ann["objectId"] = object_id
+        ann["frameIndex"] = int(ann.get("frameIndex", req.startFrame))
+        if ann["frameIndex"] != req.startFrame:
+            raise HTTPException(400, f"annotations[{idx}] frameIndex 与 startFrame 不一致")
+        normalized_request_annotations.append(ann)
+
+    req.annotations = normalized_request_annotations
     directory = media_dir(req.mediaId)
     video = find_video(directory)
     if not video:
@@ -641,6 +830,53 @@ def video(media_id: str) -> FileResponse:
     if not file:
         raise HTTPException(404, "视频不存在")
     return FileResponse(file, media_type="video/mp4", filename=file.name, content_disposition_type="inline")
+
+
+
+@app.get("/api/track/frame/{media_id}/{frame_index}")
+def video_frame(media_id: str, frame_index: int, user: dict[str, Any] = Depends(current_user)) -> Response:
+    """返回原始视频的精确第 frame_index 帧。\n\n    精确逐帧标注模式不再依赖浏览器 currentTime/seek 的实际呈现帧；\n    后端直接从源 MP4 解码指定帧，并以 JPEG 返回给前端。\n    """
+    if frame_index < 0:
+        raise HTTPException(400, "frame_index 不能小于 0")
+
+    directory = media_dir(media_id)
+    file = find_video(directory)
+    if not file:
+        raise HTTPException(404, "视频不存在")
+
+    # 小型磁盘缓存：同一帧反复切换时无需重复解码。
+    cache_dir = directory / ".frame_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_dir / f"frame_{frame_index:08d}.jpg"
+    if cache_file.is_file() and cache_file.stat().st_size > 0:
+        return FileResponse(cache_file, media_type="image/jpeg", filename=cache_file.name, headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+    try:
+        import cv2
+        cap = cv2.VideoCapture(str(file))
+        if not cap.isOpened():
+            raise HTTPException(500, "无法打开源视频")
+
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        if total and frame_index >= total:
+            cap.release()
+            raise HTTPException(404, f"视频只有 {total} 帧，无法访问第 {frame_index} 帧")
+
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+        ok, frame = cap.read()
+        cap.release()
+        if not ok or frame is None:
+            raise HTTPException(404, f"无法解码第 {frame_index} 帧")
+
+        ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        if not ok:
+            raise HTTPException(500, f"第 {frame_index} 帧 JPEG 编码失败")
+        cache_file.write_bytes(encoded.tobytes())
+        return Response(content=encoded.tobytes(), media_type="image/jpeg", headers={"Cache-Control": "public, max-age=31536000, immutable"})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"读取第 {frame_index} 帧失败：{exc}") from exc
 
 
 @app.get("/api/track/overlay/{media_id}")

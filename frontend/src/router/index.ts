@@ -1,10 +1,10 @@
 import { ref } from 'vue'
 import { useAuth } from '../stores/auth'
 
-export type RoutePath = '/login' | '/annotate' | '/results' | '/effects'
+export type RoutePath = '/login' | '/annotate' | '/results'
 
 const normalizePath = (path: string): RoutePath => {
-  if (path === '/login' || path === '/results' || path === '/effects') return path
+  if (path === '/login' || path === '/results') return path
   return '/annotate'
 }
 

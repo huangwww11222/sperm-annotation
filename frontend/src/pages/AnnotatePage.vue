@@ -6,7 +6,7 @@ const {
   mediaAssets, selectedMediaId, activeTool, objectNameInput, selectedObjectId,
   currentFrame, currentTime, videoDuration, videoFps, frameInput, isPlaying,
   isAiBusy, statusMessage, toastMessage,
-  imageRef, videoRef, annotationHitRef, fileInputRef, videoInputRef,
+  imageRef, videoRef, exactFrameImageRef, exactFrameUrl, exactFrameLoading, annotationHitRef, fileInputRef, videoInputRef,
   annotationsByMedia, selectedMedia, isVideo, maxFrameIndex, currentMediaId,
   currentObjects, selectedObject, anomalyObjectIds, anomalyFrames, formatTime, addObject, resetVideoViewToFirstFrame, trackingFrameCount,
   ensureVideoFirstFrame, selectTool, onStageClick, tempBbox, onBboxDown, onBboxMove,
@@ -14,9 +14,9 @@ const {
   copyPreviousFrame, brightness, contrast, mediaFilterStyle, resetMediaFilter, annotatedFrameCount,
   clearSelection, openFilePicker, handleFiles, onImageLoaded, onVideoLoaded,
   onVideoTimeUpdate, seekToInputFrame, togglePlayback, onVideoEnded,
-  onTimelineClick, runAiSegment, runAiTrack, selectSaveFolder, generateAnnotationsJson,
-  saveAnnotation, exportDataset, resetAnnotationViewForMedia, seekByFrame,
-  zoom, zoomIn, zoomOut, zoomReset, deleteMedia,
+  onTimelineClick, runAiTrack, generateAnnotationsJson,
+  exportDataset, resetAnnotationViewForMedia, seekByFrame,
+  zoom, zoomIn, zoomOut, zoomReset, deleteMedia, openAnnotationFolderPicker, handleAnnotationFolderFiles,
 } = useWorkspace()
 
 // 画布滚动容器
@@ -83,9 +83,6 @@ const onKeyDown = (e: KeyboardEvent) => {
       break
     case 'y': case 'Y':
       if (e.ctrlKey || e.metaKey) { e.preventDefault(); redo() }
-      break
-    case 's': case 'S':
-      if (e.ctrlKey || e.metaKey) { e.preventDefault(); saveAnnotation() }
       break
     case 'c': case 'C':
       if (isVideo.value) copyPreviousFrame()
@@ -185,17 +182,17 @@ watch([containerW, containerH], () => {
             <div class="flex items-center gap-2 text-[11px]">
               <span class="flex items-center gap-1 rounded-full px-2.5 py-1 font-medium" :class="currentObjects.length ? 'bg-emerald-500/15 text-emerald-300' : 'bg-slate-800 text-slate-400'">① 标注</span>
               <span class="text-slate-600">→</span>
-              <span class="flex items-center gap-1 rounded-full px-2.5 py-1 font-medium" :class="statusMessage.includes('保存成功') ? 'bg-emerald-500/15 text-emerald-300' : 'bg-slate-800 text-slate-400'">② 保存</span>
+              <span class="flex items-center gap-1 rounded-full px-2.5 py-1 font-medium" :class="statusMessage.includes('已写入数据库') ? 'bg-emerald-500/15 text-emerald-300' : 'bg-slate-800 text-slate-400'">② 自动入库</span>
               <span class="text-slate-600">→</span>
-              <span class="flex items-center gap-1 rounded-full px-2.5 py-1 font-medium" :class="isAiBusy ? 'bg-indigo-500/15 text-indigo-300' : 'bg-slate-800 text-slate-400'">③ AI Tracking</span>
+              <span class="flex items-center gap-1 rounded-full px-2.5 py-1 font-medium" :class="isAiBusy ? 'bg-indigo-500/15 text-indigo-300' : 'bg-slate-800 text-slate-400'">③ 帧差 → SAM3</span>
             </div>
           </div>
           <div class="flex gap-2">
             <input ref="fileInputRef" type="file" accept="image/*" multiple class="hidden" @change="handleFiles(($event.target as HTMLInputElement).files, 'image')" />
             <input ref="videoInputRef" type="file" accept="video/*" multiple class="hidden" @change="handleFiles(($event.target as HTMLInputElement).files, 'video')" />
+            <input ref="annotationFolderInputRef" type="file" accept="video/mp4,.mp4,application/json,.json" webkitdirectory directory multiple class="hidden" @change="handleAnnotationFolderFiles(($event.target as HTMLInputElement).files)" />
             <button class="btn-secondary" @click="openFilePicker('image')">上传图片</button>
             <button class="btn-secondary" @click="openFilePicker('video')">上传视频</button>
-            <button class="btn-secondary" @click="selectSaveFolder">选择保存文件夹</button>
           </div>
         </div>
 
@@ -204,12 +201,16 @@ watch([containerW, containerH], () => {
           <aside class="panel min-h-0 overflow-hidden">
             <div class="panel-title"><span>素材</span><span class="badge">{{ mediaAssets.length }}</span></div>
             <div class="h-[calc(100%-49px)] space-y-2 overflow-y-auto p-3">
-              <button
+              <div
                 v-for="media in mediaAssets"
                 :key="media.id"
-                class="group flex w-full items-center gap-3 rounded-xl border p-3 text-left transition"
+                class="group flex w-full items-center gap-3 rounded-xl border p-3 text-left transition cursor-pointer"
                 :class="selectedMediaId === media.id ? 'border-indigo-400 bg-indigo-500/10' : 'border-slate-800 bg-slate-900/50 hover:border-slate-700'"
+                role="button"
+                tabindex="0"
                 @click="selectedMediaId = media.id"
+                @keydown.enter="selectedMediaId = media.id"
+                @keydown.space.prevent="selectedMediaId = media.id"
               >
                 <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-slate-800 text-[10px] font-bold text-indigo-300">{{ media.type === 'video' ? 'VID' : 'IMG' }}</div>
                 <div class="min-w-0 flex-1">
@@ -225,7 +226,7 @@ watch([containerW, containerH], () => {
                 >
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                 </button>
-              </button>
+              </div>
             </div>
           </aside>
 
@@ -240,6 +241,7 @@ watch([containerW, containerH], () => {
                 </p>
               </div>
               <div class="flex gap-2">
+                <button class="tool-btn" :class="activeTool === 'select' ? 'active' : ''" :disabled="isAiBusy" @click="selectTool('select')">选择框 <kbd class="ml-1 text-[9px] opacity-50">V</kbd></button>
                 <button class="tool-btn" :class="activeTool === 'point' ? 'active' : ''" :disabled="isAiBusy" @click="selectTool('point')">点标注 <kbd class="ml-1 text-[9px] opacity-50">P</kbd></button>
                 <button class="tool-btn" :class="activeTool === 'bbox' ? 'active' : ''" :disabled="isAiBusy" @click="selectTool('bbox')">框标注 <kbd class="ml-1 text-[9px] opacity-50">B</kbd></button>
               </div>
@@ -256,19 +258,38 @@ watch([containerW, containerH], () => {
                   :style="{ width: `${stageSize.w}px`, height: `${stageSize.h}px` }"
                 >
                     <template v-if="selectedMedia">
-                    <video
-                      v-if="isVideo"
-                      :key="selectedMedia.id"
-                      ref="videoRef"
-                      :src="selectedMedia.url"
-                      class="block h-full w-full select-none object-contain"
-                      :style="{ filter: mediaFilterStyle }"
-                      preload="metadata"
-                      playsinline
-                      @loadedmetadata="onVideoLoaded"
-                      @timeupdate="onVideoTimeUpdate"
-                      @ended="onVideoEnded"
-                    />
+                    <template v-if="isVideo">
+                      <!-- 播放时使用 video；暂停/逐帧标注时使用后端按 frame_index 返回的精确原始帧。 -->
+                      <video
+                        :key="selectedMedia.id"
+                        ref="videoRef"
+                        :src="selectedMedia.url"
+                        class="block h-full w-full select-none object-contain"
+                        :class="exactFrameUrl && !isPlaying ? 'invisible absolute inset-0' : ''"
+                        :style="{ filter: mediaFilterStyle }"
+                        preload="metadata"
+                        playsinline
+                        @loadedmetadata="onVideoLoaded"
+                        @timeupdate="onVideoTimeUpdate"
+                        @ended="onVideoEnded"
+                      />
+                      <img
+                        v-if="exactFrameUrl && !isPlaying"
+                        ref="exactFrameImageRef"
+                        :src="exactFrameUrl"
+                        :alt="`${selectedMedia.name} frame ${currentFrame}`"
+                        class="absolute inset-0 block h-full w-full select-none object-contain"
+                        :style="{ filter: mediaFilterStyle }"
+                      />
+                      <div
+                        v-if="exactFrameLoading && !isPlaying"
+                        class="pointer-events-none absolute inset-0 z-35 flex items-center justify-center bg-black/20"
+                      >
+                        <div class="rounded-lg border border-slate-700 bg-slate-950/80 px-3 py-2 text-xs text-slate-300">
+                          正在读取第 {{ currentFrame }} 帧…
+                        </div>
+                      </div>
+                    </template>
                     <img
                       v-else
                       :key="selectedMedia.id"
@@ -284,7 +305,7 @@ watch([containerW, containerH], () => {
 
                     <div
                       ref="annotationHitRef"
-                      class="absolute inset-0 z-20 cursor-crosshair select-none"
+                      :class="['absolute', 'inset-0', 'z-20', 'select-none', activeTool === 'select' ? 'cursor-move' : 'cursor-crosshair']"
                       style="touch-action: none;"
                       @click="onStageClick"
                       @pointerdown="onBboxDown"
@@ -348,8 +369,8 @@ watch([containerW, containerH], () => {
             </div>
 
             <div v-if="anomalyObjectIds.length > 0" class="shrink-0 border-t border-amber-700 bg-amber-950/80 px-4 py-2 text-[11px] text-amber-300">
-              ⚠️ 检测到异常，Tracking 已暂停。请修正第 {{ currentFrame }} 帧的标注框（异常对象：
-              {{ anomalyObjectIds.join(', ') }}），然后重新点击 AI Tracking 继续。
+              ⚠️ 检测到异常，Tracking 已暂停在第 {{ currentFrame }} 帧。
+              异常对象：{{ anomalyObjectIds.join(', ') }}。请检查/修正这一帧的标注后，再点击 AI Tracking 继续。
             </div>
 
             <div v-if="isVideo" class="shrink-0 border-t border-slate-800 bg-slate-950/80 px-4 py-3">
@@ -394,14 +415,14 @@ watch([containerW, containerH], () => {
 
             <div class="flex shrink-0 items-center justify-between border-t border-slate-800 px-4 py-3">
               <div class="text-[11px] text-slate-500">
-                当前工具：<span class="text-indigo-300">{{ activeTool === 'point' ? '点标注' : '框标注' }}</span>
+                当前工具：<span class="text-indigo-300">{{ activeTool === 'select' ? '选择框' : activeTool === 'point' ? '点标注' : '框标注' }}</span>
                 <span class="mx-2">·</span>{{ statusMessage }}
-                <span class="ml-3 text-slate-600">快捷键：<kbd>←/→</kbd>切帧 <kbd>Del</kbd>删除 <kbd>P/B</kbd>切工具 <kbd>Ctrl+Z</kbd>撤销 <kbd>Ctrl+Y</kbd>重做 <kbd>Ctrl+S</kbd>保存 <kbd>C</kbd>复制上一帧 <kbd>Esc</kbd>取消</span>
+                <span class="ml-3 text-slate-600">快捷键：<kbd>←/→</kbd>切帧 <kbd>Del</kbd>删除 <kbd>V/P/B</kbd>选择/点/框 <kbd>Ctrl+Z</kbd>撤销 <kbd>Ctrl+Y</kbd>重做 <kbd>C</kbd>复制上一帧 <kbd>Esc</kbd>取消</span>
               </div>
               <div class="flex gap-2">
                 <button class="btn-secondary" @click="clearSelection">取消选择</button>
                 <button class="btn-secondary" :disabled="isAiBusy || !annotatedFrameCount" @click="exportDialogOpen = true">导出训练数据集</button>
-                <button class="btn-primary" :disabled="isAiBusy" @click="saveAnnotation">保存标注</button>
+                <button class="btn-secondary" :disabled="isAiBusy" @click="openAnnotationFolderPicker">加载标注</button>
               </div>
             </div>
           </section>
@@ -422,14 +443,10 @@ watch([containerW, containerH], () => {
             <section class="panel shrink-0 p-4">
               <div class="mb-3">
                 <h3 class="text-sm font-semibold">AI 辅助</h3>
-                <p class="mt-1 text-[10px] leading-4 text-slate-500">当前接入后端 SAM3；每次从当前帧人工框开始，生成当前帧起连续 {{ trackingFrameCount }} 帧 tracking JSON。</p>
+                <p class="mt-1 text-[10px] leading-4 text-slate-500">当前流程：①当前帧人工标注自动入库 → ②生成 seed JSON → ③帧差分析决定追踪帧数 → ④交给后端 SAM3 追踪；完成后定位到候选新目标帧。</p>
               </div>
-              <div class="mb-2 rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-300">Prompt：{{ objectNameInput || 'rare sperm' }}</div>
-              <div class="grid grid-cols-2 gap-2">
-                <button class="btn-primary" :disabled="isAiBusy" @click="runAiSegment">AI 检测 / 分割</button>
-                <button class="btn-secondary" :disabled="isAiBusy || !isVideo || !currentObjects.length" @click="runAiTrack">AI Tracking</button>
-              </div>
-              <p v-if="isVideo" class="mt-2 text-[10px] text-amber-300/80">Tracking 的种子目标来自当前帧人工 bbox；Tracking 运行期间人工标注锁定；完成后自动寻找下一个没有标注的帧。每次帧数由后端统一配置，SAM3 模型只加载一次并复用。</p>
+              <button class="btn-secondary w-full" :disabled="isAiBusy || !isVideo || !currentObjects.some((o) => o.bbox)" @click="runAiTrack">AI Tracking</button>
+              <p v-if="isVideo" class="mt-2 text-[10px] text-amber-300/80">点击 AI Tracking 会自动把当前帧人工标注写入数据库，再生成 seed JSON → 帧差规划 → SAM3 追踪；完成后自动定位到下一目标帧供人工确认。</p>
             </section>
 
             <section class="panel flex min-h-0 flex-1 flex-col overflow-hidden">

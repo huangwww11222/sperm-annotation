@@ -23,6 +23,7 @@ export interface TrackUploadResponse {
   height?: number
   duration?: number
   fps?: number
+  frameCount?: number
 }
 
 export interface TrackRunResponse {
@@ -33,13 +34,38 @@ export interface TrackRunResponse {
   seedFile?: string
 }
 
+
+export interface TrackPlanResponse {
+  mediaId: string
+  startFrame: number
+  status: 'new_object_found' | 'no_new_object' | 'invalid' | string
+  newObjectFrame?: number | null
+  frameOffset?: number | null
+  recommendedTrackFrames: number
+  searchFrames: number
+  knownBoxCount: number
+  bbox?: [number, number, number, number] | null
+  score?: number | null
+  message: string
+  seedFilename: string
+  willReachNewObject?: boolean
+}
+
 export interface TrackStatusResponse {
   taskId: string
   status: 'queued' | 'running' | 'success' | 'failed' | 'paused'
   message?: string
   paused?: boolean
   pausedFrame?: number
-  pausedObjects?: Array<{ object_id: number; type: string; ratio: number; prevArea: number; currArea: number }>
+  pausedObjects?: Array<{
+    object_id: number
+    type: string
+    reasons?: string[]
+    details?: Record<string, unknown>
+    ratio?: number | null
+    prevArea?: number | null
+    currArea?: number | null
+  }>
   anomalyLevels?: Record<string, string>
   processedFrames?: number
 }
@@ -81,6 +107,34 @@ export const trackApi = {
     })
   },
 
+
+  async rewind(input: { mediaId: string; startFrame: number }) {
+    return jsonRequest<{
+      ok: boolean
+      mediaId: string
+      cutoffFrame: number
+      keptRows: number
+      removedRows: number
+      deletedFutureSeedFiles: number
+      overlayRegenerated: boolean
+    }>('/track/rewind', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    })
+  },
+
+  async plan(input: {
+    mediaId: string
+    mediaName: string
+    startFrame: number
+    seedFilename?: string
+  }) {
+    return jsonRequest<TrackPlanResponse>('/track/plan', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    })
+  },
+
   async run(input: {
     mediaId: string
     mediaName: string
@@ -95,6 +149,19 @@ export const trackApi = {
 
   async getStatus(taskId: string) {
     return jsonRequest<TrackStatusResponse>(`/track/status/${encodeURIComponent(taskId)}`)
+  },
+
+  async getFrameBlob(mediaId: string, frameIndex: number): Promise<Blob> {
+    const res = await fetch(`/api/track/frame/${encodeURIComponent(mediaId)}/${encodeURIComponent(frameIndex)}`, {
+      headers: {
+        ...(tokenStore.get() ? { Authorization: `Bearer ${tokenStore.get()}` } : {}),
+      },
+    })
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      throw new Error((data as any)?.message || (data as any)?.detail || `读取第 ${frameIndex} 帧失败 (${res.status})`)
+    }
+    return res.blob()
   },
 
   async getResult(mediaId: string, frameIndex?: number) {

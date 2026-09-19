@@ -1,0 +1,41 @@
+{
+  "errors": [],
+  "logs": [
+    {
+      "type": "debug",
+      "text": "[vite] connecting..."
+    },
+    {
+      "type": "debug",
+      "text": "[vite] connected."
+    },
+    {
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"
+    },
+    {
+      "type": "error",
+      "text": "[annotation.frame_failed] {mediaId: server-ux-video, frameIndex: 45, error: Error: Injected frame read failure\n    at Object.getFrameBlob (http://127.0.0.1:5373/src/api/trackA…}"
+    },
+    {
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"
+    },
+    {
+      "type": "error",
+      "text": "[annotation.workspace_save_failed] {mediaId: server-ux-video, ticket: 1, error: Error: Injected save failure\n    at jsonRequest (http://127.0.0.1:5373/src/api/trackApi.ts:15:11)\n …}"
+    },
+    {
+      "type": "warning",
+      "text": "工作区状态保存失败： Error: Injected save failure\n    at jsonRequest (http://127.0.0.1:5373/src/api/trackApi.ts:15:11)\n    at async persistWorkspaceState (http://127.0.0.1:5373/src/stores/workspace.ts:693:7)"
+    },
+    {
+      "type": "debug",
+      "text": "[vite] connecting..."
+    },
+    {
+      "type": "debug",
+      "text": "[vite] connected."
+    }
+  ]
+}

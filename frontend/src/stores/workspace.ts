@@ -87,8 +87,9 @@ const createWorkspace = () => {
     if (toastTimer) clearTimeout(toastTimer)
     toastTimer = setTimeout(() => { toastMessage.value = '' }, 2800)
   }
-  const saveFolderHandle = ref<any>(null)
   const savedResults = ref<SavedAnnotationFile[]>([])
+  const loadedRemoteResultKeys = new Set<string>()
+  let remoteResultsLoaded = false
   const effectResults = ref<EffectResult[]>([])
   const selectedEffectId = ref<string | null>(null)
   const effectTime = ref(0)
@@ -97,9 +98,14 @@ const createWorkspace = () => {
 
   const imageRef = ref<HTMLImageElement | null>(null)
   const videoRef = ref<HTMLVideoElement | null>(null)
+  const exactFrameImageRef = ref<HTMLImageElement | null>(null)
+  const exactFrameUrl = ref<string | null>(null)
+  const exactFrameLoading = ref(false)
+  let exactFrameRequestSerial = 0
   const annotationHitRef = ref<HTMLDivElement | null>(null)
   const fileInputRef = ref<HTMLInputElement | null>(null)
   const videoInputRef = ref<HTMLInputElement | null>(null)
+  const annotationFolderInputRef = ref<HTMLInputElement | null>(null)
   const effectFolderInputRef = ref<HTMLInputElement | null>(null)
 
   // 从 localStorage 恢复标注数据
@@ -166,10 +172,16 @@ const createWorkspace = () => {
   let trackingLoadSerial = 0
   let lastTrackingPollAt = 0
   let videoFrameCallbackId: number | null = null
+  let seekSerial = 0
+  let isSeekingVideo = false
 
   const selectedMedia = computed(() => mediaAssets.value.find((item) => item.id === selectedMediaId.value) ?? mediaAssets.value[0] ?? null)
   const isVideo = computed(() => selectedMedia.value?.type === 'video')
-  const maxFrameIndex = computed(() => Math.max(0, Math.ceil(videoDuration.value * videoFps.value) - 1))
+  const maxFrameIndex = computed(() => {
+    const media = selectedMedia.value
+    if (media?.frameCount && media.frameCount > 0) return Math.max(0, media.frameCount - 1)
+    return Math.max(0, Math.ceil(videoDuration.value * videoFps.value) - 1)
+  })
 
   /** 视频按真实 currentFrame 标注；Tracking 从当前人工标注帧开始。 */
   const currentMediaId = computed(() => selectedMediaId.value)
@@ -204,6 +216,17 @@ const createWorkspace = () => {
   const timeToFrame = (time: number) => Math.max(0, Math.round(time * videoFps.value))
   const frameToTime = (frame: number) => frame / videoFps.value
 
+  // 浏览器实际呈现帧优先使用 requestVideoFrameCallback 的 mediaTime。
+  // 对严格 CFR 视频，mediaTime 与 frameIndex 的关系为 frame / fps；
+  // 不再用 video.currentTime 在 seek 尚未真正呈现时提前切换标注帧。
+  const commitPresentedFrame = (mediaTime: number) => {
+    const time = Number.isFinite(mediaTime) ? Math.max(0, mediaTime) : 0
+    const frame = timeToFrame(time)
+    currentTime.value = time
+    currentFrame.value = Math.max(0, Math.min(maxFrameIndex.value, frame))
+    frameInput.value = currentFrame.value
+  }
+
   const getStagePoint = (event: MouseEvent | PointerEvent) => {
     const stage = annotationHitRef.value
     if (!stage) return { x: 50, y: 50 }
@@ -215,16 +238,29 @@ const createWorkspace = () => {
     }
   }
 
+  const baseObjectName = (name: string) => {
+    const cleaned = name.trim() || 'rare sperm'
+    return cleaned.replace(/\s+\d+$/, '').trim() || 'rare sperm'
+  }
+
+  const numberedObjectName = (name: string, objectId: number) => `${baseObjectName(name)} ${objectId}`
+
+  const normalizeAnnotationObject = (obj: AnnotationObject, fallbackObjectId: number): AnnotationObject => {
+    const objectId = typeof obj.objectId === 'number' ? obj.objectId : fallbackObjectId
+    return { ...obj, objectId, name: numberedObjectName(obj.name, objectId) }
+  }
+
   const addObject = (point: { x: number; y: number }, bbox?: { x: number; y: number; width: number; height: number }) => {
     if (isAiBusy.value) { showToast('SAM3 Tracking 运行中，暂时禁止人工标注'); return }
     const mediaId = currentMediaId.value
     const media = mediaAssets.value.find((item) => item.id === mediaId)
     if (!media) return
     snapshotUndo()
-    const name = objectNameInput.value.trim() || '未命名目标'
+    const objectId = getNextObjectId(mediaId)
+    const name = numberedObjectName(objectNameInput.value.trim() || 'rare sperm', objectId)
     const object: AnnotationObject = {
       id: `manual-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      objectId: getNextObjectId(mediaId),
+      objectId,
       name,
       source: 'manual',
       point: bbox ? undefined : { ...point },
@@ -239,30 +275,76 @@ const createWorkspace = () => {
     statusMessage.value = `已添加：${name}${media.type === 'video' ? `（第 ${currentFrame.value} 帧）` : ''}`
   }
 
+  const revokeExactFrameUrl = () => {
+    if (exactFrameUrl.value) {
+      try { URL.revokeObjectURL(exactFrameUrl.value) } catch {}
+      exactFrameUrl.value = null
+    }
+  }
+
+  const loadExactFrame = async (frameIndex: number, mediaId = currentMediaId.value) => {
+    const media = mediaAssets.value.find((item) => item.id === mediaId)
+    if (!media || media.type !== 'video' || !media.serverMediaId) return false
+    const serial = ++exactFrameRequestSerial
+    exactFrameLoading.value = true
+    try {
+      const blob = await trackApi.getFrameBlob(media.serverMediaId, frameIndex)
+      if (serial !== exactFrameRequestSerial || mediaId !== currentMediaId.value) return false
+      const url = URL.createObjectURL(blob)
+      revokeExactFrameUrl()
+      exactFrameUrl.value = url
+      currentFrame.value = frameIndex
+      frameInput.value = frameIndex
+      currentTime.value = frameToTime(frameIndex)
+      await nextTick()
+      return true
+    } finally {
+      if (serial === exactFrameRequestSerial) exactFrameLoading.value = false
+    }
+  }
+
   const resetVideoViewToFirstFrame = (mediaId = currentMediaId.value) => {
     if (currentMediaId.value !== mediaId || !isVideo.value) return
     currentFrame.value = 0
     currentTime.value = 0
     frameInput.value = 0
+    revokeExactFrameUrl()
     if (videoRef.value?.readyState) {
       try { videoRef.value.currentTime = 0 } catch { }
     }
+    void loadExactFrame(0, mediaId)
   }
 
   const ensureVideoFirstFrame = async (_mediaId = currentMediaId.value) => true
+
+  const toolLabel = (tool: AnnotationTool) =>
+    tool === 'select' ? '选择框' : tool === 'point' ? '点标注' : '框标注'
 
   const selectTool = (tool: AnnotationTool) => {
     if (isAiBusy.value) { showToast('SAM3 Tracking 运行中，暂时禁止人工标注'); return }
     activeTool.value = tool
     statusMessage.value = isVideo.value
-      ? `已切换到${tool === 'point' ? '点标注' : '框标注'} · 当前第 ${currentFrame.value} 帧`
-      : `已切换到${tool === 'point' ? '点标注' : '框标注'}`
+      ? `已切换到${toolLabel(tool)} · 当前第 ${currentFrame.value} 帧`
+      : `已切换到${toolLabel(tool)}`
   }
 
   const onStageClick = (event: MouseEvent) => {
     if (isAiBusy.value) return
     // 如果本次按下命中了已有框，跳过 click（防止添加新点标注覆盖选中）
     if (hitExisting) { hitExisting = false; return }
+    if (activeTool.value === 'select') {
+      const point = getStagePoint(event)
+      const hit = [...currentObjects.value].reverse().find((obj) => obj.bbox && pointInBbox(point.x, point.y, obj.bbox))
+      if (hit) {
+        selectedObjectId.value = hit.id
+        statusMessage.value = `已选中 ${hit.name}`
+      } else {
+        clearSelection()
+      }
+      event.preventDefault()
+      event.stopPropagation()
+      return
+    }
     if (activeTool.value !== 'point') return
     event.preventDefault()
     event.stopPropagation()
@@ -304,6 +386,30 @@ const createWorkspace = () => {
       try { stage.setPointerCapture(event.pointerId) } catch { }
     }
     const point = getStagePoint(event)
+
+    // 选择框模式：点击选中，同时允许对命中的框直接拖拽移动；
+    // 点击四角手柄可缩放。此模式不会创建新框。
+    if (activeTool.value === 'select') {
+      const hit = [...currentObjects.value].reverse().find((obj) => obj.bbox && pointInBbox(point.x, point.y, obj.bbox))
+      if (!hit?.bbox) {
+        clearSelection()
+        bboxPointerId = null
+        hitExisting = false
+        return
+      }
+
+      selectedObjectId.value = hit.id
+      draggingObjectId = hit.id
+      dragStartPoint = point
+      dragStartBbox = { ...hit.bbox }
+      dragMoved = false
+      resizeHandle = getResizeHandle(point.x, point.y, hit.bbox)
+      hitExisting = true
+      statusMessage.value = resizeHandle
+        ? `已选中 ${hit.name}，拖拽角点可调整框大小`
+        : `已选中 ${hit.name}，拖拽可移动框位置`
+      return
+    }
 
     // 1. 优先检测：已选中框的角点（允许框外一定范围命中）
     if (selectedObjectId.value) {
@@ -483,7 +589,7 @@ const createWorkspace = () => {
     if (!selectedObjectId.value || !name) return
     snapshotUndo()
     const mediaId = currentMediaId.value
-    annotationsByMedia.value = { ...annotationsByMedia.value, [mediaId]: currentObjects.value.map((obj) => obj.id === selectedObjectId.value ? { ...obj, name } : obj) }
+    annotationsByMedia.value = { ...annotationsByMedia.value, [mediaId]: currentObjects.value.map((obj) => obj.id === selectedObjectId.value ? { ...obj, name, source: 'manual' as const } : obj) }
     statusMessage.value = `对象已命名为：${name}`
   }
 
@@ -565,6 +671,7 @@ const createWorkspace = () => {
           if (uploaded.height) media.height = uploaded.height
           if (uploaded.duration) media.duration = uploaded.duration
           if (uploaded.fps) media.fps = uploaded.fps
+          if ((uploaded as any).frameCount) media.frameCount = (uploaded as any).frameCount
           trackingFramesByMedia.value[media.id] = []
         } catch (error) {
           console.error('视频上传到 Tracking 后端失败:', error)
@@ -588,6 +695,140 @@ const createWorkspace = () => {
     if (type === 'video' && videoInputRef.value) videoInputRef.value.value = ''
   }
 
+  const parseTrackerResults = (text: string): { rows: any[]; meta: any } => {
+    const trimmed = text.trim()
+    if (!trimmed) return { rows: [], meta: {} }
+    try {
+      const parsed = JSON.parse(trimmed)
+      if (Array.isArray(parsed)) return { rows: parsed, meta: {} }
+      if (parsed?.frames && Array.isArray(parsed.frames)) return { rows: parsed.frames, meta: parsed }
+      if (parsed?.results && Array.isArray(parsed.results)) return { rows: parsed.results, meta: parsed }
+      if (parsed && typeof parsed === 'object' && 'frame_index' in parsed) return { rows: [parsed], meta: parsed }
+    } catch { /* JSONL */ }
+    const rows = trimmed.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).flatMap((line) => {
+      try {
+        const value = JSON.parse(line)
+        return value?.frame_index !== undefined || value?.frameIndex !== undefined ? [value] : []
+      } catch { return [] }
+    })
+    return { rows, meta: {} }
+  }
+
+  const loadTrackerFolder = async (videoFile: File, trackerFile: File) => {
+    const { rows, meta } = parseTrackerResults(await trackerFile.text())
+    if (!rows.length) throw new Error('tracker_results.json 中没有可用的逐帧标注')
+
+    const mediaId = `loaded-${crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`} `
+    const safeMediaId = mediaId.trim()
+    const mediaMeta = meta?.media || {}
+    const trackingMeta = meta?.tracking || {}
+    const videoUrl = URL.createObjectURL(videoFile)
+    const probe = document.createElement('video')
+    probe.preload = 'metadata'
+    probe.src = videoUrl
+    const probed = await new Promise<{ width: number; height: number; duration: number }>((resolve) => {
+      const done = () => resolve({ width: probe.videoWidth || 0, height: probe.videoHeight || 0, duration: Number.isFinite(probe.duration) ? probe.duration : 0 })
+      probe.addEventListener('loadedmetadata', done, { once: true })
+      probe.addEventListener('error', () => resolve({ width: 0, height: 0, duration: 0 }), { once: true })
+      try { probe.load() } catch { done() }
+    })
+    probe.removeAttribute('src')
+    probe.load()
+    const width = Number(mediaMeta.width || trackingMeta.width || rows.find((r: any) => r.width)?.width || probed.width || 0) || undefined
+    const height = Number(mediaMeta.height || trackingMeta.height || rows.find((r: any) => r.height)?.height || probed.height || 0) || undefined
+    const fps = Number(mediaMeta.fps || trackingMeta.fps || rows.find((r: any) => r.fps)?.fps || 15) || 15
+    const frames: TrackingFrameResult[] = []
+    const annotations: AnnotationObject[] = []
+    const usedObjectIds = new Set<number>()
+    let fallbackObjectId = 1
+
+    for (const row of rows) {
+      const frameIndex = Number(row.frame_index ?? row.frameIndex ?? 0)
+      const timestampMs = Number(row.timestamp_ms ?? row.timestampMs ?? Math.round(frameIndex * 1000 / fps))
+      const anns: TrackingFrameObject[] = []
+      for (const raw of (row.objects || row.annotations || [])) {
+        let objectId = Number(raw.object_id ?? raw.objectId)
+        if (!Number.isFinite(objectId)) {
+          while (usedObjectIds.has(fallbackObjectId)) fallbackObjectId += 1
+          objectId = fallbackObjectId++
+        }
+        usedObjectIds.add(objectId)
+        const name = numberedObjectName(raw.name ?? raw.label ?? 'rare sperm', objectId)
+        const bboxPx = Array.isArray(raw.bbox) && raw.bbox.length === 4 ? raw.bbox.map(Number) : null
+        const hasDims = !!(width && height)
+        const bbox = bboxPx && hasDims ? {
+          x: Math.max(0, Math.min(100, bboxPx[0] / (width as number) * 100)),
+          y: Math.max(0, Math.min(100, bboxPx[1] / (height as number) * 100)),
+          width: Math.max(0, Math.min(100, (bboxPx[2] - bboxPx[0]) / (width as number) * 100)),
+          height: Math.max(0, Math.min(100, (bboxPx[3] - bboxPx[1]) / (height as number) * 100)),
+        } : undefined
+        anns.push({
+          id: `ai-${frameIndex}-${objectId}`, objectId, name, source: 'ai',
+          confidence: raw.score ?? raw.confidence,
+          bbox: bboxPx ? [bboxPx[0], bboxPx[1], bboxPx[2], bboxPx[3]] : undefined,
+          frameIndex, timestampMs,
+          anomaly: raw.anomaly,
+        })
+        annotations.push(normalizeAnnotationObject({
+          id: `ai-${frameIndex}-${objectId}`, objectId, name, source: 'ai',
+          confidence: raw.score ?? raw.confidence, bbox, frameIndex, timestampMs,
+          anomaly: raw.anomaly, anomaly_level: raw.anomaly_level,
+          anomaly_reasons: raw.anomaly_reasons, anomaly_details: raw.anomaly_details,
+        }, objectId))
+      }
+      frames.push({ frameIndex, timestampMs, annotations: anns })
+    }
+
+    const media: MediaAsset = {
+      id: safeMediaId, name: videoFile.name, type: 'video', url: videoUrl,
+      width, height, fps, duration: probed.duration || undefined, sizeBytes: videoFile.size,
+    }
+    annotationsByMedia.value[safeMediaId] = annotations
+    trackingFramesByMedia.value[safeMediaId] = frames
+    mediaAssets.value = [...mediaAssets.value, media]
+    selectedMediaId.value = safeMediaId
+    await nextTick()
+    await resetAnnotationViewForMedia(safeMediaId)
+    statusMessage.value = `已加载文件夹：${videoFile.name} + tracker_results.json，共 ${frames.length} 帧标注`
+    showToast(`已加载 ${videoFile.name} 的 Tracking 标注`)
+  }
+
+  const openAnnotationFolderPicker = async () => {
+    const picker = (window as any).showDirectoryPicker
+    if (!picker) { annotationFolderInputRef.value?.click(); return }
+    try {
+      const dir = await picker({ mode: 'read' })
+      let videoFile: File | null = null
+      let trackerFile: File | null = null
+      for await (const entry of (dir as any).values()) {
+        if (entry.kind !== 'file') continue
+        if (!videoFile && /\.mp4$/i.test(entry.name) && !/_overlay\.mp4$/i.test(entry.name)) videoFile = await entry.getFile()
+        if (!trackerFile && entry.name.toLowerCase() === 'tracker_results.json') trackerFile = await entry.getFile()
+      }
+      if (!videoFile || !trackerFile) throw new Error('所选文件夹必须同时包含 MP4 和 tracker_results.json')
+      await loadTrackerFolder(videoFile, trackerFile)
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return
+      statusMessage.value = error instanceof Error ? error.message : '标注文件夹加载失败'
+      showToast(statusMessage.value)
+    }
+  }
+
+  const handleAnnotationFolderFiles = async (files: FileList | null) => {
+    if (!files?.length) return
+    const arr = Array.from(files)
+    const videoFile = arr.find((f) => /\.mp4$/i.test(f.name) && !/_overlay\.mp4$/i.test(f.name))
+    const trackerFile = arr.find((f) => f.name.toLowerCase() === 'tracker_results.json')
+    if (!videoFile || !trackerFile) {
+      statusMessage.value = '所选文件夹必须同时包含 MP4 和 tracker_results.json'
+      showToast(statusMessage.value)
+      return
+    }
+    try { await loadTrackerFolder(videoFile, trackerFile) }
+    catch (error) { statusMessage.value = error instanceof Error ? error.message : '标注文件夹加载失败'; showToast(statusMessage.value) }
+    if (annotationFolderInputRef.value) annotationFolderInputRef.value.value = ''
+  }
+
   const onImageLoaded = () => {
     if (!imageRef.value) return
     if (selectedMedia.value) {
@@ -604,11 +845,13 @@ const createWorkspace = () => {
     const media = mediaAssets.value.find((item) => item.id === mediaId)
     if (!media || mediaId !== currentMediaId.value || videoRef.value !== video) return
     media.duration = videoDuration.value
-    // 优先用后端获取的真实分辨率（cv2 读取），避免浏览器 videoWidth 与编码分辨率不一致
+    // 以服务端/OpenCV 的源视频尺寸作为标注坐标系；精确逐帧模式直接显示服务端解码帧。
     if (!media.width) media.width = video.videoWidth
     if (!media.height) media.height = video.videoHeight
     videoFps.value = media.fps || 30
+    media.frameCount = media.frameCount || (video.duration > 0 && videoFps.value > 0 ? Math.round(video.duration * videoFps.value) : undefined)
     await ensureVideoFirstFrame(mediaId)
+    if (isPlaying.value) scheduleVideoFrameSync()
   }
 
   const loadTrackingResult = async (mediaId: string, force = false) => {
@@ -650,7 +893,7 @@ const createWorkspace = () => {
           const newObj: AnnotationObject = {
             id: `ai-${frame.frameIndex}-${ann.objectId}`,  // 强制唯一 id，不管后端返回什么
             objectId: ann.objectId,
-            name: ann.name ?? `object-${ann.objectId}`,
+            name: numberedObjectName(ann.name ?? 'rare sperm', Number(ann.objectId)),
             source: 'ai',
             confidence: ann.confidence,
             bbox: {
@@ -734,61 +977,91 @@ const createWorkspace = () => {
   const syncVideoFrameState = () => {
     const video = videoRef.value
     if (!video) return
-    const time = Number.isFinite(video.currentTime) ? video.currentTime : 0
-    currentTime.value = time
-    currentFrame.value = timeToFrame(time)
-    frameInput.value = currentFrame.value
+    // currentTime 仅用于时间显示；currentFrame 只由实际呈现帧 metadata.mediaTime 更新。
+    currentTime.value = Number.isFinite(video.currentTime) ? video.currentTime : 0
   }
 
   const scheduleVideoFrameSync = () => {
     const video = videoRef.value
-    if (!video || typeof video.requestVideoFrameCallback !== 'function') return
+    if (!video || typeof video.requestVideoFrameCallback !== 'function' || isSeekingVideo) return
+
     if (videoFrameCallbackId !== null) {
       try { video.cancelVideoFrameCallback(videoFrameCallbackId) } catch {}
+      videoFrameCallbackId = null
     }
+
     const loop = (_now: number, metadata: VideoFrameCallbackMetadata) => {
-      if (videoRef.value !== video) return
-      const mediaTime = Number.isFinite(metadata.mediaTime) ? metadata.mediaTime : video.currentTime
-      const rounded = timeToFrame(mediaTime)
-      currentTime.value = mediaTime
-      // 暂停时不让 rVFC 改 currentFrame — mediaTime 可能有浮点抖动导致 round 出错
-      // 暂停时 frame 由 seekVideo / syncVideoFrameState 正确设定
-      if (video.paused) {
-        if (!video.ended) {
-          // paused 时只跑一次就停, 不 re-arm
-        }
-        return
-      }
-      currentFrame.value = rounded
-      frameInput.value = currentFrame.value
-      if (!video.ended) {
+      if (videoRef.value !== video || isSeekingVideo) return
+
+      const mediaTime = Number.isFinite(metadata.mediaTime)
+        ? metadata.mediaTime
+        : video.currentTime
+
+      // 唯一的真实当前帧来源：浏览器实际呈现帧的 mediaTime。
+      commitPresentedFrame(mediaTime)
+
+      if (!video.paused && !video.ended && !isSeekingVideo) {
         videoFrameCallbackId = video.requestVideoFrameCallback(loop)
+      } else {
+        videoFrameCallbackId = null
       }
     }
+
     videoFrameCallbackId = video.requestVideoFrameCallback(loop)
   }
 
   const onVideoTimeUpdate = () => {
+    // currentTime 只用于时间显示；跳帧期间绝不启动全局帧同步，避免和单次 seek 回调竞争。
     syncVideoFrameState()
     if (isVideo.value && Date.now() - lastTrackingPollAt > 1000) {
       lastTrackingPollAt = Date.now()
       void loadTrackingResult(currentMediaId.value, true)
     }
-    scheduleVideoFrameSync()
+    if (!isSeekingVideo) scheduleVideoFrameSync()
   }
 
   const seekVideo = async (time: number) => {
-    if (!videoRef.value) return
-    const safeTime = Math.max(0, Math.min(videoDuration.value || 0, time))
-    videoRef.value.currentTime = safeTime
-    currentTime.value = safeTime
-    currentFrame.value = timeToFrame(safeTime)
-    frameInput.value = currentFrame.value
-    if (isVideo.value && Date.now() - lastTrackingPollAt > 1000) { lastTrackingPollAt = Date.now(); void loadTrackingResult(currentMediaId.value, true) }
-    // NOTE: 不再调 syncVideoFrameState() — 它可能在 seeked 事件还没完成时
-    // 读到旧值 / rVFC 的 mediaTime 浮点抖动值, 把我们刚设对的 currentFrame 覆盖回去
-    // 让 timeupdate (onVideoTimeUpdate) 和最终的 seeked 事件来做确认同步
-    scheduleVideoFrameSync()
+    if (!isVideo.value) return
+    const media = selectedMedia.value
+    if (!media) return
+
+    const targetFrame = Math.max(
+      0,
+      Math.min(maxFrameIndex.value, Math.round(time * Math.max(videoFps.value, 1)))
+    )
+
+    // 精确逐帧模式：暂停后不再让浏览器通过 currentTime 猜测目标帧，
+    // 直接向后端请求 source MP4 的指定 frame_index。
+    const wasPlaying = isPlaying.value
+    if (wasPlaying && videoRef.value) {
+      videoRef.value.pause()
+      isPlaying.value = false
+    }
+
+    isSeekingVideo = true
+    const serial = ++seekSerial
+    try {
+      if (media.serverMediaId) {
+        const ok = await loadExactFrame(targetFrame, media.id)
+        if (serial !== seekSerial) return
+        if (!ok) throw new Error(`无法读取第 ${targetFrame} 帧`)
+        // 后端精确帧图像已经与 JSON 使用同一个 frame_index；同步视频元素位置仅供恢复播放使用。
+        if (videoRef.value) {
+          try { videoRef.value.currentTime = frameToTime(targetFrame) } catch {}
+        }
+        await loadTrackingResult(media.id, true)
+        statusMessage.value = `已定位到第 ${targetFrame} 帧`
+      } else if (videoRef.value) {
+        // 没有 serverMediaId 的旧本地视频只能回退到浏览器 video。
+        videoRef.value.currentTime = frameToTime(targetFrame)
+        currentFrame.value = targetFrame
+        currentTime.value = frameToTime(targetFrame)
+        frameInput.value = targetFrame
+        await loadTrackingResult(media.id, true)
+      }
+    } finally {
+      if (serial === seekSerial) isSeekingVideo = false
+    }
   }
 
   const seekToInputFrame = async () => {
@@ -809,25 +1082,34 @@ const createWorkspace = () => {
   }
 
   const togglePlayback = async () => {
-    if (!videoRef.value) return
+    if (!videoRef.value || isSeekingVideo || exactFrameLoading.value) return
     if (videoRef.value.paused) {
+      // 播放从当前严格 frame 对应的时间开始；播放过程中由 rVFC 的 mediaTime 驱动标注帧。
+      videoRef.value.currentTime = frameToTime(currentFrame.value)
+      revokeExactFrameUrl()
       await videoRef.value.play()
       isPlaying.value = true
       scheduleVideoFrameSync()
     } else {
       videoRef.value.pause()
       isPlaying.value = false
+      const target = currentFrame.value
       syncVideoFrameState()
+      // 暂停后重新显示后端精确帧，避免播放器停留在邻近呈现帧。
+      if (selectedMedia.value?.serverMediaId) {
+        await loadExactFrame(target)
+      }
     }
   }
 
-  const onVideoEnded = () => {
+  const onVideoEnded = async () => {
     isPlaying.value = false
     if (videoFrameCallbackId !== null && videoRef.value && typeof videoRef.value.cancelVideoFrameCallback === 'function') {
       try { videoRef.value.cancelVideoFrameCallback(videoFrameCallbackId) } catch {}
       videoFrameCallbackId = null
     }
     syncVideoFrameState()
+    await loadExactFrame(currentFrame.value)
   }
 
   const onTimelineClick = async (event: MouseEvent) => {
@@ -843,7 +1125,7 @@ const createWorkspace = () => {
     if (!media) return
     const mediaType = media.type
     isAiBusy.value = true
-    statusMessage.value = mediaType === 'video' ? 'AI 正在处理视频第一帧……' : 'AI 正在处理图片……'
+    statusMessage.value = mediaType === 'video' ? `AI 正在处理视频第 ${currentFrame.value} 帧……` : 'AI 正在处理图片……'
     try {
       const result = await api.segment({
         mediaId,
@@ -855,9 +1137,14 @@ const createWorkspace = () => {
       // 关键隔离：AI 返回期间如果用户切换了素材，绝不能把旧素材的结果写到新素材。
       if (mediaId !== currentMediaId.value) return
       const existing = annotationsByMedia.value[mediaId] ?? []
-      annotationsByMedia.value[mediaId] = [...existing, ...result.objects]
-      selectedObjectId.value = result.objects[0]?.id ?? null
-      statusMessage.value = `AI 完成：${result.objects.length} 个目标${mediaType === 'video' ? '（第一帧）' : ''}`
+      let nextId = getNextObjectId(mediaId)
+      const normalizedObjects = result.objects.map((obj: AnnotationObject) => {
+        const id = typeof obj.objectId === 'number' ? obj.objectId : nextId++
+        return normalizeAnnotationObject({ ...obj, objectId: id }, id)
+      })
+      annotationsByMedia.value[mediaId] = [...existing, ...normalizedObjects]
+      selectedObjectId.value = normalizedObjects[0]?.id ?? null
+      statusMessage.value = `AI 完成：${normalizedObjects.length} 个目标${mediaType === 'video' ? '（当前帧）' : ''}`
     } catch (error) {
       if (mediaId === currentMediaId.value) statusMessage.value = error instanceof Error ? error.message : 'AI 处理失败'
     } finally {
@@ -870,12 +1157,31 @@ const createWorkspace = () => {
     if (!media) return []
     const objects = (annotationsByMedia.value[mediaId] ?? []).filter((obj) => (obj.frameIndex ?? 0) === currentFrame.value)
     if (!objects.length) throw new Error(`第 ${currentFrame.value} 帧没有人工标注`)
+
+    // ID 完整性是断点续追的硬约束：不能在生成 seed JSON 时丢失 objectId，
+    // 更不能让后端按 annotations 数组顺序重新编号。否则下一轮会出现 15→8 之类的 identity switch。
+    const seenIds = new Set<number>()
+    for (const obj of objects) {
+      if (!Number.isInteger(obj.objectId) || (obj.objectId as number) <= 0) {
+        throw new Error(`第 ${currentFrame.value} 帧存在缺少有效 objectId 的标注（${obj.name || obj.id}），请删除后重新框选`)
+      }
+      if (seenIds.has(obj.objectId as number)) {
+        throw new Error(`第 ${currentFrame.value} 帧存在重复 objectId=${obj.objectId}，请修正后再进行 AI Tracking`)
+      }
+      seenIds.add(obj.objectId as number)
+    }
+
     const { width, height } = await getMediaPixelSize(media)
     const clampX = (v: number) => Math.min(width, Math.max(0, v))
     const clampY = (v: number) => Math.min(height, Math.max(0, v))
     return objects.map((obj) => {
+      const objectId = obj.objectId as number
       const item: Record<string, unknown> = {
-        id: obj.id, name: obj.name, source: obj.source,
+        id: obj.id,
+        object_id: objectId,
+        objectId,
+        name: obj.name,
+        source: obj.source,
         frameIndex: currentFrame.value,
         timestampMs: Math.round(currentTime.value * 1000),
       }
@@ -911,247 +1217,11 @@ const createWorkspace = () => {
     statusMessage.value = next === currentFrame.value ? `当前已是最后可标注帧：${next}` : `下一个未标注帧：${next}`
   }
 
-  const runAiTrack = async () => {
-    const mediaId = currentMediaId.value
-    const media = mediaAssets.value.find((item) => item.id === mediaId)
-    if (!media || media.type !== 'video' || !media.serverMediaId) {
-      statusMessage.value = '请先上传视频'
-      return
-    }
-    const startFrame = currentFrame.value
-    const seed = await buildCurrentFrameSam3Objects(mediaId)
-    if (!seed.length) {
-      statusMessage.value = `第 ${startFrame} 帧没有人工 bbox 标注`
-      return
-    }
-
-    // 重置异常状态：新一轮 tracking 开始时清空之前的异常高亮/标记
-    anomalyFrames.value = []
-    anomalyObjectIds.value = []
-
-    isAiBusy.value = true
-    statusMessage.value = `SAM3 已提交：从第 ${startFrame} 帧追踪 ${trackingFrameCount.value} 帧`
-    try {
-      const task = await trackApi.run({
-        mediaId: media.serverMediaId,
-        mediaName: media.name,
-        mediaWidth: media.width || 0,
-        mediaHeight: media.height || 0,
-        startFrame,
-        annotations: seed,
-      })
-      trackingFrameCount.value = task.maxFrames || task.trackFrames || trackingFrameCount.value
-      statusMessage.value = `SAM3 正在运行：第 ${startFrame} 帧开始处理 ${trackingFrameCount.value} 帧`
-      for (;;) {
-        const status = await trackApi.getStatus(task.taskId)
-        if (status.status === 'success') break
-        if (status.status === 'failed') throw new Error(status.message || 'SAM3 Tracking 失败')
-        if (status.status === 'paused' && status.paused) {
-          // 异常暂停 → 跳到异常帧，高亮异常 objectId
-          const pauseFrame = status.pausedFrame ?? startFrame
-          // 先加载已完成的 tracking 结果
-          await loadTrackingResult(mediaId, true)
-          // 跳到异常帧并设置异常高亮/标记
-          if (mediaId === currentMediaId.value) {
-            await seekVideo(frameToTime(pauseFrame))
-            // 设置异常 objectId 高亮
-            const levels = status.anomalyLevels || {}
-            anomalyObjectIds.value = Object.entries(levels)
-              .filter(([, v]) => v !== 'normal')
-              .map(([k]) => Number(k))
-            // 推入异常帧列表（给时间轴标记用）
-            const pausedObjs = status.pausedObjects || []
-            const reasons = pausedObjs.map((o) => `${o.type}(oid:${o.object_id})`)
-            const level = Object.values(levels).find((v) => v && v !== 'normal') || 'anomaly'
-            anomalyFrames.value = [
-              ...anomalyFrames.value,
-              { frame_index: pauseFrame, level, reasons },
-            ]
-            statusMessage.value = `⚠️ Tracking 暂停 @ frame ${pauseFrame}: ${reasons.join('; ')}`
-            showToast(`检测到异常，已暂停在第 ${pauseFrame} 帧`)
-          }
-          break // 跳出轮询，等用户修正后重新点 AI Tracking
-        }
-        await new Promise((resolve) => setTimeout(resolve, 700))
-      }
-      await loadTrackingResult(mediaId, true)
-      if (mediaId === currentMediaId.value) {
-        const next = findNextUnannotatedFrame(startFrame + 1)
-        await seekVideo(frameToTime(next))
-        statusMessage.value = `Tracking 完成：${startFrame}～${Math.min(startFrame + trackingFrameCount.value - 1, maxFrameIndex.value)}`
-        showToast('SAM3 追踪完成')
-      }
-    } catch (error) {
-      if (mediaId === currentMediaId.value) {
-        statusMessage.value = error instanceof Error ? error.message : 'AI Tracking 失败'
-        showToast(statusMessage.value)
-      }
-    } finally {
-      isAiBusy.value = false
-    }
-  }
-
-
-  const selectSaveFolder = async () => {
-    const picker = (window as any).showDirectoryPicker
-    if (!picker) {
-      statusMessage.value = '当前浏览器不支持目录授权，将使用普通下载方式'
-      return
-    }
-    try {
-      saveFolderHandle.value = await picker({ mode: 'readwrite' })
-      statusMessage.value = `保存目录：${saveFolderHandle.value.name}`
-    } catch {
-      statusMessage.value = '已取消目录选择'
-    }
-  }
-
-  const pad = (n: number, width = 2) => String(n).padStart(width, '0')
-  const fileTimestamp = () => {
-    const d = new Date()
-    return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}_${pad(d.getMilliseconds(), 3)}`
-  }
-
-  const drawAnnotationOverlayToCanvas = (ctx: CanvasRenderingContext2D, width: number, height: number) => {
-    const objects = currentObjects.value
-    ctx.save()
-    ctx.lineWidth = Math.max(2, width / 900)
-    ctx.font = `${Math.max(14, width / 80)}px sans-serif`
-    ctx.textBaseline = 'bottom'
-    objects.forEach((obj) => {
-      // 根据 anomaly 状态选择颜色
-      const level = obj.anomaly_level
-      const hasReasons = obj.anomaly_reasons && obj.anomaly_reasons.length > 0
-      let fillColor = 'rgba(99,102,241,0.12)'   // 默认: 紫蓝
-      let strokeColor = '#818cf8'
-      if (level === 'anomaly') {
-        fillColor = 'rgba(239,68,68,0.18)'
-        strokeColor = '#ef4444'                   // 红 = 暂停级异常
-      } else if (level === 'disappeared') {
-        fillColor = 'rgba(234,179,8,0.18)'
-        strokeColor = '#eab308'                   // 黄 = 消失
-      } else if (level === 'warning' || hasReasons) {
-        fillColor = 'rgba(251,146,60,0.18)'
-        strokeColor = '#fb923c'                   // 橙 = 有异常迹象但未暂停
-      }
-
-      if (obj.bbox) {
-        const x = obj.bbox.x / 100 * width
-        const y = obj.bbox.y / 100 * height
-        const w = obj.bbox.width / 100 * width
-        const h = obj.bbox.height / 100 * height
-        ctx.fillStyle = fillColor
-        ctx.strokeStyle = strokeColor
-        ctx.fillRect(x, y, w, h)
-        ctx.strokeRect(x, y, w, h)
-        // 异常对象显示警告图标和原因
-        if (level === 'anomaly' || hasReasons) {
-          ctx.fillStyle = strokeColor
-          ctx.fillText(`⚠ ${obj.name}`, x, Math.max(16, y - 4))
-        } else {
-          ctx.fillStyle = '#ffffff'
-          ctx.fillText(obj.name, x, Math.max(16, y - 4))
-        }
-      } else if (obj.point) {
-        const x = obj.point.x / 100 * width
-        const y = obj.point.y / 100 * height
-        ctx.beginPath()
-        ctx.arc(x, y, Math.max(4, width / 180), 0, Math.PI * 2)
-        ctx.fillStyle = strokeColor
-        ctx.fill()
-        ctx.fillStyle = '#ffffff'
-        ctx.fillText(obj.name, x + 8, y - 6)
-      }
-    })
-    ctx.restore()
-  }
-
-  const svgToCanvas = async (): Promise<Blob> => {
-    const canvas = document.createElement('canvas')
-    const mediaWidth = selectedMedia.value?.width || (isVideo.value ? 1280 : 1600)
-    const mediaHeight = selectedMedia.value?.height || (isVideo.value ? 720 : 900)
-    canvas.width = mediaWidth
-    canvas.height = mediaHeight
-    const ctx = canvas.getContext('2d')
-    if (!ctx) throw new Error('无法创建 Canvas')
-
-    if (isVideo.value) {
-      await ensureVideoFirstFrame()
-      if (!videoRef.value || videoRef.value.readyState < 2) throw new Error('视频第一帧尚未准备完成，请稍后再保存')
-      ctx.drawImage(videoRef.value, 0, 0, mediaWidth, mediaHeight)
-    } else if (imageRef.value) {
-      ctx.drawImage(imageRef.value, 0, 0, mediaWidth, mediaHeight)
-    }
-
-    drawAnnotationOverlayToCanvas(ctx, mediaWidth, mediaHeight)
-    return new Promise((resolve, reject) => {
-      canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error('PNG 导出失败')), 'image/png')
-    })
-  }
-
-  const renderAnnotatedVideo = async (): Promise<Blob> => {
-    if (!videoRef.value) throw new Error('视频元素不存在')
-    const sourceVideo = videoRef.value
-    if (!Number.isFinite(sourceVideo.duration) || sourceVideo.duration <= 0) throw new Error('视频尚未加载完成，请稍后再试')
-    if (!('captureStream' in HTMLVideoElement.prototype) || typeof MediaRecorder === 'undefined') {
-      throw new Error('当前浏览器不支持前端视频导出，请使用最新版 Chrome 或 Edge')
-    }
-
-    const width = sourceVideo.videoWidth || selectedMedia.value?.width || 1280
-    const height = sourceVideo.videoHeight || selectedMedia.value?.height || 720
-    const canvas = document.createElement('canvas')
-    canvas.width = width
-    canvas.height = height
-    const ctx = canvas.getContext('2d')
-    if (!ctx) throw new Error('无法创建视频渲染画布')
-
-    const canvasStream = canvas.captureStream(videoFps.value || 30)
-    const sourceStream = (sourceVideo as HTMLVideoElement & { captureStream: () => MediaStream }).captureStream()
-    sourceStream.getAudioTracks().forEach((track) => canvasStream.addTrack(track))
-
-    const mimeCandidates = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
-    const mimeType = mimeCandidates.find((type) => MediaRecorder.isTypeSupported(type)) || ''
-    const recorder = new MediaRecorder(canvasStream, mimeType ? { mimeType } : undefined)
-    const chunks: Blob[] = []
-    recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data) }
-
-    const mediaId = currentMediaId.value
-    const wasMuted = sourceVideo.muted
-    sourceVideo.muted = false
-    sourceVideo.pause()
-    sourceVideo.currentTime = 0
-    await new Promise<void>((resolve) => {
-      if (sourceVideo.readyState >= 2) resolve()
-      else sourceVideo.addEventListener('loadeddata', () => resolve(), { once: true })
-    })
-    if (mediaId !== currentMediaId.value) throw new Error('素材已切换，已取消保存')
-
-    let firstFrameDrawn = false
-    const drawLoop = () => {
-      if (mediaId !== currentMediaId.value) return
-      ctx.drawImage(sourceVideo, 0, 0, width, height)
-      // 人工标注只存在于第一帧：导出视频时把标注写入第一帧，其余帧保持原视频。
-      if (!firstFrameDrawn) {
-        drawAnnotationOverlayToCanvas(ctx, width, height)
-        firstFrameDrawn = true
-      }
-      if (!sourceVideo.ended) requestAnimationFrame(drawLoop)
-    }
-
-    recorder.start(100)
-    const recordingDone = new Promise<Blob>((resolve) => {
-      recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType || 'video/webm' }))
-    })
-    sourceVideo.addEventListener('ended', () => { if (recorder.state !== 'inactive') recorder.stop() }, { once: true })
-    requestAnimationFrame(drawLoop)
-    await sourceVideo.play()
-    const blob = await recordingDone
-    sourceVideo.muted = wasMuted
-    sourceVideo.pause()
-    sourceVideo.currentTime = 0
-    return blob
-  }
-
+  /**
+   * 获取当前素材的实际像素尺寸。
+   * 视频优先读取 HTMLVideoElement.videoWidth/videoHeight；图片读取 naturalWidth/naturalHeight；
+   * 最后才回退到 MediaAsset 中已保存的 width/height。
+   */
   const getMediaPixelSize = async (media: MediaAsset) => {
     if (media.type === 'video') {
       const video = videoRef.value
@@ -1172,9 +1242,205 @@ const createWorkspace = () => {
   }
 
   /**
-   * 将前端 0~100% 百分比坐标转换为 SAM3 所需的像素坐标。
-   * bbox: [x1, y1, x2, y2]
-   * point: [x, y]
+   * AI Tracking 开始前自动把当前帧的人工标注写入数据库。
+   * 每次 AI Tracking 点击时自动提交当前帧人工标注。
+   */
+  const persistCurrentFrameManualAnnotations = async (media: MediaAsset, mediaId: string) => {
+    const current = (annotationsByMedia.value[mediaId] ?? []).filter(
+      (obj) => (obj.frameIndex ?? 0) === currentFrame.value && obj.source === 'manual'
+    )
+    if (!current.length) return { count: 0, batchId: undefined as string | undefined }
+
+    const pixel = await getMediaPixelSize(media).catch(() => null)
+    const result = await api.saveManualAnnotation({
+      mediaId,
+      mediaType: media.type,
+      mediaName: media.name,
+      mediaWidth: pixel?.width ?? media.width,
+      mediaHeight: pixel?.height ?? media.height,
+      frameIndex: media.type === 'video' ? currentFrame.value : undefined,
+      timestampMs: media.type === 'video' ? Math.round(currentTime.value * 1000) : undefined,
+      objects: JSON.parse(JSON.stringify(current)),
+      annotationVersion: 'annotation-v8-ai-tracking-autosave',
+    })
+
+    // 让标注结果页/工作区本地结果同步显示本次自动入库批次。
+    savedResults.value.unshift({
+      mediaId,
+      mediaName: media.name,
+      mediaType: media.type,
+      frameIndex: media.type === 'video' ? currentFrame.value : undefined,
+      timestampMs: media.type === 'video' ? Math.round(currentTime.value * 1000) : undefined,
+      savedAt: new Date().toISOString(),
+      filename: '',
+      batchId: result.batchId,
+      objects: JSON.parse(JSON.stringify(current)),
+    } as SavedAnnotationFile)
+
+    return { count: current.length, batchId: result.batchId }
+  }
+
+  const runAiTrack = async () => {
+    const mediaId = currentMediaId.value
+    const media = mediaAssets.value.find((item) => item.id === mediaId)
+    if (!media || media.type !== 'video' || !media.serverMediaId) {
+      statusMessage.value = '请先上传视频'
+      return
+    }
+
+    const startFrame = currentFrame.value
+    let seed: Record<string, unknown>[]
+    anomalyFrames.value = []
+    anomalyObjectIds.value = []
+    isAiBusy.value = true
+
+    try {
+      // ① AI Tracking 点击即自动落库：当前帧人工标注先进入数据库，
+      // 然后才写 seed JSON / 做帧差 / 启动 SAM3。任何一步失败都不会“假保存”。
+      statusMessage.value = `① 正在将第 ${startFrame} 帧人工标注写入数据库……`
+      const persisted = await persistCurrentFrameManualAnnotations(media, mediaId)
+      if (persisted.count) {
+        showToast(`第 ${startFrame} 帧 ${persisted.count} 个人工标注已写入数据库`)
+      }
+
+      // 关键：如果这是对旧 Tracking 结果的人工回退/修正，从当前帧重新开分支。
+      // 服务端只删除 tracker_results.json 中 frame > startFrame 的旧结果。
+      // 当前帧保留，作为新的分支锚点；其上的 AI 框和人工修改/新增框会一起成为新 seed。
+      statusMessage.value = `①b 正在从第 ${startFrame} 帧切断旧 Tracking 未来分支……`
+      const rewind = await trackApi.rewind({
+        mediaId: media.serverMediaId,
+        startFrame,
+      })
+      const existingAfterRewind = annotationsByMedia.value[mediaId] ?? []
+      // 当前帧 N 是新的分支锚点：保留此前所有结果以及 N 帧现有 AI/人工框。
+      // 只有 N 之后的旧未来轨迹被清掉；随后 buildCurrentFrameSam3Objects() 会
+      // 把 N 帧当前页面上最终存在的全部 bbox（旧 AI + 人工新增/修改）作为新 seed。
+      annotationsByMedia.value = {
+        ...annotationsByMedia.value,
+        [mediaId]: existingAfterRewind.filter((obj) => (obj.frameIndex ?? 0) <= startFrame),
+      }
+      trackingFramesByMedia.value[mediaId] = (trackingFramesByMedia.value[mediaId] ?? [])
+        .filter((frame) => frame.frameIndex <= startFrame)
+      console.info(
+        `[ai-track] rewind branch at frame=${startFrame}: removedRows=${rewind.removedRows}, ` +
+        `deletedFutureSeedFiles=${rewind.deletedFutureSeedFiles}`
+      )
+
+      seed = await buildCurrentFrameSam3Objects(mediaId)
+      if (!seed.length) {
+        throw new Error(`第 ${startFrame} 帧没有人工 bbox 标注`)
+      }
+
+      // Phase 2: 把“当前页面正在看的这一帧”固化成后端 JSON seed。
+      statusMessage.value = `② 正在生成第 ${startFrame} 帧标注 JSON……`
+      const savedSeed = await trackApi.saveFrameAnnotations({
+        mediaId: media.serverMediaId,
+        mediaName: media.name,
+        mediaWidth: media.width || 0,
+        mediaHeight: media.height || 0,
+        frameIndex: startFrame,
+        timestampMs: Math.round(currentTime.value * 1000),
+        annotations: seed,
+      })
+
+      // Phase 3: 用 MP4 + seed JSON 做帧差规划，计算应交给 SAM3 的后续帧数。
+      statusMessage.value = `③ 帧差分析中：从第 ${startFrame + 1} 帧开始寻找新目标……`
+      const plan = await trackApi.plan({
+        mediaId: media.serverMediaId,
+        mediaName: media.name,
+        startFrame,
+        seedFilename: savedSeed.filename,
+      })
+
+      // 业务循环：一次 AI Tracking 只处理“当前帧 -> 帧差发现的下一新目标帧”。
+      // 如果本轮帧差没有找到目标，就停在当前帧，不启动 SAM3。
+      if (plan.status !== 'new_object_found' || plan.newObjectFrame == null || !plan.willReachNewObject) {
+        trackingFrameCount.value = 0
+        statusMessage.value =
+          `③ 从第 ${startFrame} 帧向后检查 ${plan.searchFrames} 帧：未找到可确认的新目标，本轮停止；请人工检查后再次点击 AI Tracking。`
+        showToast('本轮帧差未发现可确认的新目标')
+        return
+      }
+
+      const plannedEndFrame = Math.min(plan.newObjectFrame, maxFrameIndex.value)
+      const plannedFrames = plannedEndFrame - startFrame + 1
+      trackingFrameCount.value = plannedFrames
+      statusMessage.value =
+        `③ 帧差发现候选新目标：第 ${plannedEndFrame} 帧；④ SAM3 将追踪 ${startFrame}～${plannedEndFrame}（共 ${plannedFrames} 帧）`
+
+      // Phase 4: 复用原有 SAM3 Tracking 任务队列。
+      // maxFrames 包含 seed 起始帧，所以这里严格使用 end-start+1，确保本轮只追踪到帧差目标帧。
+      const task = await trackApi.run({
+        mediaId: media.serverMediaId,
+        mediaName: media.name,
+        mediaWidth: media.width || 0,
+        mediaHeight: media.height || 0,
+        startFrame,
+        maxFrames: plannedFrames,
+        annotations: seed,
+      })
+
+      trackingFrameCount.value = task.maxFrames || task.trackFrames || plan.recommendedTrackFrames
+      statusMessage.value =
+        `SAM3 正在运行：处理第 ${startFrame}～${Math.min(maxFrameIndex.value, startFrame + trackingFrameCount.value - 1)} 帧`
+
+      for (;;) {
+        const status = await trackApi.getStatus(task.taskId)
+
+        if (status.status === 'success') break
+        if (status.status === 'failed') {
+          throw new Error(status.message || 'SAM3 Tracking 失败')
+        }
+        if (status.status === 'paused' && status.paused) {
+          const pauseFrame = status.pausedFrame ?? startFrame
+          await loadTrackingResult(mediaId, true)
+
+          if (mediaId === currentMediaId.value) {
+            await seekVideo(frameToTime(pauseFrame))
+            const levels = status.anomalyLevels || {}
+            anomalyObjectIds.value = Object.entries(levels)
+              .filter(([, v]) => v !== 'normal')
+              .map(([k]) => Number(k))
+            const pausedObjs = status.pausedObjects || []
+            const reasons = pausedObjs.map((o) => {
+              const detail = o.reasons?.length ? `：${o.reasons.join('；')}` : ''
+              return `${o.type}(oid:${o.object_id})${detail}`
+            })
+            const level = Object.values(levels).find((v) => v && v !== 'normal') || 'anomaly'
+            anomalyFrames.value = [
+              ...anomalyFrames.value,
+              { frame_index: pauseFrame, level, reasons },
+            ]
+            statusMessage.value = `⚠️ Tracking 暂停 @ frame ${pauseFrame}: ${reasons.join('; ')}`
+            showToast(`检测到异常，已暂停在第 ${pauseFrame} 帧`)
+          }
+          break
+        }
+        await new Promise((resolve) => setTimeout(resolve, 700))
+      }
+
+      await loadTrackingResult(mediaId, true)
+
+      if (mediaId === currentMediaId.value) {
+        // 本轮结束帧就是下一次 AI Tracking 的新起始帧。
+        await seekVideo(frameToTime(plannedEndFrame))
+        statusMessage.value =
+          `完成：SAM3 已追踪 ${startFrame}～${plannedEndFrame}（${plannedFrames} 帧）。请在第 ${plannedEndFrame} 帧人工补标新物体，然后再次点击 AI Tracking 继续。`
+        showToast(`已到达第 ${plannedEndFrame} 帧，请人工补标后继续`)
+      }
+    } catch (error) {
+      if (mediaId === currentMediaId.value) {
+        statusMessage.value = error instanceof Error ? error.message : 'AI Tracking 失败'
+        showToast(statusMessage.value)
+      }
+    } finally {
+      isAiBusy.value = false
+    }
+  }
+
+  /**
+   * Build a browser-downloadable SAM3 annotations JSON for the current media.
+   * Kept for the existing JSON export action; it is independent of AI Tracking autosave.
    */
   const buildSam3AnnotationsJson = async (mediaId: string) => {
     const media = mediaAssets.value.find((item) => item.id === mediaId)
@@ -1183,38 +1449,37 @@ const createWorkspace = () => {
     if (!objects.length) throw new Error('当前素材没有可导出的标注')
 
     const { width, height } = await getMediaPixelSize(media)
-    const frameIndex = media.type === 'video' ? 0 : 0
-    const timestampMs = 0
-
+    const frameIndex = media.type === 'video' ? currentFrame.value : 0
+    const timestampMs = media.type === 'video' ? Math.round(currentTime.value * 1000) : 0
     const clampX = (value: number) => Math.min(width, Math.max(0, value))
     const clampY = (value: number) => Math.min(height, Math.max(0, value))
-    const round = (value: number) => Math.round(value)
+    const toPixel = (value: number) => Math.round(value)
 
     const annotations = objects.map((obj) => {
       const item: Record<string, unknown> = {
         id: obj.id,
         object_id: obj.objectId,
+        objectId: obj.objectId,
         name: obj.name,
         source: obj.source,
       }
-
       if (obj.bbox) {
-        const x1 = clampX((obj.bbox.x / 100) * width)
-        const y1 = clampY((obj.bbox.y / 100) * height)
-        const x2 = clampX(((obj.bbox.x + obj.bbox.width) / 100) * width)
-        const y2 = clampY(((obj.bbox.y + obj.bbox.height) / 100) * height)
-        item.bbox = [round(x1), round(y1), round(x2), round(y2)]
+        item.bbox = [
+          toPixel(clampX((obj.bbox.x / 100) * width)),
+          toPixel(clampY((obj.bbox.y / 100) * height)),
+          toPixel(clampX(((obj.bbox.x + obj.bbox.width) / 100) * width)),
+          toPixel(clampY(((obj.bbox.y + obj.bbox.height) / 100) * height)),
+        ]
       }
-
       if (obj.point) {
-        const x = clampX((obj.point.x / 100) * width)
-        const y = clampY((obj.point.y / 100) * height)
-        item.point = [round(x), round(y)]
+        item.point = [
+          toPixel(clampX((obj.point.x / 100) * width)),
+          toPixel(clampY((obj.point.y / 100) * height)),
+        ]
       }
-
       if (media.type === 'video') {
-        item.frameIndex = frameIndex
-        item.timestampMs = timestampMs
+        item.frameIndex = obj.frameIndex ?? frameIndex
+        item.timestampMs = obj.timestampMs ?? timestampMs
       }
       return item
     })
@@ -1222,25 +1487,11 @@ const createWorkspace = () => {
     const payload = {
       version: '1.0',
       format: 'sam3-annotations',
-      media: {
-        id: media.id,
-        name: media.name,
-        type: media.type,
-        width,
-        height,
-      },
-      frame: {
-        frameIndex,
-        timestampMs,
-      },
-      coordinateSystem: {
-        source: 'frontend-percent',
-        target: 'pixel',
-        bbox: '[x1, y1, x2, y2]',
-      },
+      media: { id: media.id, name: media.name, type: media.type, width, height },
+      frame: { frameIndex, timestampMs },
+      coordinateSystem: { source: 'frontend-percent', target: 'pixel', bbox: '[x1, y1, x2, y2]' },
       annotations,
     }
-
     return new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' })
   }
 
@@ -1282,140 +1533,6 @@ const createWorkspace = () => {
     }
   }
 
-
-  const saveBlobToSelectedFolder = async (blob: Blob, filename: string) => {
-    const handle = saveFolderHandle.value
-    if (!handle) return false
-    const fileHandle = await handle.getFileHandle(filename, { create: true })
-    const writable = await fileHandle.createWritable()
-    await writable.write(blob)
-    await writable.close()
-    return true
-  }
-
-  /**
-   * 保存标注。
-   *
-   * 改动要点（接入后端后）：
-   * 1. 结构化数据【最先】提交到后端 —— 视频导出耗时长且可能失败，
-   *    不能让它挡住最核心的落库动作。
-   * 2. 视频/图片导出单独 try-catch —— 导出失败不影响标注数据已入库。
-   */
-  const saveAnnotation = async () => {
-    const mediaId = currentMediaId.value
-    const media = mediaAssets.value.find((item) => item.id === mediaId)
-    const objects = annotationsByMedia.value[mediaId] ?? []
-    if (!media) {
-      statusMessage.value = '当前素材不存在，无法保存'
-      return
-    }
-    if (!objects.length) {
-      statusMessage.value = '当前素材没有可保存的标注'
-      showToast('当前素材没有标注内容')
-      return
-    }
-
-    const timestamp = fileTimestamp()
-
-    try {
-      // ---------- ① 先提交结构化数据到后端（核心，不受视频导出影响）----------
-      // 取真实像素宽高：前端存的是百分比，后端需要据此换算成 SAM3 像素坐标
-      const pixel = await getMediaPixelSize(media).catch(() => null)
-
-      await api.saveManualAnnotation({
-        mediaId,
-        mediaType: media.type,
-        mediaName: media.name,
-        mediaWidth: pixel?.width ?? media.width,
-        mediaHeight: pixel?.height ?? media.height,
-        frameIndex: media.type === 'video' ? currentFrame.value : undefined,
-        timestampMs: media.type === 'video' ? Math.round(currentTime.value * 1000) : undefined,
-        objects: JSON.parse(JSON.stringify(objects)),
-        annotationVersion: 'annotation-v5-video-current-frame',
-      })
-
-      // 视频保存时同步写入 seed JSON（AI Tracking 需要）
-      if (media.type === 'video' && media.serverMediaId) {
-        try {
-          const seedAnnotations = await buildCurrentFrameSam3Objects(mediaId)
-          if (seedAnnotations.length) {
-            await trackApi.saveFrameAnnotations({
-              mediaId: media.serverMediaId,
-              mediaName: media.name,
-              mediaWidth: pixel?.width ?? media.width ?? 0,
-              mediaHeight: pixel?.height ?? media.height ?? 0,
-              frameIndex: currentFrame.value,
-              timestampMs: Math.round(currentTime.value * 1000),
-              annotations: seedAnnotations,
-            })
-          }
-        } catch {
-          // seed JSON 写入失败不阻塞主保存流程
-        }
-      }
-
-      // ---------- ② 再导出带标注的媒体文件（耗时，失败不影响上面）----------
-      let blob: Blob | null = null
-      let filename = media.type === 'video' ? `${timestamp}_annotated.webm` : `${timestamp}_annotated.png`
-      let exportFailed = false
-
-      try {
-        if (media.type === 'video') {
-          statusMessage.value = '标注已保存到后端，正在生成带第一帧标注的视频，请稍候……'
-          blob = await renderAnnotatedVideo()
-        } else {
-          statusMessage.value = '标注已保存到后端，正在生成标注图片……'
-          blob = await svgToCanvas()
-        }
-      } catch (exportError) {
-        exportFailed = true
-        console.warn('媒体导出失败（标注数据已入库）：', exportError)
-      }
-
-      if (blob) {
-        let savedToFolder = false
-        if (!saveFolderHandle.value) await selectSaveFolder()
-        if (saveFolderHandle.value) {
-          try {
-            savedToFolder = await saveBlobToSelectedFolder(blob, filename)
-          } catch {
-            savedToFolder = false
-          }
-        }
-        if (!savedToFolder) {
-          const url = URL.createObjectURL(blob)
-          const link = document.createElement('a')
-          link.href = url
-          link.download = filename
-          link.click()
-          setTimeout(() => URL.revokeObjectURL(url), 1000)
-        }
-      }
-
-      // ---------- ③ 更新本地结果列表 ----------
-      savedResults.value.unshift({
-        mediaId,
-        mediaName: media.name,
-        mediaType: media.type,
-        frameIndex: media.type === 'video' ? currentFrame.value : undefined,
-        timestampMs: media.type === 'video' ? Math.round(currentTime.value * 1000) : undefined,
-        savedAt: new Date().toISOString(),
-        filename: exportFailed ? '' : filename,
-        objects: JSON.parse(JSON.stringify(objects)),
-      } as SavedAnnotationFile)
-
-      if (exportFailed) {
-        statusMessage.value = `标注已保存到后端；媒体文件导出失败：${filename}`
-        showToast('标注数据已保存到后端，但视频/图片导出失败')
-      } else {
-        statusMessage.value = `保存成功：${filename}`
-        showToast(media.type === 'video' ? '保存成功：已生成带第一帧标注的视频' : '保存成功：标注图片已保存')
-      }
-    } catch (error) {
-      statusMessage.value = error instanceof Error ? error.message : '保存失败'
-      showToast(statusMessage.value)
-    }
-  }
 
   /**
    * 导出训练数据集（COCO / YOLO / both）
@@ -1472,6 +1589,50 @@ const createWorkspace = () => {
       showToast(statusMessage.value)
     } finally {
       isAiBusy.value = false
+    }
+  }
+
+  const loadSavedResults = async () => {
+    if (remoteResultsLoaded) return
+    remoteResultsLoaded = true
+    try {
+      const { listResults } = await import('../api/httpAnnotationApi')
+      const res = await listResults('default')
+      const rows = (res.items ?? []) as any[]
+      const groups = new Map<string, any[]>()
+      for (const row of rows) {
+        const key = row.batch_id || `legacy:${row.media_id}:${row.created_at}`
+        groups.set(key, [...(groups.get(key) ?? []), row])
+      }
+      const remote = Array.from(groups.entries()).map(([key, list]) => {
+        const head = list[0]
+        const isVideo = head.media_type === 'video'
+        const objects = list.map((r) => {
+          const objectIdRaw = r.object_id && /^\d+$/.test(String(r.object_id)) ? Number(r.object_id) : undefined
+          const isBox = r.shape_type === 'bbox'
+          return normalizeAnnotationObject({
+            id: r.object_id ?? String(r.id), objectId: objectIdRaw, name: r.object_name ?? 'rare sperm', source: (r.source === 'ai' ? 'ai' : 'manual'),
+            bbox: isBox && r.pct_x !== null ? { x: r.pct_x, y: r.pct_y ?? 0, width: r.pct_w ?? 0, height: r.pct_h ?? 0 } : undefined,
+            point: !isBox && r.pct_x !== null ? { x: r.pct_x, y: r.pct_y ?? 0 } : undefined,
+            frameIndex: isVideo ? r.frame_index : undefined, timestampMs: isVideo ? r.timestamp_ms : undefined,
+          } as AnnotationObject, objectIdRaw ?? Number(r.id))
+        })
+        return { key, batchId: head.batch_id || undefined, mediaId: head.media_id, mediaName: head.media_name ?? head.media_id,
+          mediaType: (isVideo ? 'video' : 'image') as 'video' | 'image',
+          frameIndex: isVideo ? head.frame_index : undefined, timestampMs: isVideo ? head.timestamp_ms : undefined,
+          savedAt: new Date(String(head.created_at).replace(' ', 'T')).toISOString(), filename: '后端记录', username: head.username || null, objects } as SavedAnnotationFile & { key: string }
+      })
+      const existingKeys = new Set(savedResults.value.map((r: any) => r.batchId ? `batch:${r.batchId}` : `local:${r.mediaId}:${r.savedAt}:${r.objects.map((o: any) => o.id).join(',')}`))
+      const fresh = remote.filter((r) => {
+        const dedupeKey = r.batchId ? `batch:${r.batchId}` : `remote:${r.key}`
+        if (loadedRemoteResultKeys.has(dedupeKey) || existingKeys.has(dedupeKey)) return false
+        loadedRemoteResultKeys.add(dedupeKey)
+        return true
+      }).map(({ key: _key, ...r }) => r)
+      if (fresh.length) savedResults.value = [...fresh, ...savedResults.value]
+    } catch (error) {
+      remoteResultsLoaded = false
+      console.warn('从后端加载标注结果失败：', error)
     }
   }
 
@@ -1560,15 +1721,17 @@ const createWorkspace = () => {
     frameInput.value = 0
     tempBbox.value = null
     bboxStart = null
-    activeTool.value = 'point'
+    activeTool.value = 'select'
     anomalyObjectIds.value = []
     zoom.value = 1
     if (isVideo.value && mediaId === currentMediaId.value) {
       await nextTick()
+      revokeExactFrameUrl()
       const video = videoRef.value
       if (video) {
-        try { video.currentTime = 0 } catch {}
+        try { video.pause(); video.currentTime = 0 } catch {}
       }
+      await loadExactFrame(0, mediaId)
     }
   }
 
@@ -1595,6 +1758,7 @@ const createWorkspace = () => {
           if (item.fps) existing.fps = item.fps
           if (item.width) existing.width = item.width
           if (item.height) existing.height = item.height
+          if (item.frameCount) existing.frameCount = item.frameCount
           if (item.frameCount && item.fps) existing.duration = item.frameCount / item.fps
 
           // 异步加载 tracking 结果并合并（不阻塞）
@@ -1614,6 +1778,7 @@ const createWorkspace = () => {
           width: item.width || undefined,
           height: item.height || undefined,
           duration: item.frameCount && item.fps ? item.frameCount / item.fps : undefined,
+          frameCount: item.frameCount || undefined,
         }
         additions.push(newAsset)
         trackingFramesByMedia.value[newAsset.id] = []
@@ -1638,7 +1803,7 @@ const createWorkspace = () => {
   }
 
   return {
-    api, mediaAssets, selectedMediaId, activeTool, objectNameInput, selectedObjectId, currentFrame, currentTime, videoDuration, videoFps, frameInput, isPlaying, isAiBusy, trackingFrameCount, statusMessage, toastMessage, showToast, zoom, zoomIn, zoomOut, zoomReset, deleteMedia, saveFolderHandle, savedResults, effectResults, selectedEffectId, effectTime, effectPlaying, effectVideoRef, imageRef, videoRef, annotationHitRef, fileInputRef, videoInputRef, effectFolderInputRef, annotationsByMedia, trackingFramesByMedia, anomalyObjectIds, anomalyFrames, selectedMedia, isVideo, maxFrameIndex, currentMediaId, currentObjects, selectedObject, selectedEffect, formatTime, timeToFrame, frameToTime, getStagePoint, addObject, resetVideoViewToFirstFrame, ensureVideoFirstFrame, selectTool, onStageClick, tempBbox, onBboxDown, onBboxMove, onBboxUp, onObjectDropdownChange, selectObject, removeObject, renameObject, undo, redo, copyPreviousFrame, brightness, contrast, mediaFilterStyle, resetMediaFilter, annotatedFrameCount, clearSelection, openFilePicker, handleFiles, onImageLoaded, onVideoLoaded, onVideoTimeUpdate, loadTrackingResult, seekVideo, seekToInputFrame, seekByFrame, togglePlayback, onVideoEnded, onTimelineClick, runAiSegment, runAiTrack, selectSaveFolder, pad, fileTimestamp, drawAnnotationOverlayToCanvas, svgToCanvas, renderAnnotatedVideo, getMediaPixelSize, buildSam3AnnotationsJson, generateAnnotationsJson, saveBlobToSelectedFolder, saveAnnotation, exportDataset, openEffectFolderPicker, handleEffectFolder, loadEffects, onEffectTimeUpdate, toggleEffectPlayback, selectEffect, effectOverlayObjects, resetAnnotationViewForMedia, loadServerMedia
+    api, mediaAssets, selectedMediaId, activeTool, objectNameInput, selectedObjectId, currentFrame, currentTime, videoDuration, videoFps, frameInput, isPlaying, isAiBusy, trackingFrameCount, statusMessage, toastMessage, showToast, zoom, zoomIn, zoomOut, zoomReset, deleteMedia, savedResults, loadedRemoteResultKeys, effectResults, selectedEffectId, effectTime, effectPlaying, effectVideoRef, imageRef, videoRef, exactFrameImageRef, exactFrameUrl, exactFrameLoading, annotationHitRef, fileInputRef, videoInputRef, annotationFolderInputRef, effectFolderInputRef, annotationsByMedia, trackingFramesByMedia, anomalyObjectIds, anomalyFrames, selectedMedia, isVideo, maxFrameIndex, currentMediaId, currentObjects, selectedObject, selectedEffect, formatTime, timeToFrame, frameToTime, getStagePoint, addObject, resetVideoViewToFirstFrame, ensureVideoFirstFrame, selectTool, onStageClick, tempBbox, onBboxDown, onBboxMove, onBboxUp, onObjectDropdownChange, selectObject, removeObject, renameObject, undo, redo, copyPreviousFrame, brightness, contrast, mediaFilterStyle, resetMediaFilter, annotatedFrameCount, clearSelection, openFilePicker, handleFiles, openAnnotationFolderPicker, handleAnnotationFolderFiles, onImageLoaded, onVideoLoaded, onVideoTimeUpdate, loadTrackingResult, seekVideo, seekToInputFrame, seekByFrame, togglePlayback, onVideoEnded, onTimelineClick, runAiSegment, runAiTrack, getMediaPixelSize, buildSam3AnnotationsJson, generateAnnotationsJson, exportDataset, loadSavedResults, openEffectFolderPicker, handleEffectFolder, loadEffects, onEffectTimeUpdate, toggleEffectPlayback, selectEffect, effectOverlayObjects, resetAnnotationViewForMedia, loadServerMedia
   }
 }
 

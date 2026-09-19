@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # macOS
 .DS_Store
 
@@ -43,3 +44,16 @@ backend/.env
 # 方法对比测试产物
 method_compare_results/
 docs/superpowers/
+=======
+.venv/
+**/.venv/
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+frontend/node_modules/
+frontend/dist/
+backend/track_data/
+backend/.env
+*.log
+backend/track_modul/
+>>>>>>> 64a29f5 (first commit)

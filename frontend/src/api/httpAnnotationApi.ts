@@ -5,8 +5,7 @@
  *   - 登录 + 保存人工标注  → 走真后端（本次要做的）
  *   - segment / track / effects 等 AI 接口 → 仍走 mockAnnotationApi
  *
- * 为什么要混合：效果查看页用的是本地 Mock 视频，后端还没有 AI 模块。
- * 如果整个换成 http 版，不启动后端时效果查看页会直接报错。
+ * 其余未接后端的旧接口仍保留在 Mock 层，当前主页面只使用其中必要能力。
  * 以后后端每接入一个模块，把下面对应的那行换成真实实现即可。
  */
 import { mockAnnotationApi } from './annotationApi'
@@ -21,8 +20,8 @@ import { http } from './http'
  * 注意：标注人由后端从 token 解析，这里不需要、也不能传 userId
  * —— 这就是「标注结果表加上标注人字段」的落法
  */
-const saveManualAnnotation = (input: SaveManualAnnotationRequest): Promise<{ id: string }> =>
-  http.post<{ id: string }>('/annotation/annotations/manual', input)
+const saveManualAnnotation = (input: SaveManualAnnotationRequest): Promise<{ id: string; batchId?: string }> =>
+  http.post<{ id: string; batchId?: string; count?: number }>('/annotation/annotations/manual', input)
 
 /** 查询当前登录用户的标注结果（标注结果页可用） */
 export const listResults = (projectId = 'default', mediaId?: string) =>

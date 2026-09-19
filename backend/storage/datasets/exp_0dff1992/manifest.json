@@ -1,0 +1,17 @@
+{
+  "exportId": "exp_0dff1992",
+  "createdAt": "2026-09-24T10:19:42Z",
+  "createdBy": 15,
+  "format": "both",
+  "finalVersions": [
+    "fv_14ed08dbb64e"
+  ],
+  "mediaRevision": "mrev_86d26adb1fc5b1b4",
+  "classKey": "sperm",
+  "classId": {
+    "coco": 1,
+    "yolo": 0
+  },
+  "samples": 3,
+  "annotations": 3
+}

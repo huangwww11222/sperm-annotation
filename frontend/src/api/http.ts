@@ -46,7 +46,11 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
       tokenStore.clear()
       window.dispatchEvent(new CustomEvent('auth:expired'))
     }
-    throw { message: (data as any)?.message ?? `请求失败 (${res.status})`, status: res.status } as ApiError
+    const detail = (data as any)?.detail
+    const detailMessage = Array.isArray(detail)
+      ? detail.map((item: any) => item?.msg || item?.message || JSON.stringify(item)).join('; ')
+      : typeof detail === 'string' ? detail : undefined
+    throw { message: (data as any)?.message ?? detailMessage ?? `请求失败 (${res.status})`, status: res.status } as ApiError
   }
 
   return data as T

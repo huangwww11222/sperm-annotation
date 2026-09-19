@@ -1,0 +1,1 @@
+ux-video and ux-portrait: 60 real frames each

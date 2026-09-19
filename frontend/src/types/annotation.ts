@@ -1,5 +1,5 @@
 export type MediaType = 'image' | 'video'
-export type AnnotationTool = 'point' | 'bbox'
+export type AnnotationTool = 'select' | 'point' | 'bbox'
 export type ObjectSource = 'manual' | 'ai'
 export type TaskStatus = 'queued' | 'running' | 'success' | 'failed'
 
@@ -31,6 +31,7 @@ export interface MediaAsset {
   duration?: number
   fps?: number
   sizeBytes?: number
+  frameCount?: number
   /** 后端为该视频建立的独立目录/资源 ID。 */
   serverMediaId?: string
   serverVideoName?: string
@@ -50,7 +51,7 @@ export interface AnnotationObject {
   anomaly?: { type: string; ratio: number; prevArea: number; currArea: number }
   anomaly_level?: 'normal' | 'warning' | 'anomaly' | 'disappeared'
   anomaly_reasons?: string[]
-  anomaly_details?: Record<string, number>
+  anomaly_details?: Record<string, unknown>
 }
 
 export interface FrameAnnotations {
@@ -67,6 +68,9 @@ export interface SavedAnnotationFile {
   timestampMs?: number
   savedAt: string
   filename: string
+  /** 后端保存批次号，用于结果页去重，避免重复挂载时再次追加同一批记录。 */
+  batchId?: string
+  username?: string | null
   objects: AnnotationObject[]
 }
 

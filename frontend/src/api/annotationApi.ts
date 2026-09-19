@@ -21,12 +21,12 @@ export interface UploadMediaResponse {
 export interface SaveManualAnnotationRequest {
   mediaId: string
   mediaType: MediaType
-  /** 视频固定为 0；图片可省略。 */
+  /** 视频保存请求字段是兼容兜底；逐对象 frameIndex/timestampMs 优先。 */
   mediaName?: string      // ← 加这行
   mediaWidth?: number     // ← 加这行
   mediaHeight?: number    // ← 加这行
   frameIndex?: number
-  /** 视频第一帧固定为 0；图片可省略。 */
+  /** 视频对象可携带各自 timestampMs；图片可省略。 */
   timestampMs?: number
   objects: AnnotationObject[]
   annotationVersion: string
