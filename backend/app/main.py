@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+import mimetypes
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,8 +17,8 @@ from pydantic import BaseModel
 
 from .auth import current_user, hash_password, sign_jwt, verify_password
 from .config import (
-    DB_FILE, DEVICE, DTYPE, HOST, JWT_SECRET, MAX_VIDEO_BYTES, MODEL_ID, PORT,
-    TRACK_DATA_DIR, TRACK_FRAMES, FRAME_DIFF_MAX_SEARCH_FRAMES,
+    DATASET_EXPORT_DIR, DB_FILE, DEVICE, DTYPE, HOST, JWT_SECRET, LEGACY_TRACK_DATA_DIR, MAX_VIDEO_BYTES, MODEL_ID, PORT,
+    TRACK_DATA_DIR, TRACK_FRAMES, ALLOW_FULL_VIDEO_TRACKING, FRAME_DIFF_SEARCH_TO_VIDEO_END, FRAME_DIFF_MAX_SEARCH_FRAMES,
     FRAME_DIFF_CONFIRM_FRAMES, FRAME_DIFF_MAX_CONFIRM_MISS, FRAME_DIFF_THRESHOLD,
     FRAME_DIFF_KNOWN_MARGIN, FRAME_DIFF_MIN_AREA, FRAME_DIFF_MIN_AREA_RATIO,
     FRAME_DIFF_TEMPLATE_THRESHOLD, FRAME_DIFF_ROI_RECT, FRAME_DIFF_VERBOSE_LOG,
@@ -64,7 +66,7 @@ def allocate_media_id(stem: str) -> str:
     """同名视频不覆盖旧目录：首次为 stem，后续依次 stem_001、stem_002...。"""
     candidate = stem
     index = 1
-    while (TRACK_DATA_DIR / candidate).exists():
+    while media_dir(candidate).exists():
         candidate = f"{stem}_{index:03d}"
         index += 1
     return candidate
@@ -81,6 +83,7 @@ class HealthResponse(BaseModel):
 def startup() -> None:
     init_db()
     TRACK_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    DATASET_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     print("=" * 70)
     print("✅ FastAPI backend started")
     print(f"   URL        : http://{HOST}:{PORT}")
@@ -238,7 +241,28 @@ def safe_stem(filename: str) -> str:
 
 
 def media_dir(media_id: str) -> Path:
-    return TRACK_DATA_DIR / Path(media_id).name
+    """Return the new storage path, or a matching legacy media directory."""
+    safe_id = Path(media_id).name
+    current = TRACK_DATA_DIR / safe_id
+    legacy = LEGACY_TRACK_DATA_DIR / safe_id
+    if not current.is_dir() and legacy.is_dir():
+        return legacy
+    return current
+
+
+def iter_media_dirs() -> list[Path]:
+    """List new storage first, then legacy directories not shadowed by it."""
+    result: list[Path] = []
+    seen: set[str] = set()
+    for root in (TRACK_DATA_DIR, LEGACY_TRACK_DATA_DIR):
+        if not root.is_dir():
+            continue
+        for directory in sorted(root.iterdir()):
+            if not directory.is_dir() or directory.name.startswith("_") or directory.name in seen:
+                continue
+            seen.add(directory.name)
+            result.append(directory)
+    return result
 
 
 def resolve_media_dir(media_id: str, media_name: str | None = None) -> Path | None:
@@ -255,9 +279,7 @@ def resolve_media_dir(media_id: str, media_name: str | None = None) -> Path | No
 
     # 2. 用 media_name 反查所有 media.json 的 videoName
     if media_name:
-        for d in TRACK_DATA_DIR.iterdir():
-            if not d.is_dir() or d.name.startswith("_"):
-                continue
+        for d in iter_media_dirs():
             mj = d / "media.json"
             if not mj.is_file():
                 continue
@@ -271,39 +293,52 @@ def resolve_media_dir(media_id: str, media_name: str | None = None) -> Path | No
     # 3. 兜底：按文件名（不含路径）匹配
     if media_name:
         stem = Path(media_name).stem  # 去掉扩展名
-        for d in TRACK_DATA_DIR.iterdir():
-            if not d.is_dir() or d.name.startswith("_"):
-                continue
+        for d in iter_media_dirs():
             # 目录名本身就是 stem（790663... 这种）
             if d.name == stem:
                 return d
-            # 目录里的 mp4 文件名匹配
-            for f in d.glob("*.mp4"):
-                if f.name == media_name or f.stem == stem:
+            for f in d.iterdir():
+                if f.is_file() and f.name == media_name:
                     return d
 
     return None
 
 
 def find_video(directory: Path) -> Path | None:
+    """Return the original source video without requiring MP4 or conversion."""
     if not directory.is_dir():
         return None
-    # Prefer the original uploaded MP4 recorded in media.json.
     meta_file = directory / "media.json"
     if meta_file.is_file():
         try:
             meta = json.loads(meta_file.read_text(encoding="utf-8"))
             candidate = directory / Path(str(meta.get("videoName", ""))).name
-            if candidate.is_file() and candidate.suffix.lower() == ".mp4":
+            if candidate.is_file() and candidate.name != OVERLAY_FILE_NAME:
                 return candidate
         except Exception:
             pass
-    # Never mistake the processed overlay video for the source video.
-    return next(
-        (x for x in directory.iterdir()
-         if x.is_file() and x.suffix.lower() == ".mp4" and x.name != OVERLAY_FILE_NAME),
-        None,
-    )
+    ignored_names = {OVERLAY_FILE_NAME, "media.json", RESULT_FILE_NAME}
+    ignored_suffixes = {".json", ".jsonl", ".db", ".txt", ".log", ".jpg", ".jpeg", ".png"}
+    for x in sorted(directory.iterdir()):
+        if not x.is_file() or x.name in ignored_names:
+            continue
+        if x.name.startswith(".") or x.suffix.lower() in ignored_suffixes:
+            continue
+        try:
+            import cv2
+            cap = cv2.VideoCapture(str(x))
+            opened = cap.isOpened()
+            cap.release()
+            if opened:
+                return x
+        except Exception:
+            continue
+    return None
+
+
+def _video_media_type(path: Path) -> str:
+    guessed, _ = mimetypes.guess_type(path.name)
+    return guessed if guessed and guessed.startswith("video/") else "application/octet-stream"
 
 
 async def save_upload(upload: UploadFile, target: Path) -> int:
@@ -322,9 +357,9 @@ async def save_upload(upload: UploadFile, target: Path) -> int:
 
 @app.post("/api/track/upload", status_code=201)
 async def upload_video(file: UploadFile = File(...), user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
-    filename = Path(file.filename or "video.mp4").name
-    if Path(filename).suffix.lower() != ".mp4":
-        raise HTTPException(400, "目前只支持 MP4 视频")
+    filename = Path(file.filename or "video.bin").name
+    if not Path(filename).suffix:
+        raise HTTPException(400, "视频文件必须包含扩展名")
     stem = safe_stem(filename)
     media_id = allocate_media_id(stem)
     directory = media_dir(media_id)
@@ -349,23 +384,32 @@ async def upload_video(file: UploadFile = File(...), user: dict[str, Any] = Depe
         except OSError:
             pass
         raise HTTPException(400, "视频文件为空")
-    # 用 cv2 读取视频真实元信息（FPS / 分辨率 / 帧数），供前端帧对齐使用
-    video_meta: dict[str, Any] = {}
+    # 用 OpenCV 读取源视频真实元信息；不转换、不改写原始文件。
     try:
-        import cv2
-        cap = cv2.VideoCapture(str(target))
-        if cap.isOpened():
-            video_meta = {
-                "fps": float(cap.get(cv2.CAP_PROP_FPS) or 0),
-                "width": int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0),
-                "height": int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0),
-                "frameCount": int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0),
-            }
-        cap.release()
-    except Exception:
-        video_meta = {}
-    (directory / "media.json").write_text(json.dumps({"mediaId": media_id, "videoName": filename, "videoPath": str(target.resolve()), "createdBy": user["uid"], **video_meta}, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {"mediaId": media_id, "videoName": filename, "videoUrl": f"/api/track/video/{media_id}", **video_meta}
+        video_meta = _probe_video(target)
+    except Exception as exc:
+        target.unlink(missing_ok=True)
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+        raise HTTPException(400, f"无法解码该视频格式：{exc}") from exc
+    if (
+        int(video_meta.get("frameCount") or 0) <= 0
+        or int(video_meta.get("width") or 0) <= 0
+        or int(video_meta.get("height") or 0) <= 0
+        or float(video_meta.get("fps") or 0) <= 0
+    ):
+        target.unlink(missing_ok=True)
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+        raise HTTPException(400, "上传文件不可读取，或无法获得有效的帧数、尺寸、FPS 元数据")
+    duration = (video_meta["frameCount"] / video_meta["fps"]) if video_meta.get("fps") else 0
+    meta = {"mediaId": media_id, "videoName": filename, "videoPath": str(target.resolve()), "videoMimeType": _video_media_type(target), "createdBy": user["uid"], **video_meta, "duration": duration}
+    (directory / "media.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"mediaId": media_id, "videoName": filename, "videoUrl": f"/api/track/video/{media_id}", "videoMimeType": meta["videoMimeType"], **video_meta, "duration": duration}
 
 
 @app.post("/api/track/annotations", status_code=201)
@@ -532,7 +576,7 @@ def plan_tracking(req: TrackPlanRequest, user: dict[str, Any] = Depends(current_
             min_area=FRAME_DIFF_MIN_AREA,
             min_area_ratio=FRAME_DIFF_MIN_AREA_RATIO,
             confirm_frames=FRAME_DIFF_CONFIRM_FRAMES,
-            max_search_frames=FRAME_DIFF_MAX_SEARCH_FRAMES,
+            max_search_frames=(None if FRAME_DIFF_SEARCH_TO_VIDEO_END else FRAME_DIFF_MAX_SEARCH_FRAMES),
             template_match_threshold=FRAME_DIFF_TEMPLATE_THRESHOLD,
             max_confirm_miss=FRAME_DIFF_MAX_CONFIRM_MISS,
             roi_rect=roi_rect,
@@ -541,9 +585,14 @@ def plan_tracking(req: TrackPlanRequest, user: dict[str, Any] = Depends(current_
     except (FileNotFoundError, ValueError, RuntimeError) as exc:
         raise HTTPException(400, str(exc)) from exc
 
-    recommended = max(1, min(result.recommended_track_frames, TRACK_FRAMES))
-    message = result.message
-    if result.frame_offset is not None and recommended < result.recommended_track_frames:
+    if result.status == "no_new_object":
+        total_frames = int(_probe_video(video).get("frameCount") or 0)
+        recommended = max(1, total_frames - int(req.startFrame))
+        message = f"从第 {req.startFrame} 帧到视频末尾未确认新的持续运动目标；SAM3 将直接追踪到视频末尾。"
+    else:
+        recommended = max(1, min(result.recommended_track_frames, TRACK_FRAMES))
+        message = result.message
+    if result.status != "no_new_object" and result.frame_offset is not None and recommended < result.recommended_track_frames:
         message = (
             f"{message} 但 SAM3 单次安全上限为 {TRACK_FRAMES} 帧，"
             f"本次实际提交 {recommended} 帧。"
@@ -563,14 +612,15 @@ def plan_tracking(req: TrackPlanRequest, user: dict[str, Any] = Depends(current_
         "message": message,
         "seedFilename": seed_path.name,
         "willReachNewObject": result.frame_offset is not None and recommended == result.recommended_track_frames,
+        "trackToEnd": result.status == "no_new_object",
     }
 
 @app.post("/api/track", status_code=202)
 def start_tracking(req: TrackRequest, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     if tracking_is_busy():
         raise HTTPException(409, "已有 SAM3 Tracking 任务正在运行，请等待完成")
-    if req.maxFrames > TRACK_FRAMES:
-        raise HTTPException(400, f"单次 Tracking 最多 {TRACK_FRAMES} 帧")
+    if req.maxFrames > TRACK_FRAMES and not ALLOW_FULL_VIDEO_TRACKING:
+        raise HTTPException(400, f"单次 Tracking 最多 {TRACK_FRAMES} 帧；完整视频追踪需要 ALLOW_FULL_VIDEO_TRACKING=1")
     if not req.annotations:
         raise HTTPException(400, "没有 Tracking seed bbox")
 
@@ -616,7 +666,7 @@ def start_tracking(req: TrackRequest, user: dict[str, Any] = Depends(current_use
     task_id = uuid.uuid4().hex
     _set_task(task_id, taskId=task_id, status="queued", message="queued", mediaId=req.mediaId, startFrame=req.startFrame, userId=user["uid"])
     TRACK_EXECUTOR.submit(_run_tracking_task, task_id, req, video, seed_file, output_file)
-    return {"taskId": task_id, "status": "queued", "maxFrames": req.maxFrames, "trackFrames": TRACK_FRAMES}
+    return {"taskId": task_id, "status": "queued", "maxFrames": req.maxFrames, "trackFrames": req.maxFrames}
 
 
 @app.get("/api/track/status/{task_id}")
@@ -704,7 +754,7 @@ def _read_tracker_jsonl(file: Path) -> list[dict[str, Any]]:
 def _tracker_rows_to_frames(rows: list[dict[str, Any]], fps: float = 0.0) -> list[dict[str, Any]]:
     """Convert raw-frame JSONL rows directly to browser-ready frame results.
 
-    Raw-frame mode uses the same frame index as the source MP4. No interpolation
+    Raw-frame mode uses the same frame index as the source video. No interpolation
     or sampled-frame conversion is performed.
     """
     frames: list[dict[str, Any]] = []
@@ -777,12 +827,8 @@ def tracking_result_file(media_id: str, user: dict[str, Any] = Depends(current_u
 def list_media(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     """列出后端已有的所有视频素材（刷新页面后可恢复素材列表）。"""
     items: list[dict[str, Any]] = []
-    if not TRACK_DATA_DIR.is_dir():
-        return {"items": items}
     name_count: dict[str, int] = {}
-    for entry in sorted(TRACK_DATA_DIR.iterdir()):
-        if not entry.is_dir():
-            continue
+    for entry in iter_media_dirs():
         video_file = find_video(entry)
         if not video_file:
             continue
@@ -802,11 +848,13 @@ def list_media(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
             "mediaId": entry.name,
             "videoName": display_name,
             "videoUrl": f"/api/track/video/{entry.name}",
+            "videoMimeType": meta.get("videoMimeType") or _video_media_type(video_file),
             "hasTrackingResult": has_result,
             "fps": meta.get("fps") or 0,
             "width": meta.get("width") or 0,
             "height": meta.get("height") or 0,
             "frameCount": meta.get("frameCount") or 0,
+            "duration": meta.get("duration") or ((meta.get("frameCount") or 0) / (meta.get("fps") or 1) if meta.get("fps") else 0),
         })
     return {"items": items}
 
@@ -829,13 +877,13 @@ def video(media_id: str) -> FileResponse:
     file = find_video(media_dir(media_id))
     if not file:
         raise HTTPException(404, "视频不存在")
-    return FileResponse(file, media_type="video/mp4", filename=file.name, content_disposition_type="inline")
+    return FileResponse(file, media_type=_video_media_type(file), filename=file.name, content_disposition_type="inline")
 
 
 
 @app.get("/api/track/frame/{media_id}/{frame_index}")
 def video_frame(media_id: str, frame_index: int, user: dict[str, Any] = Depends(current_user)) -> Response:
-    """返回原始视频的精确第 frame_index 帧。\n\n    精确逐帧标注模式不再依赖浏览器 currentTime/seek 的实际呈现帧；\n    后端直接从源 MP4 解码指定帧，并以 JPEG 返回给前端。\n    """
+    """返回原始视频的精确第 frame_index 帧。\n\n    精确逐帧标注模式不再依赖浏览器 currentTime/seek 的实际呈现帧；\n    后端直接从用户上传的原始源视频解码指定帧，并以 JPEG 返回给前端。\n    """
     if frame_index < 0:
         raise HTTPException(400, "frame_index 不能小于 0")
 
@@ -907,6 +955,19 @@ class DatasetExportRequest(BaseModel):
     annotations: list[dict[str, Any]]  # 所有帧的标注（来自 annotationsByMedia）
 
 
+def _dataset_class_name(value: Any) -> str:
+    """Map per-object display names to one shared training category.
+
+    UI names include stable tracking instance IDs (for example ``sperm 1``).
+    Those IDs distinguish objects during annotation but must not become COCO or
+    YOLO categories, so ``sperm1``, ``sperm 2`` and ``sperm_3`` all map to
+    ``sperm``.
+    """
+    name = str(value or "object").strip()
+    normalized = re.sub(r"(?:\s*[-_#]?\s*\d+|\s*[（(]\s*\d+\s*[）)])$", "", name).strip()
+    return normalized or name
+
+
 @app.post("/api/export/dataset")
 def export_dataset(req: DatasetExportRequest, user: dict[str, Any] = Depends(current_user)) -> FileResponse:
     """
@@ -922,7 +983,7 @@ def export_dataset(req: DatasetExportRequest, user: dict[str, Any] = Depends(cur
 
     # ── 1. 准备工作目录 ──
     export_id = f"export-{uuid.uuid4().hex[:10]}"
-    work_dir = TRACK_DATA_DIR / "_exports" / export_id
+    work_dir = DATASET_EXPORT_DIR / ".work" / export_id
     work_dir.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -941,8 +1002,10 @@ def export_dataset(req: DatasetExportRequest, user: dict[str, Any] = Depends(cur
         all_names = req.classNames or []
 
         # 先给前端传来的 classNames 编号
-        for i, name in enumerate(all_names):
-            class_names[name] = i
+        for name in all_names:
+            category = _dataset_class_name(name)
+            if category not in class_names:
+                class_names[category] = len(class_names)
 
         def _register(obj: dict[str, Any], source_hint: str = "frontend"):
             """把一个 annotation object 注册进 frames_map。"""
@@ -952,7 +1015,8 @@ def export_dataset(req: DatasetExportRequest, user: dict[str, Any] = Depends(cur
             if "source" not in obj_copy:
                 obj_copy["source"] = source_hint
             frames_map.setdefault(fi, []).append(obj_copy)
-            name = obj.get("name") or obj.get("objectId") or "object"
+            name = _dataset_class_name(obj.get("name") or obj.get("objectId") or "object")
+            obj_copy["name"] = name
             if name not in class_names:
                 class_names[name] = len(class_names)
 
@@ -1135,11 +1199,12 @@ def export_dataset(req: DatasetExportRequest, user: dict[str, Any] = Depends(cur
                             class_names, len(annotated_frames), do_split, split_ratio)
 
         # ── 10. 打包 zip ──
-        zip_path = work_dir.parent / f"{export_id}.zip"
+        dataset_name = safe_stem(req.mediaName or req.mediaId)
+        zip_path = DATASET_EXPORT_DIR / f"{dataset_name}_dataset_{export_id.rsplit('-', 1)[-1]}.zip"
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for f in work_dir.rglob("*"):
                 if f.is_file():
-                    zf.write(str(f), f.relative_to(work_dir.parent))
+                    zf.write(str(f), f.relative_to(work_dir))
 
         zip_size_mb = zip_path.stat().st_size / 1024 / 1024
         print(f"[export] zip ready: {zip_path.name} ({zip_size_mb:.2f}MB, {len(frame_filename)} frames)")

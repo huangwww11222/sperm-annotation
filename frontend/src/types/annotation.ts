@@ -35,6 +35,7 @@ export interface MediaAsset {
   /** 后端为该视频建立的独立目录/资源 ID。 */
   serverMediaId?: string
   serverVideoName?: string
+  frameFallback?: boolean
 }
 
 export interface AnnotationObject {

@@ -29,7 +29,7 @@ class TrackRequest(BaseModel):
     mediaWidth: float | None = None
     mediaHeight: float | None = None
     startFrame: int = Field(ge=0)
-    maxFrames: int = Field(default=TRACK_FRAMES, ge=1, le=TRACK_FRAMES)
+    maxFrames: int = Field(default=TRACK_FRAMES, ge=1)
     annotations: list[dict[str, Any]]
 
 
@@ -58,6 +58,7 @@ class TrackPlanResponse(BaseModel):
     message: str
     seedFilename: str
     willReachNewObject: bool = False
+    trackToEnd: bool = False
 
 
 class AnomalyScanRequest(BaseModel):

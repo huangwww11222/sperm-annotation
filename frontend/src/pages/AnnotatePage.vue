@@ -6,14 +6,14 @@ const {
   mediaAssets, selectedMediaId, activeTool, objectNameInput, selectedObjectId,
   currentFrame, currentTime, videoDuration, videoFps, frameInput, isPlaying,
   isAiBusy, statusMessage, toastMessage,
-  imageRef, videoRef, exactFrameImageRef, exactFrameUrl, exactFrameLoading, annotationHitRef, fileInputRef, videoInputRef,
+  imageRef, videoRef, exactFrameImageRef, exactFrameUrl, exactFrameLoading, videoPlaybackFallback, annotationHitRef, fileInputRef, videoInputRef,
   annotationsByMedia, selectedMedia, isVideo, maxFrameIndex, currentMediaId,
-  currentObjects, selectedObject, anomalyObjectIds, anomalyFrames, formatTime, addObject, resetVideoViewToFirstFrame, trackingFrameCount,
+  currentObjects, selectedObject, anomalyObjectIds, anomalyFrames, pausedAnomalies, formatTime, addObject, resetVideoViewToFirstFrame, trackingFrameCount,
   ensureVideoFirstFrame, selectTool, onStageClick, tempBbox, onBboxDown, onBboxMove,
   onBboxUp, onObjectDropdownChange, selectObject, removeObject, renameObject, undo, redo,
   copyPreviousFrame, brightness, contrast, mediaFilterStyle, resetMediaFilter, annotatedFrameCount,
   clearSelection, openFilePicker, handleFiles, onImageLoaded, onVideoLoaded,
-  onVideoTimeUpdate, seekToInputFrame, togglePlayback, onVideoEnded,
+  onVideoTimeUpdate, onVideoError, seekToInputFrame, togglePlayback, onVideoEnded,
   onTimelineClick, runAiTrack, generateAnnotationsJson,
   exportDataset, resetAnnotationViewForMedia, seekByFrame,
   zoom, zoomIn, zoomOut, zoomReset, deleteMedia, openAnnotationFolderPicker, handleAnnotationFolderFiles,
@@ -40,7 +40,11 @@ const allFrameCount = computed(() => {
 })
 const allClassNameList = computed(() => {
   const objs = annotationsByMedia.value[currentMediaId.value] ?? []
-  return Array.from(new Set(objs.map((o: any) => o.name).filter(Boolean))) as string[]
+  // 追踪用的实例名带编号（如 sperm 1），训练集类别必须合并为 sperm。
+  const categoryName = (name: string) => name.trim()
+    .replace(/(?:\s*[-_#]?\s*\d+|\s*[（(]\s*\d+\s*[）)])$/, '')
+    .trim() || name.trim()
+  return Array.from(new Set(objs.map((o: any) => categoryName(String(o.name || ''))).filter(Boolean))) as string[]
 })
 
 async function doExportDataset() {
@@ -190,7 +194,7 @@ watch([containerW, containerH], () => {
           <div class="flex gap-2">
             <input ref="fileInputRef" type="file" accept="image/*" multiple class="hidden" @change="handleFiles(($event.target as HTMLInputElement).files, 'image')" />
             <input ref="videoInputRef" type="file" accept="video/*" multiple class="hidden" @change="handleFiles(($event.target as HTMLInputElement).files, 'video')" />
-            <input ref="annotationFolderInputRef" type="file" accept="video/mp4,.mp4,application/json,.json" webkitdirectory directory multiple class="hidden" @change="handleAnnotationFolderFiles(($event.target as HTMLInputElement).files)" />
+            <input ref="annotationFolderInputRef" type="file" accept="video/*,.avi,.mov,.mkv,.webm,.m4v,.mpg,.mpeg,.wmv,.flv,.ts,.m2ts,.mts,.3gp,.ogv,.asf,application/json,.json" webkitdirectory directory multiple class="hidden" @change="handleAnnotationFolderFiles(($event.target as HTMLInputElement).files)" />
             <button class="btn-secondary" @click="openFilePicker('image')">上传图片</button>
             <button class="btn-secondary" @click="openFilePicker('video')">上传视频</button>
           </div>
@@ -265,16 +269,17 @@ watch([containerW, containerH], () => {
                         ref="videoRef"
                         :src="selectedMedia.url"
                         class="block h-full w-full select-none object-contain"
-                        :class="exactFrameUrl && !isPlaying ? 'invisible absolute inset-0' : ''"
+                        :class="videoPlaybackFallback || (exactFrameUrl && !isPlaying) ? 'invisible absolute inset-0' : ''"
                         :style="{ filter: mediaFilterStyle }"
                         preload="metadata"
                         playsinline
                         @loadedmetadata="onVideoLoaded"
                         @timeupdate="onVideoTimeUpdate"
                         @ended="onVideoEnded"
+                        @error="onVideoError"
                       />
                       <img
-                        v-if="exactFrameUrl && !isPlaying"
+                        v-if="exactFrameUrl && (!isPlaying || videoPlaybackFallback)"
                         ref="exactFrameImageRef"
                         :src="exactFrameUrl"
                         :alt="`${selectedMedia.name} frame ${currentFrame}`"
@@ -368,9 +373,17 @@ watch([containerW, containerH], () => {
               </div>
             </div>
 
-            <div v-if="anomalyObjectIds.length > 0" class="shrink-0 border-t border-amber-700 bg-amber-950/80 px-4 py-2 text-[11px] text-amber-300">
-              ⚠️ 检测到异常，Tracking 已暂停在第 {{ currentFrame }} 帧。
-              异常对象：{{ anomalyObjectIds.join(', ') }}。请检查/修正这一帧的标注后，再点击 AI Tracking 继续。
+            <div v-if="anomalyObjectIds.length > 0" class="shrink-0 border-t border-amber-700 bg-amber-950/80 px-4 py-3 text-[11px] text-amber-100">
+              <div class="font-semibold text-amber-300">⚠️ Tracking 已暂停在第 {{ currentFrame }} 帧，请人工确认后再继续。</div>
+              <div class="mt-2 grid gap-2 md:grid-cols-2" v-if="pausedAnomalies.length">
+                <div v-for="item in pausedAnomalies" :key="item.objectId" class="rounded border border-amber-700/70 bg-slate-950/45 px-3 py-2">
+                  <div class="font-medium text-amber-200">对象 {{ item.objectId }}：{{ item.title }}</div>
+                  <div class="mt-1 text-slate-200">{{ item.summary }}</div>
+                  <div v-if="item.metrics.length" class="mt-1 text-amber-300">检测值：{{ item.metrics.join(' · ') }}</div>
+                  <div class="mt-1 text-emerald-200">处理建议：{{ item.suggestion }}</div>
+                </div>
+              </div>
+              <div v-else class="mt-1">异常对象：{{ anomalyObjectIds.join(', ') }}。请检查/修正这一帧的标注后，再点击 AI Tracking 继续。</div>
             </div>
 
             <div v-if="isVideo" class="shrink-0 border-t border-slate-800 bg-slate-950/80 px-4 py-3">

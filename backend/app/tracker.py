@@ -122,6 +122,48 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def _clean_history_before_seed(
+    output_json: Path,
+    seed_source_frame: int,
+) -> list[tuple[int, dict[int, list[float]]]]:
+    """Return prior clean boxes for the long-term anomaly baseline.
+
+    Results at the new seed frame and later will be replaced by this tracking
+    request, so they must not affect the baseline.  Previously persisted HARD
+    anomalies are also excluded: they are exactly the oversized boxes that the
+    detector must not learn as a normal object size.
+    """
+    frames: list[tuple[int, dict[int, list[float]]]] = []
+    for row in _read_jsonl(output_json):
+        try:
+            source_frame = int(row.get("source_frame_index", row.get("frame_index", -1)))
+        except (TypeError, ValueError):
+            continue
+        if source_frame < 0 or source_frame >= int(seed_source_frame):
+            continue
+
+        objects: dict[int, list[float]] = {}
+        for obj in row.get("objects", []):
+            if not isinstance(obj, dict) or obj.get("anomaly_level") in {
+                AnomalyLevel.ANOMALY.value,
+                AnomalyLevel.DISAPPEARED.value,
+            }:
+                continue
+            bbox = obj.get("bbox")
+            try:
+                if not isinstance(bbox, list) or len(bbox) != 4:
+                    continue
+                clean_bbox = [float(v) for v in bbox]
+                if clean_bbox[2] <= clean_bbox[0] or clean_bbox[3] <= clean_bbox[1]:
+                    continue
+                objects[int(obj["object_id"])] = clean_bbox
+            except (KeyError, TypeError, ValueError):
+                continue
+        if objects:
+            frames.append((source_frame, objects))
+    return sorted(frames, key=lambda item: item[0])
+
+
 def rewind_tracking_results(
     path: Path,
     video_file: Path,
@@ -252,7 +294,8 @@ def track_video(
     session = engine.make_tracker_session(frames)
     engine.add_manual_boxes(session, seed_frame, objects)
 
-    # Anomaly detector: 每次 track_video 调用新建实例（Fix 4: 天然支持断点续跑）
+    # 每次 SAM3 推理请求都有新 detector，但先灌入当前分支在 seed 前的
+    # 已验证历史框。这样续追时也能和整个对象历史尺寸比较，而不是只看本轮。
     detector = AnomalyDetector(
         config=AnomalyConfig(),
         fps=source_fps,
@@ -260,6 +303,7 @@ def track_video(
         frame_height=height,
         all_object_ids=[int(o["object_id"]) for o in objects],
     )
+    detector.prime_history(_clean_history_before_seed(Path(output_json), seed_source_frame))
 
     # object_id → name 映射，让 tracking 结果继承用户标注的名字
     object_names: dict[int, str] = {int(o["object_id"]): o.get("name") or f"object-{o['object_id']}" for o in objects}
@@ -282,8 +326,8 @@ def track_video(
         "objects": seed_rows,
     }]
 
-    # 用 seed frame 初始化异常检测器历史，但不在 seed 本身触发暂停。
-    detector.push(
+    # 人工确认的 seed 作为可信历史写入，但不把它当作 AI 输出触发暂停。
+    detector.initialize_seed(
         seed_frame,
         {int(obj["object_id"]): list(obj["bbox"]) for obj in objects},
     )
@@ -367,6 +411,10 @@ def track_video(
                     pause_type = (
                         "edge_exit" if af.level == AnomalyLevel.DISAPPEARED
                         else "overlap" if any("bbox_overlap_with=" in r for r in af.reasons)
+                        else "merged_bbox_growth" if any(
+                            r.startswith(("history_area_ratio=", "history_width_ratio=", "history_height_ratio="))
+                            for r in af.reasons
+                        )
                         else "size_growth" if any(
                             any(k in r for k in ("area_ratio", "width_ratio", "height_ratio"))
                             for r in af.reasons

@@ -6,6 +6,7 @@
 frontend/node_modules/
 frontend/dist/
 backend/track_data/
+backend/storage/
 backend/.env
 *.log
 backend/track_modul/
