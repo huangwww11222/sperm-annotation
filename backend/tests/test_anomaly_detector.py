@@ -60,6 +60,45 @@ def test_height_growth_hard_pauses() -> None:
     assert report.object_levels[1] == AnomalyLevel.ANOMALY
 
 
+def test_long_term_history_pauses_on_merged_box_before_recent_baseline_adapts() -> None:
+    """An 80% size jump must pause even when short-term checks only warn."""
+    det = AnomalyDetector(frame_width=640, frame_height=432, fps=15)
+    for i in range(8):
+        det.push(i, {1: _bbox(area=200, cx=320, cy=216)})
+
+    # 1.8x area is below the old 2.8x short-term hard threshold.  It is large
+    # enough to represent a box that has absorbed a second object, though.
+    report = det.push(8, {1: _bbox(area=360, cx=320, cy=216)})
+    frame = next(frame for frame in report.frames if frame.object_id == 1)
+    assert report.should_pause is True
+    assert report.object_levels[1] == AnomalyLevel.ANOMALY
+    assert frame.details["history_sample_count"] == 8
+    assert frame.details["history_area_ratio"] == 1.8
+    assert any("history_area_ratio=1.800 HARD" in reason for reason in frame.reasons)
+
+
+def test_primed_history_carries_size_baseline_across_tracking_requests() -> None:
+    det = AnomalyDetector(frame_width=640, frame_height=432, fps=15)
+    det.prime_history([
+        (frame, {1: _bbox(area=200, cx=320, cy=216)})
+        for frame in range(20)
+    ])
+    report = det.push(20, {1: _bbox(area=400, cx=320, cy=216)})
+    assert report.should_pause is True
+    assert report.object_levels[1] == AnomalyLevel.ANOMALY
+
+
+def test_manual_seed_is_trusted_even_when_prior_history_has_a_different_size() -> None:
+    det = AnomalyDetector(frame_width=640, frame_height=432, fps=15)
+    det.prime_history([
+        (frame, {1: _bbox(area=200, cx=320, cy=216)})
+        for frame in range(10)
+    ])
+    det.initialize_seed(10, {1: _bbox(area=400, cx=320, cy=216)})
+    assert det.reports[-1].should_pause is False
+    assert det.states[1].level == AnomalyLevel.NORMAL
+
+
 def test_overlap_95_percent_pauses_both_objects() -> None:
     det = AnomalyDetector(frame_width=640, frame_height=432, fps=15)
     # Seed frame: intentional overlap is allowed while initializing tracking.
@@ -91,6 +130,8 @@ def test_hard_anomaly_does_not_pollute_baseline() -> None:
 def test_config_defaults() -> None:
     cfg = AnomalyConfig()
     assert cfg.BASELINE_WINDOW == 5
+    assert cfg.HISTORY_BASELINE_MIN_FRAMES == 5
+    assert cfg.HISTORY_AREA_GROW_HARD == 1.8
     assert cfg.EDGE_EXIT_MARGIN_PX == 10.0
     assert cfg.AREA_GROW_HARD == 2.8
     assert cfg.WIDTH_GROW_HARD == 1.8

@@ -5,9 +5,11 @@ Detects three classes of tracking failures that should pause SAM3 for human revi
 2) implausible sudden bbox enlargement/shrink/shape/center jumps,
 3) near-duplicate bbox overlap between two different tracked objects.
 
-The detector is deliberately conservative for sperm videos: it uses a 5-frame
-median baseline and only pauses on HARD events. SOFT metrics are retained for UI
-warnings but do not pause immediately.
+The detector is deliberately conservative for sperm videos: it uses a short-term
+5-frame median baseline *and* a robust baseline over every preceding clean box.
+The long-term baseline prevents several consecutive merged boxes from becoming
+the new normal after two objects overlap and then separate.  Only HARD events
+pause tracking; SOFT metrics are retained for UI warnings.
 """
 
 from __future__ import annotations
@@ -31,6 +33,14 @@ class AnomalyConfig:
 
     # Stable baseline is the median of the last N clean frames.
     BASELINE_WINDOW: int = 5
+
+    # The short-term baseline is responsive, but must be corroborated by a
+    # baseline over all earlier clean boxes.  Median is intentionally used
+    # instead of arithmetic mean: a single merged mask must never inflate the
+    # reference it is being compared with.
+    HISTORY_BASELINE_MIN_FRAMES: int = 5
+    HISTORY_AREA_GROW_HARD: float = 1.8
+    HISTORY_DIMENSION_GROW_HARD: float = 1.5
 
     # A target that disappears away from the edge is an immediate anomaly.
     # If its last bbox was within this many pixels of any image side, a normal
@@ -163,20 +173,20 @@ class AnomalyReport:
 
 
 class AnomalyDetector:
-    """Per-frame detector with a 5-frame robust baseline and hard-stop events."""
+    """Per-frame detector with short- and long-term robust baselines."""
 
     def __init__(
         self,
         config: AnomalyConfig | None = None,
         frame_width: int = 640,
         frame_height: int = 480,
-        fps: int = 30,
+        fps: float = 30,
         all_object_ids: Iterable[int] | None = None,
     ) -> None:
         self.config = config or AnomalyConfig()
         self.frame_width = int(frame_width)
         self.frame_height = int(frame_height)
-        self.fps = int(fps) if int(fps) > 0 else 30
+        self.fps = float(fps) if float(fps) > 0 else 30.0
         self.all_object_ids: set[int] = set(int(x) for x in (all_object_ids or []))
         self.states: dict[int, _ObjectState] = {}
         self.reports: list[AnomalyReport] = []
@@ -197,6 +207,63 @@ class AnomalyDetector:
             or y1 <= m
             or (self.frame_width - x2) <= m
             or (self.frame_height - y2) <= m
+        )
+
+    def prime_history(self, frames: Iterable[tuple[int, dict[int, list[float]]]]) -> None:
+        """Load verified boxes from an earlier tracking segment without alerts.
+
+        A resumed tracking request starts a fresh SAM3 inference session, but it
+        is still the same object track.  Priming retains its size reference
+        across requests while avoiding a retroactive pause for already-reviewed
+        frames.  Callers must pass only rows known to be clean.
+        """
+        for _frame_index, frame_objects in frames:
+            for raw_oid, bbox in frame_objects.items():
+                if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+                    continue
+                try:
+                    clean_bbox = [float(v) for v in bbox]
+                except (TypeError, ValueError):
+                    continue
+                if _bbox_area(clean_bbox) <= 0:
+                    continue
+                oid = int(raw_oid)
+                self.all_object_ids.add(oid)
+                self._state(oid).history.append(clean_bbox)
+
+    def initialize_seed(self, frame_index: int, frame_objects: dict[int, list[float]]) -> None:
+        """Record a human-confirmed seed frame without evaluating it as AI output.
+
+        A user may deliberately correct a box at the resume point.  That box is
+        authoritative input, not a prediction that should immediately trigger
+        a pause against older history.  Adding an empty report preserves the
+        normal rule that pairwise overlap is checked from the first propagated
+        frame onwards.
+        """
+        self.current_frame_index = int(frame_index)
+        levels: dict[int, AnomalyLevel] = {}
+        for raw_oid, bbox in frame_objects.items():
+            if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+                continue
+            try:
+                clean_bbox = [float(v) for v in bbox]
+            except (TypeError, ValueError):
+                continue
+            if _bbox_area(clean_bbox) <= 0:
+                continue
+            oid = int(raw_oid)
+            self.all_object_ids.add(oid)
+            st = self._state(oid)
+            st.history.append(clean_bbox)
+            st.level = AnomalyLevel.NORMAL
+            levels[oid] = AnomalyLevel.NORMAL
+        self.reports.append(
+            AnomalyReport(
+                frame_index=int(frame_index),
+                object_levels=levels,
+                frames=[],
+                should_pause=False,
+            )
         )
 
     def push(self, frame_index: int, frame_objects: dict[int, list[float]]) -> AnomalyReport:
@@ -254,6 +321,7 @@ class AnomalyDetector:
         # ---------------------------------------------------------------
         # 2. Present targets: size / movement / aspect changes.
         # ---------------------------------------------------------------
+        history_appended_ids: set[int] = set()
         for oid, bbox in frame_objects.items():
             oid = int(oid)
             st = self._state(oid)
@@ -263,9 +331,14 @@ class AnomalyDetector:
             st.missing_count = 0
             st.edge_frames = 0
 
+            # Recent boxes catch abrupt changes; the complete clean history
+            # catches a multi-frame merge that would otherwise poison the
+            # five-frame baseline.
             recent = st.history[-cfg.BASELINE_WINDOW:] if st.history else []
             history_ready = len(recent) >= cfg.BASELINE_WINDOW
             base = _median_bbox(recent)
+            historical_ready = len(st.history) >= cfg.HISTORY_BASELINE_MIN_FRAMES
+            historical_base = _median_bbox(st.history) if historical_ready else None
 
             reasons: list[str] = []
             details: dict[str, Any] = {}
@@ -289,6 +362,43 @@ class AnomalyDetector:
                     elif area_ratio < cfg.AREA_SHRINK_SOFT or area_ratio > cfg.AREA_GROW_SOFT:
                         soft_score += 1
                         reasons.append(f"area_ratio={area_ratio:.3f} SOFT")
+
+                # A merged mask may grow over several frames.  In that case
+                # the recent baseline is eventually enlarged as well, so also
+                # compare with the robust baseline over the whole prior track.
+                # This threshold is deliberately lower than AREA_GROW_HARD:
+                # for a sperm, an 80% area increase from its established size
+                # is already strong evidence that two objects share one box.
+                if historical_base is not None:
+                    hist_w, hist_h = _bbox_wh(historical_base)
+                    hist_area = _bbox_area(historical_base)
+                    details["history_sample_count"] = len(st.history)
+                    details["history_baseline_area"] = hist_area
+                    if hist_area > 0:
+                        historical_area_ratio = cur_area / hist_area
+                        details["history_area_ratio"] = historical_area_ratio
+                        if historical_area_ratio >= cfg.HISTORY_AREA_GROW_HARD:
+                            hard_score += 1
+                            reasons.append(
+                                f"history_area_ratio={historical_area_ratio:.3f} HARD"
+                            )
+
+                    if hist_w > 0:
+                        historical_width_ratio = cur_w / hist_w
+                        details["history_width_ratio"] = historical_width_ratio
+                        if historical_width_ratio >= cfg.HISTORY_DIMENSION_GROW_HARD:
+                            hard_score += 1
+                            reasons.append(
+                                f"history_width_ratio={historical_width_ratio:.3f} HARD"
+                            )
+                    if hist_h > 0:
+                        historical_height_ratio = cur_h / hist_h
+                        details["history_height_ratio"] = historical_height_ratio
+                        if historical_height_ratio >= cfg.HISTORY_DIMENSION_GROW_HARD:
+                            hard_score += 1
+                            reasons.append(
+                                f"history_height_ratio={historical_height_ratio:.3f} HARD"
+                            )
 
                 if base_w > 0:
                     width_ratio = cur_w / base_w
@@ -371,10 +481,20 @@ class AnomalyDetector:
                 # Warm-up: collect history, but don't pause based on metrics.
                 st.level = AnomalyLevel.NORMAL
 
-            if hard_score < 1.0 or not history_ready:
+            # Do not let a size/shape warning alter the reference size.  A
+            # center-motion warning alone is safe to retain because it does
+            # not change the dimensions used by the long-term comparison.
+            size_or_shape_warning = any(
+                reason.startswith(("area_ratio=", "width_ratio=", "height_ratio=", "aspect_change="))
+                for reason in reasons
+            )
+            if not history_ready or (hard_score < 1.0 and not size_or_shape_warning):
                 st.history.append([float(b) for b in bbox])
-                if len(st.history) > max(cfg.BASELINE_WINDOW * 3, 15):
-                    st.history = st.history[-max(cfg.BASELINE_WINDOW * 3, 15):]
+                history_appended_ids.add(oid)
+                # Keep the complete clean branch history.  A short bounded
+                # list would let a multi-frame merge replace its own size
+                # reference; four floats per frame is small compared with the
+                # decoded video/SAM3 session already held by this request.
 
             report.frames.append(
                 AnomalyFrame(
@@ -412,6 +532,13 @@ class AnomalyDetector:
                         self._append_reason(report, oid_b, reason_b, {**details, "other_object_id": oid_a}, AnomalyLevel.ANOMALY)
                         self._state(oid_a).level = AnomalyLevel.ANOMALY
                         self._state(oid_b).level = AnomalyLevel.ANOMALY
+                        # The current boxes have already passed individual
+                        # metrics, but their pairwise merge proves that they
+                        # are not clean size samples.  Remove only the value
+                        # appended for this frame from the long-term baseline.
+                        for oid in (oid_a, oid_b):
+                            if oid in history_appended_ids:
+                                self._state(oid).history.pop()
                     elif coverage >= cfg.OVERLAP_WARN:
                         reason_a = f"bbox_overlap_with={oid_b} coverage={coverage:.3f} SOFT"
                         reason_b = f"bbox_overlap_with={oid_a} coverage={coverage:.3f} SOFT"
@@ -426,6 +553,11 @@ class AnomalyDetector:
                             self._state(oid_a).level = AnomalyLevel.WARNING
                         if self._state(oid_b).level == AnomalyLevel.NORMAL:
                             self._state(oid_b).level = AnomalyLevel.WARNING
+                        # A softer overlap is not a stop by itself, but it is
+                        # still not a trustworthy size reference.
+                        for oid in (oid_a, oid_b):
+                            if oid in history_appended_ids:
+                                self._state(oid).history.pop()
 
         # ---------------------------------------------------------------
         # 4. Aggregate pause. A new HARD event pauses once. Normal recovery

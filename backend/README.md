@@ -175,7 +175,7 @@ POST /api/track/plan
 ```json
 {
   "mediaId": "sample",
-  "mediaName": "sample.mp4",
+  "mediaName": "sample.<video-ext>",
   "startFrame": 120,
   "seedFilename": "annotations_frame_000120.json"
 }
@@ -233,7 +233,7 @@ $env:FRAME_DIFF_ROI_RECT="0,96,640,260"
 ```text
 track_data/
 └── <mediaId>/
-    ├── sample.mp4
+    ├── sample.<video-ext>
     ├── media.json
     ├── annotations_frame_000120.json   # 本次 seed
     ├── tracker_results.json             # SAM3 JSONL

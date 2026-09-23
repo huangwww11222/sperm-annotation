@@ -11,7 +11,15 @@ except ImportError:
     pass
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
-TRACK_DATA_DIR = BACKEND_DIR / "track_data"
+# Persistent user-generated data is deliberately outside source code.  These
+# paths can be moved to a data disk or shared volume with APP_STORAGE_DIR.
+STORAGE_ROOT = Path(os.getenv("APP_STORAGE_DIR") or (BACKEND_DIR / "storage"))
+MEDIA_STORAGE_DIR = STORAGE_ROOT / "media"
+DATASET_EXPORT_DIR = STORAGE_ROOT / "datasets"
+# Read-only compatibility location for deployments made before storage/.
+LEGACY_TRACK_DATA_DIR = BACKEND_DIR / "track_data"
+# Compatibility alias while tracking code is progressively modularized.
+TRACK_DATA_DIR = MEDIA_STORAGE_DIR
 TRACK_MODUL_DIR = BACKEND_DIR / "track_modul"
 DATA_DIR = BACKEND_DIR / "data"
 DB_FILE = DATA_DIR / "app.db"
@@ -41,6 +49,10 @@ if TRACK_FRAMES < 1:
 
 # AI Tracking 新流程：先用帧差法预估需要向后处理多少帧，再交给 SAM3。
 FRAME_DIFF_MAX_SEARCH_FRAMES = int(os.getenv("FRAME_DIFF_MAX_SEARCH_FRAMES", "120"))
+# AI Tracking：帧差未找到新目标时，默认把搜索范围扩展到源视频末尾。
+FRAME_DIFF_SEARCH_TO_VIDEO_END = os.getenv("FRAME_DIFF_SEARCH_TO_VIDEO_END", "1").strip().lower() not in {"0", "false", "no"}
+# 允许“帧差未找到新目标”时直接要求 SAM3 从当前帧追踪到视频末尾。
+ALLOW_FULL_VIDEO_TRACKING = os.getenv("ALLOW_FULL_VIDEO_TRACKING", "1").strip().lower() not in {"0", "false", "no"}
 FRAME_DIFF_CONFIRM_FRAMES = int(os.getenv("FRAME_DIFF_CONFIRM_FRAMES", "3"))
 FRAME_DIFF_MAX_CONFIRM_MISS = int(os.getenv("FRAME_DIFF_MAX_CONFIRM_MISS", "2"))
 FRAME_DIFF_THRESHOLD = int(os.getenv("FRAME_DIFF_THRESHOLD", "12"))

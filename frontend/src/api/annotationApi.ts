@@ -59,7 +59,7 @@ export interface TaskResponse {
 
 export interface AnnotationApi {
   uploadMedia(input: UploadMediaRequest): Promise<UploadMediaResponse>
-  saveManualAnnotation(input: SaveManualAnnotationRequest): Promise<{ id: string }>
+  saveManualAnnotation(input: SaveManualAnnotationRequest): Promise<{ id: string; batchId?: string }>
   segment(input: SegmentRequest): Promise<{ objects: AnnotationObject[] }>
   track(input: TrackRequest): Promise<{ taskId: string }>
   getTask(taskId: string): Promise<TaskResponse>

@@ -24,6 +24,7 @@ export interface TrackUploadResponse {
   duration?: number
   fps?: number
   frameCount?: number
+  videoMimeType?: string
 }
 
 export interface TrackRunResponse {
@@ -49,6 +50,7 @@ export interface TrackPlanResponse {
   message: string
   seedFilename: string
   willReachNewObject?: boolean
+  trackToEnd?: boolean
 }
 
 export interface TrackStatusResponse {
@@ -61,7 +63,7 @@ export interface TrackStatusResponse {
     object_id: number
     type: string
     reasons?: string[]
-    details?: Record<string, unknown>
+    details?: Record<string, number | string | boolean | null | undefined>
     ratio?: number | null
     prevArea?: number | null
     currArea?: number | null
@@ -170,7 +172,7 @@ export const trackApi = {
   },
 
   async listMedia() {
-    return jsonRequest<{ items: Array<{ mediaId: string; videoName: string; videoUrl: string; hasTrackingResult: boolean; fps?: number; width?: number; height?: number; frameCount?: number }> }>('/track/media')
+    return jsonRequest<{ items: Array<{ mediaId: string; videoName: string; videoUrl: string; videoMimeType?: string; hasTrackingResult: boolean; fps?: number; width?: number; height?: number; frameCount?: number; duration?: number }> }>('/track/media')
   },
 
   async deleteMedia(mediaId: string) {
