@@ -19,6 +19,8 @@ const routePath = router.path
           <nav class="flex items-center rounded-xl border border-slate-700 bg-slate-900 p-1">
             <button class="nav-btn" :class="routePath === '/annotate' ? 'nav-btn-active' : ''" @click="router.push('/annotate')">人工标注</button>
             <button class="nav-btn" :class="routePath === '/results' ? 'nav-btn-active' : ''" @click="router.push('/results')">标注结果</button>
+            <button class="nav-btn" :class="routePath === '/review' ? 'nav-btn-active' : ''" @click="router.push('/review')">审查模式</button>
+            <button class="nav-btn" :class="routePath === '/confirm' ? 'nav-btn-active' : ''" @click="router.push('/confirm')">对比确认</button>
           </nav>
           <div class="flex items-center gap-2 border-l border-slate-800 pl-4">
             <span class="text-xs text-slate-400">{{ user?.name }}</span>
