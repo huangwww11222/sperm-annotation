@@ -1,4 +1,4 @@
-import { tokenStore } from './http'
+import { notifyAuthExpired, tokenStore } from './http'
 import type { TrackingFrameResult } from '../types/annotation'
 
 const jsonRequest = async <T>(path: string, init: RequestInit = {}): Promise<T> => {
@@ -11,7 +11,10 @@ const jsonRequest = async <T>(path: string, init: RequestInit = {}): Promise<T> 
     },
   })
   const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error((data as any)?.message || (data as any)?.detail || `请求失败 (${res.status})`)
+  if (!res.ok) {
+    if (res.status === 401) notifyAuthExpired()
+    throw new Error((data as any)?.message || (data as any)?.detail || `请求失败 (${res.status})`)
+  }
   return data as T
 }
 
@@ -36,23 +39,6 @@ export interface TrackRunResponse {
 }
 
 
-export interface TrackPlanResponse {
-  mediaId: string
-  startFrame: number
-  status: 'new_object_found' | 'no_new_object' | 'invalid' | string
-  newObjectFrame?: number | null
-  frameOffset?: number | null
-  recommendedTrackFrames: number
-  searchFrames: number
-  knownBoxCount: number
-  bbox?: [number, number, number, number] | null
-  score?: number | null
-  message: string
-  seedFilename: string
-  willReachNewObject?: boolean
-  trackToEnd?: boolean
-}
-
 export interface TrackStatusResponse {
   taskId: string
   status: 'queued' | 'running' | 'success' | 'failed' | 'paused'
@@ -61,15 +47,28 @@ export interface TrackStatusResponse {
   pausedFrame?: number
   pausedObjects?: Array<{
     object_id: number
+    name?: string
+    display_name?: string
     type: string
     reasons?: string[]
-    details?: Record<string, number | string | boolean | null | undefined>
+    details?: Record<string, number | string | boolean | number[] | null | undefined>
+    currentBox?: number[] | null
+    manualBaselineBox?: number[] | null
+    manualBaselineFrame?: number | null
+    metrics?: Record<string, number | null | undefined>
+    reviewStartFrame?: number | null
+    reviewEndFrame?: number | null
+    reviewLookbackFrames?: number | null
+    other_object_id?: number | null
+    other_display_name?: string | null
     ratio?: number | null
     prevArea?: number | null
     currArea?: number | null
   }>
   anomalyLevels?: Record<string, string>
   processedFrames?: number
+  lastProcessedFrame?: number
+  reachedVideoEnd?: boolean
 }
 
 export interface TrackResultFile {
@@ -77,6 +76,49 @@ export interface TrackResultFile {
   media?: Record<string, unknown>
   tracking?: Record<string, unknown>
   frames: TrackingFrameResult[]
+}
+
+export interface TrackMediaItem {
+  mediaId: string
+  directoryName: string
+  sourceVideoName: string
+  videoName: string
+  videoUrl: string
+  videoMimeType?: string
+  hasTrackingResult: boolean
+  hasWorkspaceState?: boolean
+  fps?: number
+  width?: number
+  height?: number
+  frameCount?: number
+  duration?: number
+}
+
+export interface TrackWorkspaceState {
+  exists: boolean
+  format?: 'annotation-workspace-v1'
+  mediaId: string
+  frontendMediaId?: string
+  updatedAt?: string
+  currentFrame?: number
+  manualAnnotations?: unknown[]
+  manualBaselines?: Array<{
+    objectId: number
+    name?: string
+    source: 'manual'
+    frameIndex: number
+    bbox: [number, number, number, number]
+  }>
+  deletedTrackingIds?: string[]
+  anomalyFrames?: Array<{ frame_index: number; level: string; reasons: string[] }>
+  pausedAnomalies?: unknown[]
+  lastPausedContext?: { mediaId: string; frameIndex: number } | null
+  display?: { brightness?: number; contrast?: number; zoom?: number }
+  editor?: {
+    activeTool?: 'select' | 'point' | 'bbox'
+    objectNameInput?: string
+    selectedObjectId?: string | null
+  }
 }
 
 export const trackApi = {
@@ -91,7 +133,10 @@ export const trackApi = {
       body: form,
     })
     const data = await res.json().catch(() => ({}))
-    if (!res.ok) throw new Error((data as any)?.message || (data as any)?.detail || `视频上传失败 (${res.status})`)
+    if (!res.ok) {
+      if (res.status === 401) notifyAuthExpired()
+      throw new Error((data as any)?.message || (data as any)?.detail || `视频上传失败 (${res.status})`)
+    }
     return data as TrackUploadResponse
   },
 
@@ -125,18 +170,6 @@ export const trackApi = {
     })
   },
 
-  async plan(input: {
-    mediaId: string
-    mediaName: string
-    startFrame: number
-    seedFilename?: string
-  }) {
-    return jsonRequest<TrackPlanResponse>('/track/plan', {
-      method: 'POST',
-      body: JSON.stringify(input),
-    })
-  },
-
   async run(input: {
     mediaId: string
     mediaName: string
@@ -161,6 +194,7 @@ export const trackApi = {
     })
     if (!res.ok) {
       const data = await res.json().catch(() => ({}))
+      if (res.status === 401) notifyAuthExpired()
       throw new Error((data as any)?.message || (data as any)?.detail || `读取第 ${frameIndex} 帧失败 (${res.status})`)
     }
     return res.blob()
@@ -171,11 +205,25 @@ export const trackApi = {
     return jsonRequest<TrackResultFile | TrackingFrameResult>(`/track/result/${encodeURIComponent(mediaId)}${query}`)
   },
 
-  async listMedia() {
-    return jsonRequest<{ items: Array<{ mediaId: string; videoName: string; videoUrl: string; videoMimeType?: string; hasTrackingResult: boolean; fps?: number; width?: number; height?: number; frameCount?: number; duration?: number }> }>('/track/media')
+  async getWorkspaceState(mediaId: string) {
+    return jsonRequest<TrackWorkspaceState>(`/track/workspace/${encodeURIComponent(mediaId)}`)
   },
 
-  async deleteMedia(mediaId: string) {
-    return jsonRequest<{ deleted: boolean }>(`/track/media/${encodeURIComponent(mediaId)}`, { method: 'DELETE' })
+  async saveWorkspaceState(mediaId: string, state: Omit<TrackWorkspaceState, 'exists' | 'mediaId'>) {
+    return jsonRequest<{
+      ok: boolean
+      mediaId: string
+      filename: string
+      manualAnnotationCount: number
+      manualBaselineCount: number
+    }>(`/track/workspace/${encodeURIComponent(mediaId)}`, {
+      method: 'PUT',
+      body: JSON.stringify(state),
+    })
   },
+
+  async listMedia() {
+    return jsonRequest<{ items: TrackMediaItem[] }>('/track/media')
+  },
+
 }

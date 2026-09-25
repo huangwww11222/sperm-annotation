@@ -94,13 +94,11 @@ The SAM3 path is aligned with the validated `01_test` reference: default process
   ↓
 保存当前帧 seed JSON
   ↓
-后端 Frame Difference Planner
+后端 SAM3 持续 Tracking
   ↓
-计算 recommendedTrackFrames
+异常时暂停；否则到单轮上限或视频末尾
   ↓
-原 SAM3 Tracking
-  ↓
-定位新目标候选帧
+定位到实际 lastProcessedFrame
 ```
 
-前端不直接运行 OpenCV；所有 MP4 帧差分析均由 FastAPI 后端完成。
+单轮上限由后端 `SAM3_TRACK_FRAMES` 控制并包含 seed 帧。

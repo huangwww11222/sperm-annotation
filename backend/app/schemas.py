@@ -37,30 +37,6 @@ def jsonable_bbox(bbox: list[float]) -> list[float]:
     return [round(float(v), 3) for v in bbox]
 
 
-class TrackPlanRequest(BaseModel):
-    mediaId: str
-    mediaName: str | None = None
-    startFrame: int = Field(ge=0)
-    seedFilename: str | None = None
-
-
-class TrackPlanResponse(BaseModel):
-    mediaId: str
-    startFrame: int
-    status: str
-    newObjectFrame: int | None = None
-    frameOffset: int | None = None
-    recommendedTrackFrames: int
-    searchFrames: int
-    knownBoxCount: int
-    bbox: list[int] | None = None
-    score: float | None = None
-    message: str
-    seedFilename: str
-    willReachNewObject: bool = False
-    trackToEnd: bool = False
-
-
 class AnomalyScanRequest(BaseModel):
     mediaId: str
     mediaName: str | None = None

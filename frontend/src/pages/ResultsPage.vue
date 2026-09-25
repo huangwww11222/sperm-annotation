@@ -34,12 +34,16 @@ const loading = ref(false)
 const errorMessage = ref('')
 const selectedMediaId = ref('')
 
+const mediaIdentity = (row: DbRow) =>
+  `${row.media_type || 'video'}:${String(row.media_name || row.media_id).trim().toLocaleLowerCase()}`
+
 const mediaOptions = computed(() => {
   const map = new Map<string, { id: string; name: string; type: string }>()
   for (const row of rawRows.value) {
-    if (!map.has(row.media_id)) {
-      map.set(row.media_id, {
-        id: row.media_id,
+    const identity = mediaIdentity(row)
+    if (!map.has(identity)) {
+      map.set(identity, {
+        id: identity,
         name: row.media_name || row.media_id,
         type: row.media_type || 'video',
       })
@@ -50,15 +54,16 @@ const mediaOptions = computed(() => {
 
 const filteredRows = computed(() => {
   return selectedMediaId.value
-    ? rawRows.value.filter((row) => row.media_id === selectedMediaId.value)
+    ? rawRows.value.filter((row) => mediaIdentity(row) === selectedMediaId.value)
     : rawRows.value
 })
 
 const groupedRows = computed<ResultGroup[]>(() => {
   const groups = new Map<string, ResultGroup>()
   for (const row of filteredRows.value) {
-    // 一次点击 AI Tracking 会自动保存一个 batch；该 batch 下同一帧的所有人工对象合并展示。
-    const key = row.batch_id || `${row.media_id}:${row.frame_index}:${row.created_at}:${row.user_id}`
+    // 标注结果展示当前逻辑状态，而不是重复展示每次 Tracking 产生的保存批次。
+    // 同一文件（兼容历史临时 media_id）、同一帧、同一标注人只显示一行。
+    const key = `${mediaIdentity(row)}:${row.frame_index}:${row.user_id}`
     const existing = groups.get(key)
     if (existing) {
       if (row.object_name && !existing.objects.includes(row.object_name)) existing.objects.push(row.object_name)

@@ -32,6 +32,17 @@ const createWorkspace = () => {
     ]
   }
   const mediaAssets = ref<MediaAsset[]>(loadMediaAssets())
+  const loadClosedMediaFrontendIds = (): Record<string, string> => {
+    try {
+      return JSON.parse(localStorage.getItem('closedMediaFrontendIds') || '{}')
+    } catch {
+      return {}
+    }
+  }
+  const closedMediaFrontendIds = loadClosedMediaFrontendIds()
+  const persistClosedMediaFrontendIds = () => {
+    try { localStorage.setItem('closedMediaFrontendIds', JSON.stringify(closedMediaFrontendIds)) } catch {}
+  }
   let mediaSaveTimer: ReturnType<typeof setTimeout> | null = null
   watch(mediaAssets, (val) => {
     if (mediaSaveTimer) clearTimeout(mediaSaveTimer)
@@ -45,6 +56,9 @@ const createWorkspace = () => {
   }, { deep: true })
 
   const selectedMediaId = ref(mediaAssets.value[0]?.id ?? '')
+  let workspaceRestoreInProgress = false
+  let persistWorkspaceState: (mediaId: string, useCurrentUiState?: boolean) => Promise<void> = async () => {}
+  let scheduleWorkspaceStateSave: (mediaId: string) => void = () => {}
   const activeTool = ref<AnnotationTool>('point')
   const objectNameInput = ref('rare sperm')
   const selectedObjectId = ref<string | null>(null)
@@ -62,29 +76,30 @@ const createWorkspace = () => {
   const zoomIn = (step = 0.1) => { if (isInteracting()) return; zoom.value = Math.min(5, +(zoom.value + step).toFixed(2)) }
   const zoomOut = (step = 0.1) => { if (isInteracting()) return; zoom.value = Math.max(0.25, +(zoom.value - step).toFixed(2)) }
   const zoomReset = () => { zoom.value = 1 }
-  const deleteMedia = async (mediaId: string) => {
+  const closeMedia = async (mediaId: string) => {
     const media = mediaAssets.value.find((m) => m.id === mediaId)
     if (!media) return
-    if (!media.serverMediaId) {
-      // 本地素材直接移除
-      mediaAssets.value = mediaAssets.value.filter((m) => m.id !== mediaId)
-      if (selectedMediaId.value === mediaId) {
-        selectedMediaId.value = mediaAssets.value.length ? mediaAssets.value[0].id : ''
-      }
-      return
+
+    if (media.serverMediaId && mediaId === currentMediaId.value) {
+      try { await persistWorkspaceState(mediaId, true) }
+      catch (error) { console.warn('关闭前保存工作区状态失败：', error) }
     }
-    try {
-      await trackApi.deleteMedia(media.serverMediaId)
-    } catch {
-      // 后端可能已不存在该素材（404），忽略错误，前端仍然清理
-    } finally {
-      mediaAssets.value = mediaAssets.value.filter((m) => m.id !== mediaId)
-      delete trackingFramesByMedia.value[mediaId]
-      if (selectedMediaId.value === mediaId) {
-        selectedMediaId.value = mediaAssets.value.length ? mediaAssets.value[0].id : ''
-      }
-      showToast(`已删除：${media.name}`)
+
+    // 素材列表中的按钮只代表关闭当前浏览器视图。后端原视频、人工标注、
+    // tracker_results.json、数据集以及数据库记录全部保留，之后可通过
+    // “加载标注”或刷新后端素材列表重新打开。
+    if (media.url.startsWith('blob:')) URL.revokeObjectURL(media.url)
+    if (media.serverMediaId) {
+      closedMediaFrontendIds[media.serverMediaId] = media.id
+      persistClosedMediaFrontendIds()
     }
+    mediaAssets.value = mediaAssets.value.filter((m) => m.id !== mediaId)
+    delete trackingFramesByMedia.value[mediaId]
+    if (selectedMediaId.value === mediaId) {
+      selectedMediaId.value = mediaAssets.value.length ? mediaAssets.value[0].id : ''
+    }
+    statusMessage.value = `已关闭素材：${media.name}；后端文件和标注记录均已保留`
+    showToast(`已关闭「${media.name}」，后端记录未删除`)
   }
   const toastMessage = ref('')
   let toastTimer: ReturnType<typeof setTimeout> | null = null
@@ -133,6 +148,7 @@ const createWorkspace = () => {
     if (saveTimer) clearTimeout(saveTimer)
     saveTimer = setTimeout(() => {
       try { localStorage.setItem('annotationsByMedia', JSON.stringify(val)) } catch {}
+      if (!workspaceRestoreInProgress) scheduleWorkspaceStateSave(selectedMediaId.value)
     }, 300)
   }, { deep: true })
 
@@ -178,11 +194,18 @@ const createWorkspace = () => {
   // 当前暂停的可读诊断，供人工在画面旁直接判断如何修框/续追。
   const pausedAnomalies = ref<Array<{
     objectId: number
+    displayName: string
     title: string
     summary: string
     metrics: string[]
+    baselineFrame?: number
+    reviewRange?: string
+    reviewNotice?: string
     suggestion: string
   }>>([])
+  const anomalyPanelVisible = ref(false)
+  const closeAnomalyPanel = () => { anomalyPanelVisible.value = false }
+  const lastPausedContext = ref<{ mediaId: string; frameIndex: number } | null>(null)
   let trackingLoadSerial = 0
   let lastTrackingPollAt = 0
   let videoFrameCallbackId: number | null = null
@@ -201,6 +224,20 @@ const createWorkspace = () => {
 
   /** 视频按真实 currentFrame 标注；Tracking 从当前人工标注帧开始。 */
   const currentMediaId = computed(() => selectedMediaId.value)
+
+  const annotationIdentity = (obj: AnnotationObject) =>
+    `${obj.frameIndex ?? 0}:${obj.objectId ?? obj.id}`
+
+  const dedupeAnnotationObjects = (objects: AnnotationObject[]) => {
+    const unique = new Map<string, AnnotationObject>()
+    for (const obj of objects) {
+      const key = annotationIdentity(obj)
+      const previous = unique.get(key)
+      // Manual state is authoritative over an AI object on the same frame/ID.
+      if (!previous || obj.source === 'manual' || previous.source !== 'manual') unique.set(key, obj)
+    }
+    return [...unique.values()]
+  }
 
   /** 全局 objectId 计数器：从现有最大 objectId 继续分配 */
   const getNextObjectId = (mediaId?: string): number => {
@@ -595,6 +632,7 @@ const createWorkspace = () => {
     // 记录到已删除集合，防止 loadTrackingResult 重新加载后又出现
     if (!deletedTrackingIds.value[mediaId]) deletedTrackingIds.value[mediaId] = new Set()
     deletedTrackingIds.value[mediaId].add(objectId)
+    scheduleWorkspaceStateSave(mediaId)
 
     if (selectedObjectId.value === objectId) selectedObjectId.value = null
   }
@@ -605,7 +643,11 @@ const createWorkspace = () => {
     if (!selectedObjectId.value || !name) return
     snapshotUndo()
     const mediaId = currentMediaId.value
-    annotationsByMedia.value = { ...annotationsByMedia.value, [mediaId]: currentObjects.value.map((obj) => obj.id === selectedObjectId.value ? { ...obj, name, source: 'manual' as const } : obj) }
+    const allObjects = annotationsByMedia.value[mediaId] ?? []
+    annotationsByMedia.value = {
+      ...annotationsByMedia.value,
+      [mediaId]: allObjects.map((obj) => obj.id === selectedObjectId.value ? { ...obj, name, source: 'manual' as const } : obj),
+    }
     statusMessage.value = `对象已命名为：${name}`
   }
 
@@ -636,6 +678,134 @@ const createWorkspace = () => {
   const contrast = ref(100)
   const mediaFilterStyle = computed(() => `brightness(${brightness.value}%) contrast(${contrast.value}%)`)
   const resetMediaFilter = () => { brightness.value = 100; contrast.value = 100 }
+
+  const workspaceSaveTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+  const latestManualBaselines = (media: MediaAsset, objects: AnnotationObject[]) => {
+    if (!media.width || !media.height) return []
+    const latest = new Map<number, AnnotationObject>()
+    for (const obj of objects) {
+      if (obj.source !== 'manual' || obj.objectId == null || !obj.bbox) continue
+      const previous = latest.get(obj.objectId)
+      if (!previous || (obj.frameIndex ?? 0) >= (previous.frameIndex ?? 0)) latest.set(obj.objectId, obj)
+    }
+    return [...latest.values()].map((obj) => ({
+      objectId: obj.objectId as number,
+      name: obj.name,
+      source: 'manual' as const,
+      frameIndex: obj.frameIndex ?? 0,
+      bbox: [
+        obj.bbox!.x / 100 * media.width!,
+        obj.bbox!.y / 100 * media.height!,
+        (obj.bbox!.x + obj.bbox!.width) / 100 * media.width!,
+        (obj.bbox!.y + obj.bbox!.height) / 100 * media.height!,
+      ] as [number, number, number, number],
+    }))
+  }
+
+  persistWorkspaceState = async (mediaId: string, useCurrentUiState = false) => {
+    const media = mediaAssets.value.find((item) => item.id === mediaId)
+    if (!media?.serverMediaId || workspaceRestoreInProgress) return
+    const includeUiState = useCurrentUiState || mediaId === currentMediaId.value
+    const manualAnnotations = dedupeAnnotationObjects(
+      (annotationsByMedia.value[mediaId] ?? []).filter((obj) => obj.source === 'manual'),
+    )
+    const state = {
+      format: 'annotation-workspace-v1' as const,
+      frontendMediaId: media.id,
+      updatedAt: new Date().toISOString(),
+      currentFrame: includeUiState ? currentFrame.value : 0,
+      manualAnnotations: JSON.parse(JSON.stringify(manualAnnotations)),
+      manualBaselines: latestManualBaselines(media, manualAnnotations),
+      deletedTrackingIds: [...(deletedTrackingIds.value[mediaId] ?? new Set<string>())],
+      anomalyFrames: includeUiState ? JSON.parse(JSON.stringify(anomalyFrames.value)) : [],
+      pausedAnomalies: includeUiState ? JSON.parse(JSON.stringify(pausedAnomalies.value)) : [],
+      lastPausedContext: includeUiState && lastPausedContext.value?.mediaId === mediaId
+        ? { mediaId, frameIndex: lastPausedContext.value.frameIndex }
+        : null,
+      display: {
+        brightness: includeUiState ? brightness.value : 100,
+        contrast: includeUiState ? contrast.value : 100,
+        zoom: includeUiState ? zoom.value : 1,
+      },
+      editor: {
+        activeTool: includeUiState ? activeTool.value : 'select',
+        objectNameInput: includeUiState ? objectNameInput.value : 'rare sperm',
+        selectedObjectId: includeUiState ? selectedObjectId.value : null,
+      },
+    }
+    await trackApi.saveWorkspaceState(media.serverMediaId, state)
+  }
+
+  scheduleWorkspaceStateSave = (mediaId: string) => {
+    if (!mediaId || workspaceRestoreInProgress) return
+    const previous = workspaceSaveTimers.get(mediaId)
+    if (previous) clearTimeout(previous)
+    workspaceSaveTimers.set(mediaId, setTimeout(() => {
+      workspaceSaveTimers.delete(mediaId)
+      void persistWorkspaceState(mediaId).catch((error) => console.warn('工作区状态保存失败：', error))
+    }, 800))
+  }
+
+  // Switching assets happens before the new asset resets the shared editor
+  // refs. Persist the old asset with the still-current UI values so its frame,
+  // anomaly panel and display/editor state are not overwritten by defaults.
+  watch(selectedMediaId, (nextId, previousId) => {
+    if (!previousId || previousId === nextId) return
+    void persistWorkspaceState(previousId, true).catch((error) => console.warn('切换素材前保存工作区状态失败：', error))
+  })
+
+  watch(
+    [currentFrame, brightness, contrast, zoom, anomalyFrames, pausedAnomalies, lastPausedContext, activeTool, objectNameInput, selectedObjectId],
+    () => {
+      if (!workspaceRestoreInProgress) scheduleWorkspaceStateSave(currentMediaId.value)
+    },
+    { deep: true },
+  )
+
+  const restoreWorkspaceState = async (mediaId: string): Promise<number | null> => {
+    const media = mediaAssets.value.find((item) => item.id === mediaId)
+    if (!media?.serverMediaId) return null
+    try {
+      const state = await trackApi.getWorkspaceState(media.serverMediaId)
+      if (!state.exists) return null
+      workspaceRestoreInProgress = true
+      const restoredManual = (state.manualAnnotations ?? [])
+        .filter((value): value is AnnotationObject => !!value && typeof value === 'object')
+        .map((value) => ({ ...value, source: 'manual' as const }))
+      const retainedAi = (annotationsByMedia.value[mediaId] ?? []).filter((obj) => obj.source === 'ai')
+      annotationsByMedia.value = {
+        ...annotationsByMedia.value,
+        [mediaId]: dedupeAnnotationObjects([...retainedAi, ...restoredManual]),
+      }
+      deletedTrackingIds.value[mediaId] = new Set((state.deletedTrackingIds ?? []).map(String))
+      anomalyFrames.value = Array.isArray(state.anomalyFrames) ? state.anomalyFrames : []
+      pausedAnomalies.value = Array.isArray(state.pausedAnomalies)
+        ? state.pausedAnomalies as typeof pausedAnomalies.value
+        : []
+      lastPausedContext.value = state.lastPausedContext
+        ? { mediaId, frameIndex: Number(state.lastPausedContext.frameIndex) }
+        : null
+      brightness.value = Number(state.display?.brightness) || 100
+      contrast.value = Number(state.display?.contrast) || 100
+      zoom.value = Number(state.display?.zoom) || 1
+      if (state.editor?.activeTool && ['select', 'point', 'bbox'].includes(state.editor.activeTool)) {
+        activeTool.value = state.editor.activeTool
+      }
+      if (typeof state.editor?.objectNameInput === 'string') objectNameInput.value = state.editor.objectNameInput
+      selectedObjectId.value = typeof state.editor?.selectedObjectId === 'string'
+        ? state.editor.selectedObjectId
+        : null
+      anomalyPanelVisible.value = pausedAnomalies.value.length > 0
+      const frame = Math.max(0, Math.min(maxFrameIndex.value, Number(state.currentFrame) || 0))
+      return frame
+    } catch (error) {
+      console.warn('工作区状态加载失败，将使用 Tracking/本地缓存恢复：', error)
+      return null
+    } finally {
+      workspaceRestoreInProgress = false
+    }
+  }
 
   // 标注进度统计
   const annotatedFrameCount = computed(() => {
@@ -731,7 +901,74 @@ const createWorkspace = () => {
     return { rows, meta: {} }
   }
 
-  const loadTrackerFolder = async (videoFile: File, trackerFile: File) => {
+  const openExistingBackendMedia = async (folderName: string, videoFile: File): Promise<boolean> => {
+    const normalizedFolderName = folderName.trim()
+    if (!normalizedFolderName) return false
+
+    const response = await trackApi.listMedia()
+    const serverItem = response.items.find((item) => {
+      const sameDirectory = item.mediaId === normalizedFolderName || item.directoryName === normalizedFolderName
+      const sameVideo = !item.sourceVideoName || item.sourceVideoName === videoFile.name
+      return sameDirectory && sameVideo
+    })
+    if (!serverItem) return false
+
+    let media = mediaAssets.value.find((item) => item.serverMediaId === serverItem.mediaId)
+    const alreadyOpen = !!media
+    if (!media) {
+      media = {
+        id: closedMediaFrontendIds[serverItem.mediaId] || `server-${serverItem.mediaId}`,
+        serverMediaId: serverItem.mediaId,
+        serverVideoName: serverItem.sourceVideoName || videoFile.name,
+        name: serverItem.videoName || serverItem.sourceVideoName || videoFile.name,
+        type: 'video',
+        url: serverItem.videoUrl,
+        fps: serverItem.fps || undefined,
+        width: serverItem.width || undefined,
+        height: serverItem.height || undefined,
+        duration: serverItem.duration || (serverItem.frameCount && serverItem.fps ? serverItem.frameCount / serverItem.fps : undefined),
+        frameCount: serverItem.frameCount || undefined,
+        sizeBytes: videoFile.size,
+      }
+      mediaAssets.value = [...mediaAssets.value, media]
+      trackingFramesByMedia.value[media.id] = []
+    } else {
+      media.url = serverItem.videoUrl
+      media.serverVideoName = serverItem.sourceVideoName || videoFile.name
+      if (serverItem.fps) media.fps = serverItem.fps
+      if (serverItem.width) media.width = serverItem.width
+      if (serverItem.height) media.height = serverItem.height
+      if (serverItem.frameCount) media.frameCount = serverItem.frameCount
+      if (serverItem.duration || (serverItem.frameCount && serverItem.fps)) {
+        media.duration = serverItem.duration || (serverItem.frameCount as number) / (serverItem.fps as number)
+      }
+    }
+
+    if (closedMediaFrontendIds[serverItem.mediaId]) {
+      delete closedMediaFrontendIds[serverItem.mediaId]
+      persistClosedMediaFrontendIds()
+    }
+
+    selectedMediaId.value = media.id
+    await nextTick()
+    await resetAnnotationViewForMedia(media.id)
+
+    if (alreadyOpen) {
+      statusMessage.value = `该视频已经打开，已切换到：${media.name}`
+      showToast(`「${media.name}」已经打开，已为你切换`)
+    } else {
+      statusMessage.value = `已加载现有标注目录：${serverItem.directoryName || serverItem.mediaId}（未新建目录）`
+      showToast(`已继续使用现有目录「${serverItem.directoryName || serverItem.mediaId}」`)
+    }
+    return true
+  }
+
+  const loadTrackerFolder = async (videoFile: File, trackerFile: File | null, sourceFolderName = '') => {
+    // 浏览器不会暴露绝对路径，但 directory picker / webkitRelativePath
+    // 都能提供顶层目录名；后端目录名本身就是稳定 mediaId。
+    if (sourceFolderName && await openExistingBackendMedia(sourceFolderName, videoFile)) return
+    if (!trackerFile) throw new Error('所选文件夹不是已有后端素材目录，且缺少 tracker_results.json')
+
     const { rows, meta } = parseTrackerResults(await trackerFile.text())
     if (!rows.length) throw new Error('tracker_results.json 中没有可用的逐帧标注')
 
@@ -815,8 +1052,8 @@ const createWorkspace = () => {
         if (!videoFile && isVideoName(entry.name) && !/_overlay\.[^.]+$/i.test(entry.name)) videoFile = await entry.getFile()
         if (!trackerFile && entry.name.toLowerCase() === 'tracker_results.json') trackerFile = await entry.getFile()
       }
-      if (!videoFile || !trackerFile) throw new Error('所选文件夹必须同时包含视频文件和 tracker_results.json')
-      await loadTrackerFolder(videoFile, trackerFile)
+      if (!videoFile) throw new Error('所选文件夹中没有可识别的视频文件')
+      await loadTrackerFolder(videoFile, trackerFile, String(dir.name || ''))
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return
       statusMessage.value = error instanceof Error ? error.message : '标注文件夹加载失败'
@@ -829,12 +1066,13 @@ const createWorkspace = () => {
     const arr = Array.from(files)
     const videoFile = arr.find((f) => isVideoFile(f) && !/_overlay\.[^.]+$/i.test(f.name))
     const trackerFile = arr.find((f) => f.name.toLowerCase() === 'tracker_results.json')
-    if (!videoFile || !trackerFile) {
-      statusMessage.value = '所选文件夹必须同时包含视频文件和 tracker_results.json'
+    if (!videoFile) {
+      statusMessage.value = '所选文件夹中没有可识别的视频文件'
       showToast(statusMessage.value)
       return
     }
-    try { await loadTrackerFolder(videoFile, trackerFile) }
+    const sourceFolderName = arr.map((file) => file.webkitRelativePath).find(Boolean)?.split(/[\\/]/)[0] || ''
+    try { await loadTrackerFolder(videoFile, trackerFile || null, sourceFolderName) }
     catch (error) { statusMessage.value = error instanceof Error ? error.message : '标注文件夹加载失败'; showToast(statusMessage.value) }
     if (annotationFolderInputRef.value) annotationFolderInputRef.value.value = ''
   }
@@ -928,8 +1166,10 @@ const createWorkspace = () => {
       // 手动新建 (objectId=null) 也保留; 有 objectId 的才走 key 粒度保护
       const keyOf = (o: AnnotationObject) => `${o.frameIndex ?? 0}:${o.objectId ?? o.id}`
       const existingByKey = new Map(existing.map((o) => [keyOf(o), o]))
-      // 先把手动标注全量放进去
-      let merged: AnnotationObject[] = existing.filter((o) => o.source === 'manual').map((o) => ({ ...o }))
+      // 先把手动标注全量放进去，并清理旧版本重复保存的同帧同 ID 项。
+      let merged: AnnotationObject[] = dedupeAnnotationObjects(
+        existing.filter((o) => o.source === 'manual').map((o) => ({ ...o })),
+      )
 
       for (const frame of filtered) {
         for (const ann of frame.annotations) {
@@ -1013,7 +1253,7 @@ const createWorkspace = () => {
       const finalAi = [...existingByKey.values()]
         .filter((o) => o.source === 'ai')
         .filter((o) => !manualKeysAfterMatch.has(`${o.frameIndex ?? 0}:${o.objectId}`))
-      merged.push(...finalAi)
+      merged = dedupeAnnotationObjects([...merged, ...finalAi])
 
       annotationsByMedia.value = { ...annotationsByMedia.value, [mediaId]: merged }
     } catch {
@@ -1312,60 +1552,95 @@ const createWorkspace = () => {
     return Number.isFinite(number) ? `${label} ${number.toFixed(2)}` : ''
   }
 
+  const objectDisplayName = (objectId: number, preferred?: string | null) => {
+    if (preferred?.trim()) return preferred.trim()
+    const local = (annotationsByMedia.value[currentMediaId.value] ?? [])
+      .find((obj) => obj.objectId === objectId && obj.name?.trim())
+    return local?.name?.trim() || `object-${objectId}`
+  }
+
   const explainPausedObject = (item: NonNullable<Awaited<ReturnType<typeof trackApi.getStatus>>['pausedObjects']>[number]) => {
     const details = item.details ?? {}
     const reasons = item.reasons ?? []
     const type = item.type
+    const displayName = objectDisplayName(item.object_id, item.display_name || item.name)
+    const baselineFrame = Number(item.manualBaselineFrame ?? details.manual_baseline_frame)
+    const reviewStart = Number(item.reviewStartFrame ?? details.review_start_frame)
+    const reviewEnd = Number(item.reviewEndFrame ?? details.review_end_frame)
+    const lookback = Number(item.reviewLookbackFrames ?? details.review_lookback_frames ?? 5)
+    const reviewRange = Number.isFinite(reviewStart) && Number.isFinite(reviewEnd)
+      ? `第 ${reviewStart}～${reviewEnd} 帧`
+      : undefined
+    const reviewNotice = `该错误可能在触发暂停前已经逐渐出现，请同时检查前 ${Number.isFinite(lookback) ? lookback : 5} 帧的框是否已经开始变形、缩小或扩大。`
     const metrics = [
-      formatMetric('面积倍率', details.history_area_ratio ?? details.area_ratio ?? item.ratio),
-      formatMetric('宽度倍率', details.history_width_ratio ?? details.width_ratio),
-      formatMetric('高度倍率', details.history_height_ratio ?? details.height_ratio),
+      formatMetric('面积倍率', item.metrics?.areaRatio ?? details.area_ratio ?? item.ratio),
+      formatMetric('宽度倍率', item.metrics?.widthRatio ?? details.width_ratio),
+      formatMetric('高度倍率', item.metrics?.heightRatio ?? details.height_ratio),
+      formatMetric('长宽比倍率', item.metrics?.aspectRatio ?? details.aspect_ratio_ratio),
       formatMetric('中心偏移(px)', details.center_shift),
-      formatMetric('重叠覆盖率', details.overlap_coverage),
+      formatMetric('重叠覆盖率', item.metrics?.overlapCoverage ?? details.overlap_coverage),
     ].filter(Boolean)
 
     if (type === 'overlap' || reasons.some((reason) => reason.includes('bbox_overlap_with='))) {
-      const other = details.other_object_id
+      const otherId = Number(item.other_object_id ?? details.other_object_id)
+      const otherName = Number.isFinite(otherId) ? objectDisplayName(otherId, item.other_display_name) : '另一个对象'
       return {
         objectId: item.object_id,
-        title: '疑似两个对象合并为同一目标',
-        summary: other == null ? '当前框与另一对象高度重叠。' : `当前框与对象 ${other} 高度重叠。`,
+        displayName,
+        title: '对象重叠异常',
+        summary: `${displayName} 与 ${otherName} 的框高度重叠，可能发生 ID 合并。`,
         metrics,
+        baselineFrame: Number.isFinite(baselineFrame) ? baselineFrame : undefined,
+        reviewRange,
         suggestion: '检查两个对象的边界和 object ID；分别修正框后，从当前帧重新执行 AI Tracking。',
       }
     }
-    if (type === 'merged_bbox_growth' || reasons.some((reason) => reason.startsWith('history_'))) {
+    if (type === 'size_shrink') {
       return {
         objectId: item.object_id,
-        title: '框相对历史尺寸异常变大',
-        summary: '该框可能在对象重合/分离时包含了两个对象。',
+        displayName,
+        title: '框相对最近人工标注明显缩小',
+        summary: `${displayName} 的框相对最近人工标注明显缩小，可能已经丢失精子尾部。`,
         metrics,
-        suggestion: '将框收缩到当前对象本体；若两个对象已分离，请分别确认各自框和 ID 后再续追。',
+        baselineFrame: Number.isFinite(baselineFrame) ? baselineFrame : undefined,
+        reviewRange,
+        reviewNotice,
+        suggestion: '检查当前帧与前几帧；重新框住完整的精子头部和尾部后再继续追踪。',
       }
     }
-    if (type === 'size_growth') {
+    if (type === 'size_growth' || type === 'shape_change') {
       return {
         objectId: item.object_id,
-        title: '框尺寸或形状突变',
-        summary: '当前预测框与近期参考框的面积、宽高或形状差异过大。',
+        displayName,
+        title: '框相对最近人工标注明显扩大或变形',
+        summary: `${displayName} 的框相对最近人工标注明显扩大，可能框入了杂质或其他精子。`,
         metrics,
-        suggestion: '核对框是否覆盖了额外目标或背景，修正为单个对象的边界后重新追踪。',
+        baselineFrame: Number.isFinite(baselineFrame) ? baselineFrame : undefined,
+        reviewRange,
+        reviewNotice,
+        suggestion: '将框修正为只覆盖当前精子；若对象已分离，请分别确认框和 ID 后再续追。',
       }
     }
-    if (type === 'edge_exit' || reasons.some((reason) => reason.includes('disappearance'))) {
+    if (type === 'disappearance' || reasons.some((reason) => reason.includes('disappearance'))) {
       return {
         objectId: item.object_id,
+        displayName,
         title: '对象在画面内消失',
-        summary: '后端未在边界附近检测到该对象，无法确认其是否正常离场。',
+        summary: `${displayName} 未在边界附近被检测到，无法确认其是否正常离场。`,
         metrics,
+        baselineFrame: Number.isFinite(baselineFrame) ? baselineFrame : undefined,
+        reviewRange,
         suggestion: '确认对象是否被遮挡、合并到其他对象或确实离开画面；必要时补框或删除该对象。',
       }
     }
     return {
       objectId: item.object_id,
+      displayName,
       title: '追踪运动异常',
-      summary: '预测位置相对参考位置发生异常跳变。',
+      summary: `${displayName} 相对上一帧发生异常位置跳变。`,
       metrics,
+      baselineFrame: Number.isFinite(baselineFrame) ? baselineFrame : undefined,
+      reviewRange,
       suggestion: '检查当前帧对象身份和位置，修正框后从当前帧继续追踪。',
     }
   }
@@ -1381,8 +1656,9 @@ const createWorkspace = () => {
     if (!current.length) return { count: 0, batchId: undefined as string | undefined }
 
     const pixel = await getMediaPixelSize(media).catch(() => null)
+    const canonicalMediaId = media.serverMediaId || mediaId
     const result = await api.saveManualAnnotation({
-      mediaId,
+      mediaId: canonicalMediaId,
       mediaType: media.type,
       mediaName: media.name,
       mediaWidth: pixel?.width ?? media.width,
@@ -1394,8 +1670,8 @@ const createWorkspace = () => {
     })
 
     // 让标注结果页/工作区本地结果同步显示本次自动入库批次。
-    savedResults.value.unshift({
-      mediaId,
+    const savedResult = {
+      mediaId: canonicalMediaId,
       mediaName: media.name,
       mediaType: media.type,
       frameIndex: media.type === 'video' ? currentFrame.value : undefined,
@@ -1404,7 +1680,15 @@ const createWorkspace = () => {
       filename: '',
       batchId: result.batchId,
       objects: JSON.parse(JSON.stringify(current)),
-    } as SavedAnnotationFile)
+    } as SavedAnnotationFile
+    savedResults.value = [
+      savedResult,
+      ...savedResults.value.filter((item) => !(
+        item.mediaId === canonicalMediaId
+        && (item.frameIndex ?? 0) === currentFrame.value
+        && item.username === savedResult.username
+      )),
+    ]
 
     return { count: current.length, batchId: result.batchId }
   }
@@ -1419,17 +1703,41 @@ const createWorkspace = () => {
 
     const startFrame = currentFrame.value
     let seed: Record<string, unknown>[]
-    anomalyFrames.value = []
+    const confirmedPausedIds = new Set(
+      lastPausedContext.value?.mediaId === mediaId && lastPausedContext.value.frameIndex === startFrame
+        ? pausedAnomalies.value.map((item) => item.objectId)
+        : [],
+    )
+    if (confirmedPausedIds.size > 0) {
+      const existing = annotationsByMedia.value[mediaId] ?? []
+      annotationsByMedia.value = {
+        ...annotationsByMedia.value,
+        [mediaId]: existing.map((obj) =>
+          (obj.frameIndex ?? 0) === startFrame && obj.objectId != null && confirmedPausedIds.has(obj.objectId) && obj.bbox
+            ? { ...obj, source: 'manual' as const }
+            : obj,
+        ),
+      }
+      // A direct retry is the user's confirmation that the paused boxes are
+      // valid. saveFrameAnnotations will persist them as the newest baseline.
+      lastPausedContext.value = null
+    }
     anomalyObjectIds.value = []
     pausedAnomalies.value = []
+    anomalyPanelVisible.value = false
     isAiBusy.value = true
 
     try {
+      // 固化完整工作区（人工框、稳定 ID/名称、人工基准和异常状态），
+      // 确保后端本轮 Tracking 与以后重新加载使用同一份人工基准。
+      await persistWorkspaceState(mediaId)
       // ① AI Tracking 点击即自动落库：当前帧人工标注先进入数据库，
-      // 然后才写 seed JSON / 做帧差 / 启动 SAM3。任何一步失败都不会“假保存”。
+      // 然后才写 seed JSON / 启动 SAM3。任何一步失败都不会“假保存”。
       statusMessage.value = `① 正在将第 ${startFrame} 帧人工标注写入数据库……`
       const persisted = await persistCurrentFrameManualAnnotations(media, mediaId)
-      if (persisted.count) {
+      if (confirmedPausedIds.size > 0) {
+        showToast(`已将 ${confirmedPausedIds.size} 个异常框确认为新的人工基准`)
+      } else if (persisted.count) {
         showToast(`第 ${startFrame} 帧 ${persisted.count} 个人工标注已写入数据库`)
       }
 
@@ -1467,7 +1775,7 @@ const createWorkspace = () => {
 
       // Phase 2: 把“当前页面正在看的这一帧”固化成后端 JSON seed。
       statusMessage.value = `② 正在生成第 ${startFrame} 帧标注 JSON……`
-      const savedSeed = await trackApi.saveFrameAnnotations({
+      await trackApi.saveFrameAnnotations({
         mediaId: media.serverMediaId,
         mediaName: media.name,
         mediaWidth: pixelSize.width,
@@ -1477,46 +1785,18 @@ const createWorkspace = () => {
         annotations: seed,
       })
 
-      // Phase 3: 用 MP4 + seed JSON 做帧差规划，计算应交给 SAM3 的后续帧数。
-      statusMessage.value = `③ 帧差分析中：从第 ${startFrame + 1} 帧开始寻找新目标……`
-      const plan = await trackApi.plan({
-        mediaId: media.serverMediaId,
-        mediaName: media.name,
-        startFrame,
-        seedFilename: savedSeed.filename,
-      })
-
-      // 业务循环：找到新目标就追踪到目标帧；整个后续区间都无新目标则追踪到视频末尾。
-      const noNewObject = plan.status === 'no_new_object' || plan.trackToEnd === true
-      if (!noNewObject && (plan.status !== 'new_object_found' || plan.newObjectFrame == null || !plan.willReachNewObject)) {
-        trackingFrameCount.value = 0
-        statusMessage.value = `③ 从第 ${startFrame} 帧向后检查 ${plan.searchFrames} 帧：帧差规划无可用追踪终点，本轮停止。`
-        showToast('本轮帧差规划未产生可用结果')
-        return
-      }
-
-      const plannedEndFrame = noNewObject
-        ? maxFrameIndex.value
-        : Math.min(plan.newObjectFrame!, maxFrameIndex.value)
-      const plannedFrames = plannedEndFrame - startFrame + 1
-      trackingFrameCount.value = plannedFrames
-      statusMessage.value = noNewObject
-        ? `③ 后续未检测到新目标；④ SAM3 将从第 ${startFrame} 帧追踪到视频末尾第 ${plannedEndFrame} 帧（共 ${plannedFrames} 帧）`
-        : `③ 帧差发现候选新目标：第 ${plannedEndFrame} 帧；④ SAM3 将追踪 ${startFrame}～${plannedEndFrame}（共 ${plannedFrames} 帧）`
-
-      // Phase 4: 复用原有 SAM3 Tracking 任务队列。
-      // maxFrames 包含 seed 起始帧，所以这里严格使用 end-start+1，确保本轮只追踪到帧差目标帧。
+      // 后端以 SAM3_TRACK_FRAMES（包含 seed 帧）和剩余视频帧数为上限。
+      statusMessage.value = `③ SAM3 将从第 ${startFrame} 帧持续向后追踪，直到异常、单轮上限或视频末尾……`
       const task = await trackApi.run({
         mediaId: media.serverMediaId,
         mediaName: media.name,
         mediaWidth: pixelSize.width,
         mediaHeight: pixelSize.height,
         startFrame,
-        maxFrames: plannedFrames,
         annotations: seed,
       })
 
-      trackingFrameCount.value = task.maxFrames || task.trackFrames || plan.recommendedTrackFrames
+      trackingFrameCount.value = task.maxFrames || task.trackFrames || 1
       statusMessage.value =
         `SAM3 正在运行：处理第 ${startFrame}～${Math.min(maxFrameIndex.value, startFrame + trackingFrameCount.value - 1)} 帧`
 
@@ -1539,7 +1819,9 @@ const createWorkspace = () => {
               .map(([k]) => Number(k))
             const pausedObjs = status.pausedObjects || []
             pausedAnomalies.value = pausedObjs.map(explainPausedObject)
-            const reasons = pausedAnomalies.value.map((item) => `对象 ${item.objectId}：${item.title}`)
+            lastPausedContext.value = { mediaId, frameIndex: pauseFrame }
+            anomalyPanelVisible.value = true
+            const reasons = pausedAnomalies.value.map((item) => `${item.displayName}：${item.title}`)
             const level = Object.values(levels).find((v) => v && v !== 'normal') || 'anomaly'
             anomalyFrames.value = [
               ...anomalyFrames.value,
@@ -1548,7 +1830,7 @@ const createWorkspace = () => {
             statusMessage.value = `⚠️ Tracking 暂停 @ frame ${pauseFrame}: ${reasons.join('; ')}`
             showToast(`检测到异常，已暂停在第 ${pauseFrame} 帧`)
           }
-          break
+          return
         }
         await new Promise((resolve) => setTimeout(resolve, 700))
       }
@@ -1556,12 +1838,16 @@ const createWorkspace = () => {
       await loadTrackingResult(mediaId, true)
 
       if (mediaId === currentMediaId.value) {
-        // 本轮结束帧就是下一次 AI Tracking 的新起始帧。
-        await seekVideo(frameToTime(plannedEndFrame))
-        statusMessage.value = noNewObject
-          ? `完成：帧差未发现后续新目标，SAM3 已从第 ${startFrame} 帧追踪到视频末尾第 ${plannedEndFrame} 帧（${plannedFrames} 帧）。`
-          : `完成：SAM3 已追踪 ${startFrame}～${plannedEndFrame}（${plannedFrames} 帧）。请在第 ${plannedEndFrame} 帧人工补标新物体，然后再次点击 AI Tracking 继续。`
-        showToast(noNewObject ? `已追踪到视频末尾第 ${plannedEndFrame} 帧` : `已到达第 ${plannedEndFrame} 帧，请人工补标后继续`)
+        const finalStatus = await trackApi.getStatus(task.taskId)
+        const lastProcessedFrame = finalStatus.lastProcessedFrame ?? startFrame
+        await seekVideo(frameToTime(lastProcessedFrame))
+        if (finalStatus.reachedVideoEnd || lastProcessedFrame >= maxFrameIndex.value) {
+          statusMessage.value = `完成：已追踪到视频末尾第 ${lastProcessedFrame} 帧。`
+          showToast('已追踪到视频末尾')
+        } else {
+          statusMessage.value = `完成：SAM3 已追踪 ${startFrame}～${lastProcessedFrame}。请检查/修正最终帧后再次点击 AI Tracking 继续。`
+          showToast(`已到达单轮上限第 ${lastProcessedFrame} 帧，可检查后继续`)
+        }
       }
     } catch (error) {
       if (mediaId === currentMediaId.value) {
@@ -1736,7 +2022,8 @@ const createWorkspace = () => {
       const rows = (res.items ?? []) as any[]
       const groups = new Map<string, any[]>()
       for (const row of rows) {
-        const key = row.batch_id || `legacy:${row.media_id}:${row.created_at}`
+        const fileIdentity = String(row.media_name || row.media_id || '').trim().toLocaleLowerCase()
+        const key = `${row.media_type || 'video'}:${fileIdentity}:${row.frame_index ?? 0}:${row.user_id ?? 0}`
         groups.set(key, [...(groups.get(key) ?? []), row])
       }
       const remote = Array.from(groups.entries()).map(([key, list]) => {
@@ -1858,7 +2145,9 @@ const createWorkspace = () => {
     bboxStart = null
     activeTool.value = 'select'
     anomalyObjectIds.value = []
+    anomalyFrames.value = []
     pausedAnomalies.value = []
+    lastPausedContext.value = null
     zoom.value = 1
     videoPlaybackFallback.value = false
     stopFallbackPlayback()
@@ -1868,13 +2157,16 @@ const createWorkspace = () => {
       const media = mediaAssets.value.find((item) => item.id === mediaId)
       if (media?.fps && media.fps > 0) videoFps.value = media.fps
       if (media?.frameCount && media.fps) videoDuration.value = media.frameCount / media.fps
+      const restoredFrame = await restoreWorkspaceState(mediaId)
+      const targetFrame = restoredFrame ?? 0
       await nextTick()
       revokeExactFrameUrl()
       const video = videoRef.value
       if (video) {
-        try { video.pause(); video.currentTime = 0 } catch {}
+        try { video.pause(); video.currentTime = frameToTime(targetFrame) } catch {}
       }
-      await loadExactFrame(0, mediaId)
+      await loadExactFrame(targetFrame, mediaId)
+      await loadTrackingResult(mediaId, true)
     }
   }
 
@@ -1898,22 +2190,20 @@ const createWorkspace = () => {
         if (existing) {
           // 已有记录：刷新后 blob: URL 必然失效，用后端新地址覆盖 url；保留原 id
           if (item.videoUrl) existing.url = item.videoUrl
+          existing.serverVideoName = item.sourceVideoName || existing.serverVideoName
           if (item.fps) existing.fps = item.fps
           if (item.width) existing.width = item.width
           if (item.height) existing.height = item.height
           if (item.frameCount) existing.frameCount = item.frameCount
           if (item.frameCount && item.fps) existing.duration = item.duration || item.frameCount / item.fps
 
-          // 异步加载 tracking 结果并合并（不阻塞）
-          if (item.hasTrackingResult) {
-            void loadTrackingResult(existing.id)
-          }
           continue
         }
         // 新素材：创建条目
         const newAsset: MediaAsset = {
-          id: `server-${item.mediaId}`,
+          id: closedMediaFrontendIds[item.mediaId] || `server-${item.mediaId}`,
           serverMediaId: item.mediaId,
+          serverVideoName: item.sourceVideoName,
           name: item.videoName,
           type: 'video',
           url: item.videoUrl,
@@ -1924,29 +2214,27 @@ const createWorkspace = () => {
           frameCount: item.frameCount || undefined,
         }
         additions.push(newAsset)
+        if (closedMediaFrontendIds[item.mediaId]) delete closedMediaFrontendIds[item.mediaId]
         trackingFramesByMedia.value[newAsset.id] = []
-        if (item.hasTrackingResult) {
-          void trackApi.getResult(item.mediaId).then((result) => {
-            const frames = 'frames' in result ? result.frames : [result]
-            trackingFramesByMedia.value[newAsset.id] = frames || []
-          }).catch(() => {})
-        }
       }
       if (additions.length) {
         mediaAssets.value = [...mediaAssets.value, ...additions]
+        persistClosedMediaFrontendIds()
       }
 
       // 如果当前选中的 media 不存在了（被删），重置到第一个
       if (selectedMediaId.value && !mediaAssets.value.find((m) => m.id === selectedMediaId.value)) {
         selectedMediaId.value = mediaAssets.value[0]?.id ?? ''
       }
+      const active = mediaAssets.value.find((item) => item.id === selectedMediaId.value)
+      if (active?.serverMediaId) await resetAnnotationViewForMedia(active.id)
     } catch {
       // 后端未启动时静默处理
     }
   }
 
   return {
-    api, mediaAssets, selectedMediaId, activeTool, objectNameInput, selectedObjectId, currentFrame, currentTime, videoDuration, videoFps, frameInput, isPlaying, isAiBusy, trackingFrameCount, statusMessage, toastMessage, showToast, zoom, zoomIn, zoomOut, zoomReset, deleteMedia, savedResults, loadedRemoteResultKeys, effectResults, selectedEffectId, effectTime, effectPlaying, effectVideoRef, imageRef, videoRef, exactFrameImageRef, exactFrameUrl, exactFrameLoading, videoPlaybackFallback, annotationHitRef, fileInputRef, videoInputRef, annotationFolderInputRef, effectFolderInputRef, annotationsByMedia, trackingFramesByMedia, anomalyObjectIds, anomalyFrames, pausedAnomalies, selectedMedia, isVideo, maxFrameIndex, currentMediaId, currentObjects, selectedObject, selectedEffect, formatTime, timeToFrame, frameToTime, getStagePoint, addObject, resetVideoViewToFirstFrame, ensureVideoFirstFrame, selectTool, onStageClick, tempBbox, onBboxDown, onBboxMove, onBboxUp, onObjectDropdownChange, selectObject, removeObject, renameObject, undo, redo, copyPreviousFrame, brightness, contrast, mediaFilterStyle, resetMediaFilter, annotatedFrameCount, clearSelection, openFilePicker, handleFiles, openAnnotationFolderPicker, handleAnnotationFolderFiles, onImageLoaded, onVideoLoaded, onVideoTimeUpdate, onVideoError, loadTrackingResult, seekVideo, seekToInputFrame, seekByFrame, togglePlayback, onVideoEnded, onTimelineClick, runAiSegment, runAiTrack, getMediaPixelSize, buildSam3AnnotationsJson, generateAnnotationsJson, exportDataset, loadSavedResults, openEffectFolderPicker, handleEffectFolder, loadEffects, onEffectTimeUpdate, toggleEffectPlayback, selectEffect, effectOverlayObjects, resetAnnotationViewForMedia, loadServerMedia
+    api, mediaAssets, selectedMediaId, activeTool, objectNameInput, selectedObjectId, currentFrame, currentTime, videoDuration, videoFps, frameInput, isPlaying, isAiBusy, trackingFrameCount, statusMessage, toastMessage, showToast, zoom, zoomIn, zoomOut, zoomReset, closeMedia, savedResults, loadedRemoteResultKeys, effectResults, selectedEffectId, effectTime, effectPlaying, effectVideoRef, imageRef, videoRef, exactFrameImageRef, exactFrameUrl, exactFrameLoading, videoPlaybackFallback, annotationHitRef, fileInputRef, videoInputRef, annotationFolderInputRef, effectFolderInputRef, annotationsByMedia, trackingFramesByMedia, anomalyObjectIds, anomalyFrames, pausedAnomalies, anomalyPanelVisible, closeAnomalyPanel, selectedMedia, isVideo, maxFrameIndex, currentMediaId, currentObjects, selectedObject, selectedEffect, formatTime, timeToFrame, frameToTime, getStagePoint, addObject, resetVideoViewToFirstFrame, ensureVideoFirstFrame, selectTool, onStageClick, tempBbox, onBboxDown, onBboxMove, onBboxUp, onObjectDropdownChange, selectObject, removeObject, renameObject, undo, redo, copyPreviousFrame, brightness, contrast, mediaFilterStyle, resetMediaFilter, annotatedFrameCount, clearSelection, openFilePicker, handleFiles, openAnnotationFolderPicker, handleAnnotationFolderFiles, onImageLoaded, onVideoLoaded, onVideoTimeUpdate, onVideoError, loadTrackingResult, seekVideo, seekToInputFrame, seekByFrame, togglePlayback, onVideoEnded, onTimelineClick, runAiSegment, runAiTrack, getMediaPixelSize, buildSam3AnnotationsJson, generateAnnotationsJson, exportDataset, loadSavedResults, openEffectFolderPicker, handleEffectFolder, loadEffects, onEffectTimeUpdate, toggleEffectPlayback, selectEffect, effectOverlayObjects, resetAnnotationViewForMedia, loadServerMedia
   }
 }
 

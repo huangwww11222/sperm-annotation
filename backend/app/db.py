@@ -9,6 +9,7 @@ from typing import Any
 from .config import DATA_DIR, DB_FILE
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+DB_FILE.parent.mkdir(parents=True, exist_ok=True)
 _DB_LOCK = Lock()
 
 CREATE_SQL = """
@@ -92,6 +93,21 @@ def insert_annotations(rows: list[dict[str, Any]]) -> int:
     """
     with _DB_LOCK, connect() as conn:
         for r in rows:
+            # A save is the newest snapshot of one logical object.  Replace an
+            # earlier row instead of growing duplicate database records every
+            # time the user resumes AI Tracking from the same frame.
+            conn.execute(
+                """
+                DELETE FROM annotations
+                WHERE user_id=? AND media_id=? AND frame_index=?
+                  AND COALESCE(object_id, '')=COALESCE(?, '')
+                  AND COALESCE(source, '')=COALESCE(?, '')
+                """,
+                (
+                    r["user_id"], r["media_id"], r["frame_index"],
+                    r["object_id"], r["source"],
+                ),
+            )
             conn.execute(sql, (
                 r["user_id"],r["batch_id"],r["object_id"],r["media_id"],r["media_name"],r["media_type"],
                 r["media_width"],r["media_height"],r["frame_index"],r["timestamp_ms"],r["object_name"],
@@ -117,7 +133,30 @@ def list_annotations(user_id: int | None = None, media_id: str | None = None, so
         params.append(source)
     sql += " ORDER BY a.created_at DESC, a.id DESC"
     with connect() as conn:
-        return [dict(row) for row in conn.execute(sql, params).fetchall()]
+        rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+    # Historical versions inserted another row every time AI Tracking was
+    # clicked.  Results represent the current logical annotation, not that
+    # append-only history: keep only the newest row for the same file/frame/
+    # object/user/source.  media_name also collapses legacy frontend media IDs
+    # that referred to the same uploaded file.
+    unique: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for row in rows:
+        media_identity = str(row.get("media_name") or row.get("media_id") or "").strip().casefold()
+        key = (
+            int(row.get("user_id") or 0),
+            media_identity,
+            str(row.get("media_type") or ""),
+            int(row.get("frame_index") or 0),
+            str(row.get("object_id") or ""),
+            str(row.get("source") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(row)
+    return unique
 
 
 def delete_annotation(annotation_id: int, user_id: int) -> bool:

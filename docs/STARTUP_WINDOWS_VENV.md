@@ -55,26 +55,20 @@ npm run dev
 
 打开 Vite 输出的地址。
 
-## 3. 帧差参数
+## 3. Tracking 参数
 
 默认：
 
 ```text
-FRAME_DIFF_MAX_SEARCH_FRAMES=120
-FRAME_DIFF_CONFIRM_FRAMES=3
-FRAME_DIFF_MAX_CONFIRM_MISS=2
-FRAME_DIFF_THRESHOLD=12
-FRAME_DIFF_KNOWN_MARGIN=25
-FRAME_DIFF_MIN_AREA=15
-FRAME_DIFF_MIN_AREA_RATIO=0.55
-FRAME_DIFF_TEMPLATE_THRESHOLD=0.35
+SAM3_TRACK_FRAMES=120
+ANOMALY_REVIEW_LOOKBACK_FRAMES=5
 ```
 
 例：
 
 ```powershell
-$env:FRAME_DIFF_MAX_SEARCH_FRAMES="200"
-$env:FRAME_DIFF_CONFIRM_FRAMES="3"
+$env:SAM3_TRACK_FRAMES="200"
+$env:ANOMALY_REVIEW_LOOKBACK_FRAMES="5"
 ```
 
 ## 4. 后端测试
@@ -97,10 +91,9 @@ python -m pytest tests -v
 点击 AI Tracking
   ↓
 ① 保存当前帧 JSON
-② 帧差分析
-③ SAM3 Tracking
+② SAM3 持续 Tracking
   ↓
-定位到 newObjectFrame
+异常时定位 pausedFrame，否则定位 lastProcessedFrame
   ↓
 人工确认/补框
   ↓
@@ -112,4 +105,4 @@ python -m pytest tests -v
 
 - 已移除“AI 检测 / 分割”按钮，AI Tracking 保留。
 - 新增“选择框”工具，位于“点标注”左侧，快捷键 `V`；点击已有 bbox 即可选中，选择框模式不创建/拖动 bbox。
-- 帧差规划默认开启后端逐帧日志，可由 `FRAME_DIFF_VERBOSE_LOG=0` 关闭。
+- 单轮追踪帧数由 `SAM3_TRACK_FRAMES` 控制（包含 seed 帧）。

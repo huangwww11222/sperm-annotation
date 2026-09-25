@@ -20,8 +20,9 @@ def test_rewind_tracking_keeps_current_and_removes_future_rows(tmp_path):
     video = media_dir / "video.mp4"
     info = rewind_tracking_results(result, video, 10)
     assert info["removedRows"] == 1
-    assert info["deletedFutureSeedFiles"] == 1
+    assert info["deletedFutureSeedFiles"] == 0
     assert (media_dir / "annotations_frame_000010.json").exists()
-    assert not (media_dir / "annotations_frame_000015.json").exists()
+    # Rewinding tracking must not delete durable user annotations/manual baselines.
+    assert (media_dir / "annotations_frame_000015.json").exists()
     kept = _read_jsonl(result)
     assert [r["source_frame_index"] for r in kept] == [1, 9, 10]
