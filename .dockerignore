@@ -1,0 +1,16 @@
+.git
+.gitignore
+.venv
+**/.venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+frontend/node_modules
+frontend/dist
+backend/storage
+backend/track_data
+backend/track_modul
+backend/data/*.db
+backend/data/*.db-*
+runtime
+*.log

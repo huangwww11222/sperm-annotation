@@ -15,6 +15,14 @@ export const tokenStore = {
   clear: () => localStorage.removeItem(TOKEN_KEY),
 }
 
+/** Clear stale credentials and let the auth/router layer return to login. */
+export const notifyAuthExpired = () => {
+  tokenStore.clear()
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('auth:expired'))
+  }
+}
+
 export interface ApiError {
   message: string
   status: number
@@ -42,9 +50,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
   if (!res.ok) {
     if (res.status === 401) {
-      // 登录失效：清掉本地 token，广播事件让 auth store 把用户踢下线
-      tokenStore.clear()
-      window.dispatchEvent(new CustomEvent('auth:expired'))
+      notifyAuthExpired()
     }
     const detail = (data as any)?.detail
     const detailMessage = Array.isArray(detail)
@@ -82,6 +88,7 @@ export const http = {
     }
     if (!res.ok) {
       const data = await res.json().catch(() => ({}))
+      if (res.status === 401) notifyAuthExpired()
       throw { message: (data as any)?.message ?? `请求失败 (${res.status})`, status: res.status } as ApiError
     }
     return res.blob()

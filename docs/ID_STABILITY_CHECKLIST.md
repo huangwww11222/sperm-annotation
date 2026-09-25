@@ -7,7 +7,7 @@
 1. 当前页面帧 N 的全部 bbox 必须都有唯一正整数 `objectId`。
 2. 前端生成 `annotations_frame_NNNNNN.json` 时同时写入 `object_id` / `objectId`。
 3. `/api/track/annotations` 再次校验并拒绝缺失、重复或跨帧的 ID。
-4. `/api/track/plan` 读取该 seed JSON；帧差模块通过 `object_id` 保留 known object identity。
+4. `/api/track` 读取该 seed JSON，并在持续追踪时保留稳定 `object_id`。
 5. `/api/track` 继续使用同一个 seed；后端不会按数组顺序重新编号。
 6. SAM3 使用这些 `object_id` 作为对象 ID。
 7. `tracker_results.json` 每帧继续写相同的 `object_id`。

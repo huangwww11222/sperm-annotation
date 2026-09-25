@@ -8,7 +8,7 @@ const {
   isAiBusy, statusMessage, toastMessage,
   imageRef, videoRef, exactFrameImageRef, exactFrameUrl, exactFrameLoading, videoPlaybackFallback, annotationHitRef, fileInputRef, videoInputRef,
   annotationsByMedia, selectedMedia, isVideo, maxFrameIndex, currentMediaId,
-  currentObjects, selectedObject, anomalyObjectIds, anomalyFrames, pausedAnomalies, formatTime, addObject, resetVideoViewToFirstFrame, trackingFrameCount,
+  currentObjects, selectedObject, anomalyObjectIds, anomalyFrames, pausedAnomalies, anomalyPanelVisible, closeAnomalyPanel, formatTime, addObject, resetVideoViewToFirstFrame, trackingFrameCount,
   ensureVideoFirstFrame, selectTool, onStageClick, tempBbox, onBboxDown, onBboxMove,
   onBboxUp, onObjectDropdownChange, selectObject, removeObject, renameObject, undo, redo,
   copyPreviousFrame, brightness, contrast, mediaFilterStyle, resetMediaFilter, annotatedFrameCount,
@@ -16,7 +16,7 @@ const {
   onVideoTimeUpdate, onVideoError, seekToInputFrame, togglePlayback, onVideoEnded,
   onTimelineClick, runAiTrack, generateAnnotationsJson,
   exportDataset, resetAnnotationViewForMedia, seekByFrame,
-  zoom, zoomIn, zoomOut, zoomReset, deleteMedia, openAnnotationFolderPicker, handleAnnotationFolderFiles,
+  zoom, zoomIn, zoomOut, zoomReset, closeMedia, openAnnotationFolderPicker, handleAnnotationFolderFiles,
 } = useWorkspace()
 
 // 画布滚动容器
@@ -188,7 +188,7 @@ watch([containerW, containerH], () => {
               <span class="text-slate-600">→</span>
               <span class="flex items-center gap-1 rounded-full px-2.5 py-1 font-medium" :class="statusMessage.includes('已写入数据库') ? 'bg-emerald-500/15 text-emerald-300' : 'bg-slate-800 text-slate-400'">② 自动入库</span>
               <span class="text-slate-600">→</span>
-              <span class="flex items-center gap-1 rounded-full px-2.5 py-1 font-medium" :class="isAiBusy ? 'bg-indigo-500/15 text-indigo-300' : 'bg-slate-800 text-slate-400'">③ 帧差 → SAM3</span>
+              <span class="flex items-center gap-1 rounded-full px-2.5 py-1 font-medium" :class="isAiBusy ? 'bg-indigo-500/15 text-indigo-300' : 'bg-slate-800 text-slate-400'">③ SAM3 持续追踪</span>
             </div>
           </div>
           <div class="flex gap-2">
@@ -224,11 +224,12 @@ watch([containerW, containerH], () => {
                   </div>
                 </div>
                 <button
-                  class="shrink-0 rounded p-1 text-slate-500 transition hover:bg-red-500/20 hover:text-red-400"
-                  title="删除素材"
-                  @click.stop="deleteMedia(media.id)"
+                  class="shrink-0 rounded p-1 text-slate-500 transition hover:bg-slate-700 hover:text-slate-200"
+                  title="关闭素材（不会删除后端文件和标注）"
+                  aria-label="关闭素材"
+                  @click.stop="closeMedia(media.id)"
                 >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
                 </button>
               </div>
             </div>
@@ -373,17 +374,22 @@ watch([containerW, containerH], () => {
               </div>
             </div>
 
-            <div v-if="anomalyObjectIds.length > 0" class="shrink-0 border-t border-amber-700 bg-amber-950/80 px-4 py-3 text-[11px] text-amber-100">
-              <div class="font-semibold text-amber-300">⚠️ Tracking 已暂停在第 {{ currentFrame }} 帧，请人工确认后再继续。</div>
+            <div v-if="anomalyPanelVisible && anomalyObjectIds.length > 0" class="relative shrink-0 border-t border-amber-700 bg-amber-950/80 px-4 py-3 text-[11px] text-amber-100">
+              <button class="absolute right-3 top-2 rounded px-2 py-1 text-amber-300 hover:bg-amber-800/60 hover:text-white" title="关闭异常提示（不会删除异常数据或时间轴标记）" @click="closeAnomalyPanel">✕</button>
+              <div class="pr-8 font-semibold text-amber-300">⚠️ Tracking 已暂停在第 {{ currentFrame }} 帧，请人工确认后再继续。</div>
+              <div class="mt-1 text-amber-100/80">如果检查后确认这些框没有问题，可直接再次点击 AI Tracking；本帧异常框会被确认为新的人工基准。</div>
               <div class="mt-2 grid gap-2 md:grid-cols-2" v-if="pausedAnomalies.length">
                 <div v-for="item in pausedAnomalies" :key="item.objectId" class="rounded border border-amber-700/70 bg-slate-950/45 px-3 py-2">
-                  <div class="font-medium text-amber-200">对象 {{ item.objectId }}：{{ item.title }}</div>
+                  <div class="font-medium text-amber-200">{{ item.displayName }}：{{ item.title }}</div>
                   <div class="mt-1 text-slate-200">{{ item.summary }}</div>
                   <div v-if="item.metrics.length" class="mt-1 text-amber-300">检测值：{{ item.metrics.join(' · ') }}</div>
+                  <div v-if="item.baselineFrame != null" class="mt-1 text-slate-300">最近人工基准：第 {{ item.baselineFrame }} 帧</div>
+                  <div v-if="item.reviewRange" class="mt-1 text-slate-300">建议检查范围：{{ item.reviewRange }}</div>
+                  <div v-if="item.reviewNotice" class="mt-1 font-medium text-amber-200">{{ item.reviewNotice }}</div>
                   <div class="mt-1 text-emerald-200">处理建议：{{ item.suggestion }}</div>
                 </div>
               </div>
-              <div v-else class="mt-1">异常对象：{{ anomalyObjectIds.join(', ') }}。请检查/修正这一帧的标注后，再点击 AI Tracking 继续。</div>
+              <div v-else class="mt-1">检测到追踪异常。请检查/修正这一帧的标注后，再点击 AI Tracking 继续。</div>
             </div>
 
             <div v-if="isVideo" class="shrink-0 border-t border-slate-800 bg-slate-950/80 px-4 py-3">
@@ -456,10 +462,10 @@ watch([containerW, containerH], () => {
             <section class="panel shrink-0 p-4">
               <div class="mb-3">
                 <h3 class="text-sm font-semibold">AI 辅助</h3>
-                <p class="mt-1 text-[10px] leading-4 text-slate-500">当前流程：①当前帧人工标注自动入库 → ②生成 seed JSON → ③帧差分析决定追踪帧数 → ④交给后端 SAM3 追踪；完成后定位到候选新目标帧。</p>
+                <p class="mt-1 text-[10px] leading-4 text-slate-500">当前流程：①当前帧人工标注自动入库 → ②生成 seed JSON → ③SAM3 持续向后追踪；遇到异常立即暂停，否则到单轮上限或视频末尾。</p>
               </div>
               <button class="btn-secondary w-full" :disabled="isAiBusy || !isVideo || !currentObjects.some((o) => o.bbox)" @click="runAiTrack">AI Tracking</button>
-              <p v-if="isVideo" class="mt-2 text-[10px] text-amber-300/80">点击 AI Tracking 会自动把当前帧人工标注写入数据库，再生成 seed JSON → 帧差规划 → SAM3 追踪；完成后自动定位到下一目标帧供人工确认。</p>
+              <p v-if="isVideo" class="mt-2 text-[10px] text-amber-300/80">点击 AI Tracking 会保存当前人工标注并生成 seed JSON，然后持续追踪；完成后定位到实际最后处理帧，可检查后继续。</p>
             </section>
 
             <section class="panel flex min-h-0 flex-1 flex-col overflow-hidden">

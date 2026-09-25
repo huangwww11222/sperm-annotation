@@ -18,10 +18,7 @@ from pydantic import BaseModel
 from .auth import current_user, hash_password, sign_jwt, verify_password
 from .config import (
     DATASET_EXPORT_DIR, DB_FILE, DEVICE, DTYPE, HOST, JWT_SECRET, LEGACY_TRACK_DATA_DIR, MAX_VIDEO_BYTES, MODEL_ID, PORT,
-    TRACK_DATA_DIR, TRACK_FRAMES, ALLOW_FULL_VIDEO_TRACKING, FRAME_DIFF_SEARCH_TO_VIDEO_END, FRAME_DIFF_MAX_SEARCH_FRAMES,
-    FRAME_DIFF_CONFIRM_FRAMES, FRAME_DIFF_MAX_CONFIRM_MISS, FRAME_DIFF_THRESHOLD,
-    FRAME_DIFF_KNOWN_MARGIN, FRAME_DIFF_MIN_AREA, FRAME_DIFF_MIN_AREA_RATIO,
-    FRAME_DIFF_TEMPLATE_THRESHOLD, FRAME_DIFF_ROI_RECT, FRAME_DIFF_VERBOSE_LOG,
+    TRACK_DATA_DIR, TRACK_FRAMES,
 )
 from .db import create_user, delete_annotation, get_user, get_user_by_id, init_db, insert_annotations, list_annotations
 from .schemas import (
@@ -31,17 +28,16 @@ from .schemas import (
     AuthRequest,
     ManualAnnotationRequest,
     TrackRequest,
-    TrackPlanRequest,
-    TrackPlanResponse,
 )
-from .services.frame_difference import find_next_new_object_frame
 from .tracker import (
     OVERLAY_FILE_NAME,
     RESULT_FILE_NAME,
+    WORKSPACE_STATE_FILE_NAME,
     _probe_video,
     get_tracker_engine,
     track_video,
     rewind_tracking_results,
+    _load_latest_manual_baselines,
 )
 
 app = FastAPI(title="SAM3 Annotation Backend", version="3.0.0")
@@ -457,10 +453,149 @@ def save_frame_annotations(req: dict[str, Any], user: dict[str, Any] = Depends(c
     return {"filename": filename, "frameIndex": frame}
 
 
+def _legacy_workspace_state(directory: Path, media_id: str) -> dict[str, Any] | None:
+    """Build initial workspace state from durable manual seed files."""
+    meta: dict[str, Any] = {}
+    try:
+        meta = json.loads((directory / "media.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        pass
+    width = float(meta.get("width") or 0)
+    height = float(meta.get("height") or 0)
+    fps = float(meta.get("fps") or 0)
+    if width <= 0 or height <= 0:
+        return None
+
+    annotations: dict[tuple[int, int], dict[str, Any]] = {}
+    baselines: dict[int, dict[str, Any]] = {}
+    for path in sorted(directory.glob("annotations_frame_*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            frame_index = int(payload.get("frame", {}).get("frameIndex", -1))
+            timestamp_ms = int(payload.get("frame", {}).get("timestampMs") or (round(frame_index * 1000 / fps) if fps > 0 else 0))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if frame_index < 0:
+            continue
+        for raw in payload.get("annotations", []):
+            if not isinstance(raw, dict) or raw.get("source") != "manual":
+                continue
+            try:
+                object_id = int(raw.get("object_id", raw.get("objectId")))
+                x1, y1, x2, y2 = [float(value) for value in raw["bbox"]]
+            except (KeyError, TypeError, ValueError):
+                continue
+            if x2 <= x1 or y2 <= y1:
+                continue
+            name = str(raw.get("name") or f"object-{object_id}")
+            annotations[(frame_index, object_id)] = {
+                "id": f"manual-{frame_index}-{object_id}",
+                "objectId": object_id,
+                "name": name,
+                "source": "manual",
+                "bbox": {
+                    "x": x1 / width * 100,
+                    "y": y1 / height * 100,
+                    "width": (x2 - x1) / width * 100,
+                    "height": (y2 - y1) / height * 100,
+                },
+                "frameIndex": frame_index,
+                "timestampMs": timestamp_ms,
+            }
+            previous = baselines.get(object_id)
+            if previous is None or frame_index >= int(previous["frameIndex"]):
+                baselines[object_id] = {
+                    "objectId": object_id,
+                    "name": name,
+                    "source": "manual",
+                    "frameIndex": frame_index,
+                    "bbox": [x1, y1, x2, y2],
+                }
+    if not annotations:
+        return None
+    return {
+        "exists": True,
+        "format": "annotation-workspace-v1",
+        "mediaId": media_id,
+        "currentFrame": 0,
+        "manualAnnotations": list(annotations.values()),
+        "manualBaselines": list(baselines.values()),
+        "deletedTrackingIds": [],
+        "anomalyFrames": [],
+        "pausedAnomalies": [],
+        "lastPausedContext": None,
+        "display": {"brightness": 100, "contrast": 100, "zoom": 1},
+        "migratedFrom": "annotations_frame_*.json",
+    }
+
+
+@app.get("/api/track/workspace/{media_id}")
+def get_workspace_state(media_id: str, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+    """Return durable per-video editor state without duplicating tracker JSONL."""
+    directory = media_dir(media_id)
+    if not directory.is_dir() or not find_video(directory):
+        raise HTTPException(404, "素材不存在")
+    path = directory / WORKSPACE_STATE_FILE_NAME
+    if not path.is_file():
+        return _legacy_workspace_state(directory, media_id) or {"exists": False, "mediaId": media_id}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(500, f"{WORKSPACE_STATE_FILE_NAME} 无法读取") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(500, f"{WORKSPACE_STATE_FILE_NAME} 格式无效")
+    return {**payload, "exists": True, "mediaId": media_id}
+
+
+@app.put("/api/track/workspace/{media_id}")
+def save_workspace_state(media_id: str, payload: dict[str, Any], user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+    """Atomically persist editor-only state beside the source video."""
+    directory = media_dir(media_id)
+    if not directory.is_dir() or not find_video(directory):
+        raise HTTPException(404, "素材不存在")
+    manual_annotations = payload.get("manualAnnotations", [])
+    manual_baselines = payload.get("manualBaselines", [])
+    if not isinstance(manual_annotations, list) or not isinstance(manual_baselines, list):
+        raise HTTPException(400, "manualAnnotations/manualBaselines 必须是数组")
+    if len(manual_annotations) > 1_000_000 or len(manual_baselines) > 100_000:
+        raise HTTPException(413, "工作区状态过大")
+
+    clean = {
+        **payload,
+        "format": "annotation-workspace-v1",
+        "mediaId": media_id,
+        "updatedBy": int(user["uid"]),
+    }
+    encoded = json.dumps(clean, ensure_ascii=False, indent=2)
+    if len(encoded.encode("utf-8")) > 64 * 1024 * 1024:
+        raise HTTPException(413, "工作区状态超过 64 MiB")
+
+    path = directory / WORKSPACE_STATE_FILE_NAME
+    temporary = directory / f".{WORKSPACE_STATE_FILE_NAME}.{uuid.uuid4().hex}.tmp"
+    try:
+        temporary.write_text(encoded, encoding="utf-8")
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return {
+        "ok": True,
+        "mediaId": media_id,
+        "filename": WORKSPACE_STATE_FILE_NAME,
+        "manualAnnotationCount": len(manual_annotations),
+        "manualBaselineCount": len(manual_baselines),
+    }
+
+
 # ---------------------------- tracking ----------------------------
 def _set_task(task_id: str, **patch: Any) -> None:
     with TASK_LOCK:
         TASKS[task_id] = {**TASKS.get(task_id, {}), **patch}
+
+
+def _effective_track_frames(start_frame: int, total_frames: int, requested_frames: int) -> int:
+    """Return the bounded frame count, including the seed frame."""
+    remaining = max(0, int(total_frames) - int(start_frame))
+    return min(max(1, int(requested_frames)), TRACK_FRAMES, remaining) if remaining else 0
 
 
 def _run_tracking_task(task_id: str, req: TrackRequest, video: Path, seed_file: Path, output_file: Path) -> None:
@@ -478,6 +613,8 @@ def _run_tracking_task(task_id: str, req: TrackRequest, video: Path, seed_file: 
                 pausedObjects=anomaly_paused.get("reasons", []),
                 anomalyLevels=anomaly_paused.get("levels", {}),
                 processedFrames=result.get("processedFrames", 0),
+                lastProcessedFrame=result.get("lastProcessedFrame"),
+                reachedVideoEnd=result.get("reachedVideoEnd", False),
             )
         else:
             _set_task(
@@ -485,6 +622,8 @@ def _run_tracking_task(task_id: str, req: TrackRequest, video: Path, seed_file: 
                 status="success",
                 message="completed",
                 processedFrames=result.get("processedFrames", 0),
+                lastProcessedFrame=result.get("lastProcessedFrame"),
+                reachedVideoEnd=result.get("reachedVideoEnd", False),
             )
     except Exception as exc:
         import traceback
@@ -534,93 +673,10 @@ def rewind_tracking(req: dict[str, Any], user: dict[str, Any] = Depends(current_
     return {"ok": True, "mediaId": media_id, **info}
 
 
-@app.post("/api/track/plan", response_model=TrackPlanResponse)
-def plan_tracking(req: TrackPlanRequest, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
-    """Run frame-difference planning before SAM3.
-
-    The frontend first saves the current-frame seed JSON, then this endpoint uses
-    that JSON plus the original MP4 to find the first persistent new-object cue.
-    The returned recommendedTrackFrames includes the seed frame itself.
-    """
-    directory = media_dir(req.mediaId)
-    video = find_video(directory)
-    if not video:
-        raise HTTPException(404, "视频文件不存在，请重新上传")
-
-    seed_name = req.seedFilename or f"annotations_frame_{req.startFrame:06d}.json"
-    # Prevent path traversal: only a filename produced inside this media directory is accepted.
-    seed_path = (directory / Path(seed_name).name).resolve()
-    try:
-        seed_path.relative_to(directory.resolve())
-    except ValueError:
-        raise HTTPException(400, "seedFilename 无效")
-    if not seed_path.is_file():
-        raise HTTPException(404, f"当前帧 JSON 不存在：{seed_path.name}")
-
-    roi_rect = None
-    if FRAME_DIFF_ROI_RECT.strip():
-        try:
-            vals = [int(v.strip()) for v in FRAME_DIFF_ROI_RECT.split(",")]
-            if len(vals) == 4:
-                roi_rect = tuple(vals)
-        except ValueError:
-            roi_rect = None
-
-    try:
-        result = find_next_new_object_frame(
-            str(video),
-            str(seed_path),
-            req.startFrame,
-            diff_threshold=FRAME_DIFF_THRESHOLD,
-            known_margin=FRAME_DIFF_KNOWN_MARGIN,
-            min_area=FRAME_DIFF_MIN_AREA,
-            min_area_ratio=FRAME_DIFF_MIN_AREA_RATIO,
-            confirm_frames=FRAME_DIFF_CONFIRM_FRAMES,
-            max_search_frames=(None if FRAME_DIFF_SEARCH_TO_VIDEO_END else FRAME_DIFF_MAX_SEARCH_FRAMES),
-            template_match_threshold=FRAME_DIFF_TEMPLATE_THRESHOLD,
-            max_confirm_miss=FRAME_DIFF_MAX_CONFIRM_MISS,
-            roi_rect=roi_rect,
-            verbose_log=FRAME_DIFF_VERBOSE_LOG,
-        )
-    except (FileNotFoundError, ValueError, RuntimeError) as exc:
-        raise HTTPException(400, str(exc)) from exc
-
-    if result.status == "no_new_object":
-        total_frames = int(_probe_video(video).get("frameCount") or 0)
-        recommended = max(1, total_frames - int(req.startFrame))
-        message = f"从第 {req.startFrame} 帧到视频末尾未确认新的持续运动目标；SAM3 将直接追踪到视频末尾。"
-    else:
-        recommended = max(1, min(result.recommended_track_frames, TRACK_FRAMES))
-        message = result.message
-    if result.status != "no_new_object" and result.frame_offset is not None and recommended < result.recommended_track_frames:
-        message = (
-            f"{message} 但 SAM3 单次安全上限为 {TRACK_FRAMES} 帧，"
-            f"本次实际提交 {recommended} 帧。"
-        )
-
-    return {
-        "mediaId": req.mediaId,
-        "startFrame": req.startFrame,
-        "status": result.status,
-        "newObjectFrame": result.frame_index,
-        "frameOffset": result.frame_offset,
-        "recommendedTrackFrames": recommended,
-        "searchFrames": result.search_frames,
-        "knownBoxCount": result.known_box_count,
-        "bbox": list(result.bbox) if result.bbox is not None else None,
-        "score": result.score,
-        "message": message,
-        "seedFilename": seed_path.name,
-        "willReachNewObject": result.frame_offset is not None and recommended == result.recommended_track_frames,
-        "trackToEnd": result.status == "no_new_object",
-    }
-
 @app.post("/api/track", status_code=202)
 def start_tracking(req: TrackRequest, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     if tracking_is_busy():
         raise HTTPException(409, "已有 SAM3 Tracking 任务正在运行，请等待完成")
-    if req.maxFrames > TRACK_FRAMES and not ALLOW_FULL_VIDEO_TRACKING:
-        raise HTTPException(400, f"单次 Tracking 最多 {TRACK_FRAMES} 帧；完整视频追踪需要 ALLOW_FULL_VIDEO_TRACKING=1")
     if not req.annotations:
         raise HTTPException(400, "没有 Tracking seed bbox")
 
@@ -653,6 +709,13 @@ def start_tracking(req: TrackRequest, user: dict[str, Any] = Depends(current_use
     video = find_video(directory)
     if not video:
         raise HTTPException(404, "视频文件不存在，请重新上传")
+    video_frame_count = int(_probe_video(video).get("frameCount") or 0)
+    effective_frames = _effective_track_frames(req.startFrame, video_frame_count, req.maxFrames)
+    if effective_frames < 1:
+        raise HTTPException(400, "startFrame 已超出视频末尾")
+    # maxFrames includes the seed frame.  Environment configuration is always
+    # the upper bound, regardless of what a client submits.
+    req.maxFrames = effective_frames
     seed_file = directory / f"seed_frame_{req.startFrame:06d}.json"
     output_file = directory / RESULT_FILE_NAME
     payload = {
@@ -664,7 +727,7 @@ def start_tracking(req: TrackRequest, user: dict[str, Any] = Depends(current_use
     seed_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     task_id = uuid.uuid4().hex
-    _set_task(task_id, taskId=task_id, status="queued", message="queued", mediaId=req.mediaId, startFrame=req.startFrame, userId=user["uid"])
+    _set_task(task_id, taskId=task_id, status="queued", message="queued", mediaId=req.mediaId, startFrame=req.startFrame, maxFrames=req.maxFrames, userId=user["uid"])
     TRACK_EXECUTOR.submit(_run_tracking_task, task_id, req, video, seed_file, output_file)
     return {"taskId": task_id, "status": "queued", "maxFrames": req.maxFrames, "trackFrames": req.maxFrames}
 
@@ -699,7 +762,18 @@ def scan_anomalies(req: AnomalyScanRequest, user: dict[str, Any] = Depends(curre
     tracker_file = directory / RESULT_FILE_NAME
     rows = _read_tracker_jsonl(tracker_file) if tracker_file.is_file() else []
 
-    detector = AnomalyDetector(config=AnomalyConfig(), fps=fps, frame_width=width, frame_height=height)
+    latest_frame = max(
+        (int(row.get("source_frame_index", row.get("frame_index", 0))) for row in rows),
+        default=0,
+    )
+    manual_baselines = _load_latest_manual_baselines(directory / "__anomaly_scan__.json", latest_frame)
+    detector = AnomalyDetector(
+        config=AnomalyConfig(),
+        fps=fps,
+        frame_width=width,
+        frame_height=height,
+        manual_baselines=manual_baselines,
+    )
     all_frames: list[AnomalyFrameOut] = []
     summary: dict[str, int] = {"anomaly": 0, "warning": 0, "disappeared": 0}
     pause_at: int | None = None
@@ -840,16 +914,22 @@ def list_media(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
             except Exception:
                 meta = {}
         has_result = (entry / RESULT_FILE_NAME).is_file()
+        has_workspace = (entry / WORKSPACE_STATE_FILE_NAME).is_file()
         base_name = meta.get("videoName") or video_file.name
         name_count[base_name] = name_count.get(base_name, 0) + 1
         count = name_count[base_name]
         display_name = base_name if count == 1 else f"{base_name} ({count})"
         items.append({
             "mediaId": entry.name,
+            # Stable storage identity and the actual source filename are kept
+            # separate from videoName, whose duplicate suffix is UI-only.
+            "directoryName": entry.name,
+            "sourceVideoName": base_name,
             "videoName": display_name,
             "videoUrl": f"/api/track/video/{entry.name}",
             "videoMimeType": meta.get("videoMimeType") or _video_media_type(video_file),
             "hasTrackingResult": has_result,
+            "hasWorkspaceState": has_workspace,
             "fps": meta.get("fps") or 0,
             "width": meta.get("width") or 0,
             "height": meta.get("height") or 0,

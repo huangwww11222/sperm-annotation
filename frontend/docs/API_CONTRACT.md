@@ -1,6 +1,6 @@
 # 微流控稀有精子识别与提取：前端接口契约
 
-> **当前集成说明**：前端已接入 FastAPI Tracking API。人工标注页面的 `AI Tracking` 会调用后端 `/api/track/annotations`、`/api/track/plan` 和 `/api/track`；其中 `/api/track/plan` 使用当前帧 seed JSON + 原始 MP4 做帧差规划，然后再进入原有 SAM3 Tracking。
+> **当前集成说明**：前端已接入 FastAPI Tracking API。人工标注页面的 `AI Tracking` 会先调用 `/api/track/annotations` 保存 seed，再调用 `/api/track` 持续追踪。
 >
 > 图片相关部分仍保留 Mock/本地运行能力；视频 AI Tracking 走真实后端。
 
@@ -15,8 +15,7 @@ Vue3 页面
                     ↓
                   FastAPI
                     ├─ 当前帧 seed JSON
-                    ├─ Frame Difference Planner
-                    └─ SAM3 Tracker
+                    └─ SAM3 Tracker + 异常暂停
 ```
 
 前端只负责：
@@ -680,7 +679,7 @@ bbox = { x, y, width, height } // 0~100
 
 ---
 
-# 12. AI Tracking 新调用顺序：Frame Difference → SAM3
+# 12. AI Tracking 调用顺序
 
 视频点击 **AI Tracking** 后，前端和后端的实际调用顺序改为：
 
@@ -689,54 +688,9 @@ POST /api/track/annotations
         ↓
 保存当前 frame 的 seed JSON
         ↓
-POST /api/track/plan
-        ↓
-MP4 + seed JSON 做帧差规划
-        ↓
-返回 recommendedTrackFrames
-        ↓
 POST /api/track
         ↓
-原 SAM3 tracking
-```
-
-### `POST /api/track/plan`
-
-Request：
-
-```json
-{
-  "mediaId": "sample",
-  "mediaName": "sample.mp4",
-  "startFrame": 120,
-  "seedFilename": "annotations_frame_000120.json"
-}
-```
-
-Response：
-
-```json
-{
-  "mediaId": "sample",
-  "startFrame": 120,
-  "status": "new_object_found",
-  "newObjectFrame": 137,
-  "frameOffset": 17,
-  "recommendedTrackFrames": 18,
-  "searchFrames": 17,
-  "knownBoxCount": 13,
-  "bbox": [401, 175, 430, 198],
-  "score": 0.72,
-  "message": "持续帧差候选已确认，建议 SAM3 追踪到该帧。",
-  "seedFilename": "annotations_frame_000120.json",
-  "willReachNewObject": true
-}
-```
-
-`recommendedTrackFrames` 包含 seed frame，因此：
-
-```text
-137 - 120 + 1 = 18
+SAM3 持续 tracking，直到异常、SAM3_TRACK_FRAMES 上限或视频末尾
 ```
 
 ### 前端行为
@@ -745,8 +699,6 @@ Response：
 
 1. 从页面当前 frame 获取 seed bbox；
 2. 保存为 `annotations_frame_NNNNNN.json`；
-3. 调用 `/api/track/plan`；
-4. 使用 `recommendedTrackFrames` 调用原 `/api/track`；
-5. SAM3 完成后，如果 `willReachNewObject=true`，自动定位到 `newObjectFrame`；
-6. 用户人工确认/补标后再次点击 Tracking。
-
+3. 调用 `/api/track`，后端限制本轮帧数（包含 seed 帧）；
+4. 异常时定位 `pausedFrame`，正常结束时定位 `lastProcessedFrame`；
+5. 用户检查/修正后可再次点击 Tracking 续追。

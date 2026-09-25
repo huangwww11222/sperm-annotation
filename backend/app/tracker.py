@@ -8,13 +8,19 @@ import cv2
 from PIL import Image
 
 from .config import DEVICE, DTYPE, MODEL_ID
-from .services.anomaly_detector import AnomalyDetector, AnomalyConfig, AnomalyLevel
+from .services.anomaly_detector import (
+    AnomalyConfig,
+    AnomalyDetector,
+    AnomalyLevel,
+    ManualBaseline,
+)
 from .services.sam3_engine import get_sam3_engine, read_video
 from .services.visualization import draw_frame, open_video_writer
 
 
 RESULT_FILE_NAME = "tracker_results.json"
 OVERLAY_FILE_NAME = "tracker_overlay.mp4"
+WORKSPACE_STATE_FILE_NAME = "workspace_state.json"
 
 
 def _json_bbox(values: list[float]) -> list[float]:
@@ -164,6 +170,81 @@ def _clean_history_before_seed(
     return sorted(frames, key=lambda item: item[0])
 
 
+def _load_latest_manual_baselines(
+    seed_path: Path,
+    seed_source_frame: int,
+) -> dict[int, ManualBaseline]:
+    """Restore each object's newest explicit manual bbox up to the seed frame.
+
+    ``annotations_frame_*.json`` is durable per-media state, so this works for
+    resume requests and after a backend restart.  The current ``seed_frame`` is
+    also considered for direct API clients.  An AI/warning/anomaly box is never
+    accepted, even if it is being reused as a valid SAM3 seed.
+    """
+    candidates = list(seed_path.parent.glob("annotations_frame_*.json"))
+    if seed_path not in candidates:
+        candidates.append(seed_path)
+
+    latest: dict[int, ManualBaseline] = {}
+    for path in candidates:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            frame_index = int(payload.get("frame", {}).get("frameIndex", -1))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            continue
+        if frame_index < 0 or frame_index > int(seed_source_frame):
+            continue
+
+        for annotation in payload.get("annotations", []):
+            if not isinstance(annotation, dict) or annotation.get("source") != "manual":
+                continue
+            try:
+                object_id = int(annotation.get("object_id", annotation.get("objectId")))
+                bbox = [float(value) for value in annotation["bbox"]]
+            except (KeyError, TypeError, ValueError):
+                continue
+            if len(bbox) != 4 or bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+                continue
+            previous = latest.get(object_id)
+            if previous is None or frame_index >= previous.frame_index:
+                latest[object_id] = ManualBaseline(
+                    bbox=bbox,
+                    frame_index=frame_index,
+                    name=annotation.get("name") or None,
+                )
+
+    # workspace_state.json is written whenever the browser changes a manual
+    # box.  It can therefore be newer than the last explicit Tracking seed.
+    # Only entries explicitly marked manual are accepted; AI predictions can
+    # never become a baseline merely by being persisted in the workspace.
+    workspace_file = seed_path.parent / WORKSPACE_STATE_FILE_NAME
+    try:
+        workspace = json.loads(workspace_file.read_text(encoding="utf-8"))
+    except (OSError, TypeError, json.JSONDecodeError):
+        workspace = {}
+    for item in workspace.get("manualBaselines", []):
+        if not isinstance(item, dict) or item.get("source") != "manual":
+            continue
+        try:
+            object_id = int(item.get("objectId", item.get("object_id")))
+            frame_index = int(item.get("frameIndex", item.get("frame_index", -1)))
+            bbox = [float(value) for value in item["bbox"]]
+        except (KeyError, TypeError, ValueError):
+            continue
+        if frame_index < 0 or frame_index > int(seed_source_frame):
+            continue
+        if len(bbox) != 4 or bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+            continue
+        previous = latest.get(object_id)
+        if previous is None or frame_index >= previous.frame_index:
+            latest[object_id] = ManualBaseline(
+                bbox=bbox,
+                frame_index=frame_index,
+                name=item.get("name") or None,
+            )
+    return latest
+
+
 def rewind_tracking_results(
     path: Path,
     video_file: Path,
@@ -207,17 +288,10 @@ def rewind_tracking_results(
         except Exception as exc:
             print(f"[tracking-rewind] overlay regeneration failed: {exc}")
 
-    # 删除已经不再属于当前分支的旧 seed JSON。保留 cutoff 本身及之前，
-    # cutoff 的最新 seed 将由下一次 /track/annotations 覆盖写入。
+    # Annotation JSON is user data and also the durable source of manual
+    # baselines.  Rewinding tracking must never delete it; the next save simply
+    # overwrites the selected frame if the user confirms a new annotation.
     deleted_seed_files = 0
-    for seed_file in sorted(path.parent.glob("annotations_frame_*.json")):
-        try:
-            frame = int(seed_file.stem.rsplit("_", 1)[1])
-        except Exception:
-            continue
-        if frame > cutoff:
-            seed_file.unlink(missing_ok=True)
-            deleted_seed_files += 1
 
     print(
         f"[tracking-rewind] cutoff={cutoff} kept_rows={len(kept)} "
@@ -296,12 +370,19 @@ def track_video(
 
     # 每次 SAM3 推理请求都有新 detector，但先灌入当前分支在 seed 前的
     # 已验证历史框。这样续追时也能和整个对象历史尺寸比较，而不是只看本轮。
+    active_object_ids = {int(o["object_id"]) for o in objects}
+    manual_baselines = {
+        object_id: baseline
+        for object_id, baseline in _load_latest_manual_baselines(Path(annotation_json), seed_source_frame).items()
+        if object_id in active_object_ids
+    }
     detector = AnomalyDetector(
         config=AnomalyConfig(),
         fps=source_fps,
         frame_width=width,
         frame_height=height,
-        all_object_ids=[int(o["object_id"]) for o in objects],
+        all_object_ids=active_object_ids,
+        manual_baselines=manual_baselines,
     )
     detector.prime_history(_clean_history_before_seed(Path(output_json), seed_source_frame))
 
@@ -332,12 +413,17 @@ def track_video(
         {int(obj["object_id"]): list(obj["bbox"]) for obj in objects},
     )
 
+    result_anomaly_paused = None
+    last_processed_frame = seed_source_idx
+    end_frame_exclusive = seed_frame + requested
     for output in engine.propagate_manual(
         session,
         max_frames=requested,
         start_frame_idx=seed_frame,
     ):
         frame_idx = int(output.frame_idx)
+        if frame_idx >= end_frame_exclusive:
+            break
         if frame_idx <= seed_frame or frame_idx >= len(source_indices):
             continue
 
@@ -397,6 +483,7 @@ def track_video(
             ],
         }
         new_rows.append(row)
+        last_processed_frame = source_idx
         print(
             f"[sam3] frame={frame_idx} source={source_idx} "
             f"tracked_objects={len(object_rows)}"
@@ -408,25 +495,49 @@ def track_video(
             for af in anomaly_report.frames:
                 if af.level in (AnomalyLevel.ANOMALY, AnomalyLevel.DISAPPEARED):
                     details = af.details or {}
+                    area_ratio = details.get("area_ratio")
+                    width_ratio = details.get("width_ratio")
+                    height_ratio = details.get("height_ratio")
+                    is_shrink = (
+                        isinstance(area_ratio, (int, float)) and area_ratio < detector.config.MANUAL_AREA_RATIO_MIN_HARD
+                    ) or (
+                        isinstance(width_ratio, (int, float)) and width_ratio < detector.config.MANUAL_WIDTH_RATIO_MIN_HARD
+                    ) or (
+                        isinstance(height_ratio, (int, float)) and height_ratio < detector.config.MANUAL_HEIGHT_RATIO_MIN_HARD
+                    )
                     pause_type = (
-                        "edge_exit" if af.level == AnomalyLevel.DISAPPEARED
+                        "disappearance" if af.level == AnomalyLevel.DISAPPEARED
                         else "overlap" if any("bbox_overlap_with=" in r for r in af.reasons)
-                        else "merged_bbox_growth" if any(
-                            r.startswith(("history_area_ratio=", "history_width_ratio=", "history_height_ratio="))
-                            for r in af.reasons
-                        )
-                        else "size_growth" if any(
-                            any(k in r for k in ("area_ratio", "width_ratio", "height_ratio"))
-                            for r in af.reasons
-                        )
+                        else "size_shrink" if is_shrink
+                        else "size_growth" if any(r.startswith(("manual_area_ratio=", "manual_width_ratio=", "manual_height_ratio=")) for r in af.reasons)
+                        else "shape_change" if any(r.startswith("manual_aspect_change=") for r in af.reasons)
                         else "tracking_motion"
                     )
+                    other_id = details.get("other_object_id")
+                    display_name = object_names.get(int(af.object_id), f"object-{af.object_id}")
                     pause_objects.append({
                         "object_id": int(af.object_id),
+                        "name": display_name,
+                        "display_name": display_name,
                         "type": pause_type,
                         "reasons": list(af.reasons),
                         "details": details,
-                        "ratio": details.get("area_ratio"),
+                        "currentBox": details.get("current_bbox"),
+                        "manualBaselineBox": details.get("manual_baseline_bbox"),
+                        "manualBaselineFrame": details.get("manual_baseline_frame"),
+                        "metrics": {
+                            "areaRatio": area_ratio,
+                            "widthRatio": width_ratio,
+                            "heightRatio": height_ratio,
+                            "aspectRatio": details.get("aspect_ratio_ratio"),
+                            "overlapCoverage": details.get("overlap_coverage"),
+                        },
+                        "reviewStartFrame": details.get("review_start_frame"),
+                        "reviewEndFrame": details.get("review_end_frame"),
+                        "reviewLookbackFrames": details.get("review_lookback_frames"),
+                        "other_object_id": other_id,
+                        "other_display_name": object_names.get(int(other_id), f"object-{other_id}") if other_id is not None else None,
+                        "ratio": area_ratio,
                         "prevArea": details.get("baseline_area"),
                         "currArea": details.get("current_area"),
                     })
@@ -442,9 +553,6 @@ def track_video(
     overlay_path = Path(output_json).parent / OVERLAY_FILE_NAME
     _render_overlay_video(video_file, overlay_path, meta, merged_rows)
 
-    # 如果 anomaly break 了，带上暂停信息
-    anomaly_paused = locals().get("result_anomaly_paused", None)
-
     result = {
         "frames": merged_rows,
         "resultFile": str(Path(output_json).resolve()),
@@ -452,6 +560,8 @@ def track_video(
         "startFrame": requested_source_start,
         "requestedFrames": requested,
         "processedFrames": len(new_rows),
+        "lastProcessedFrame": last_processed_frame,
+        "reachedVideoEnd": last_processed_frame >= source_frame_count - 1,
         "sourceFps": source_fps,
         "processFps": source_fps,
         "sampleInterval": 1,
@@ -466,7 +576,7 @@ def track_video(
             "fps": source_fps,
             "frameCount": source_frame_count,
         },
-        "anomaly_paused": anomaly_paused,
+        "anomaly_paused": result_anomaly_paused,
     }
     print(f"[sam3] result jsonl: {output_json}")
     print(f"[sam3] overlay mp4: {overlay_path}")
