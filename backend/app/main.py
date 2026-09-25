@@ -39,6 +39,7 @@ from .tracker import (
     rewind_tracking_results,
     _load_latest_manual_baselines,
 )
+from .review_routes import register_review_routers
 
 app = FastAPI(title="SAM3 Annotation Backend", version="3.0.0")
 app.add_middleware(
@@ -47,6 +48,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+register_review_routers(app)
 
 # GPU tracking strictly serialized for 4GB cards; FastAPI remains responsive.
 TRACK_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sam3-track")
