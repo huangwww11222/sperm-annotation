@@ -19,6 +19,3 @@ backend/data/app.db-wal
 /work/
 
 /output/playwright/
-/output/
-.DS_Store
-**/.DS_Store
