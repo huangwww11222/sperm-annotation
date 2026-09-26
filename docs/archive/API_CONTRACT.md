@@ -1,3 +1,5 @@
+> **历史归档，非当前开发依据。** 本文保留当时的设计或验收记录，可能包含已撤销规则。当前入口：[文档索引](../README.md)；业务规则：[WORKFLOW.md](../WORKFLOW.md)。归档日期：2026-09-27。
+
 # 微流控稀有精子识别与提取：前端接口契约
 
 > **当前集成说明**：前端已接入 FastAPI Tracking API。人工标注页面的 `AI Tracking` 会先调用 `/api/track/annotations` 保存 seed，再调用 `/api/track` 持续追踪。

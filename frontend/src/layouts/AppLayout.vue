@@ -1,36 +1,30 @@
 <script setup lang="ts">
 import { useRouter } from '../router'
 import { useAuth } from '../stores/auth'
-
-const router = useRouter()
+import { useAppearance } from '../stores/appearance'
+import AppIcon from '../components/AppIcon.vue'
+import UserGuide from '../components/UserGuide.vue'
+const router = useRouter(), routePath = router.path
 const { user, logout } = useAuth()
-const routePath = router.path
+const { theme, toggleTheme } = useAppearance()
+async function signOut() { if (await router.canLeave()) { logout(); await router.replace('/login') } }
 </script>
-
 <template>
-  <div class="min-h-screen w-full bg-slate-950 text-slate-100">
-    <header class="sticky top-0 z-30 h-16 border-b border-slate-800 bg-slate-950/95 backdrop-blur">
-      <div class="flex h-full w-full items-center justify-between px-6 2xl:px-8">
-        <div class="min-w-0">
-          <h1 class="text-base font-bold tracking-wide">微流控稀有精子识别与提取</h1>
-          <p class="mt-0.5 text-[11px] text-slate-400">PC 端人工标注、AI Tracking 与结果管理 · 模块化页面架构</p>
-        </div>
-        <div class="flex items-center gap-4">
-          <nav class="flex items-center rounded-xl border border-slate-700 bg-slate-900 p-1">
-            <button class="nav-btn" :class="routePath === '/annotate' ? 'nav-btn-active' : ''" @click="router.push('/annotate')">人工标注</button>
-            <button class="nav-btn" :class="routePath === '/results' ? 'nav-btn-active' : ''" @click="router.push('/results')">标注结果</button>
-            <button class="nav-btn" :class="routePath === '/review' ? 'nav-btn-active' : ''" @click="router.push('/review')">审查模式</button>
-            <button class="nav-btn" :class="routePath === '/confirm' ? 'nav-btn-active' : ''" @click="router.push('/confirm')">对比确认</button>
-          </nav>
-          <div class="flex items-center gap-2 border-l border-slate-800 pl-4">
-            <span class="text-xs text-slate-400">{{ user?.name }}</span>
-            <button class="btn-secondary" @click="logout(); router.replace('/login')">退出</button>
-          </div>
-        </div>
+  <div class="app-shell">
+    <header class="app-header">
+      <div class="app-brand"><span class="brand-mark"><AppIcon name="layers" :size="22" /></span><div><h1>微流控标注工作台</h1><small>稀有精子识别与提取</small></div></div>
+      <nav class="workflow-nav" aria-label="数据制作流程">
+        <button aria-label="人工标注" :class="{active:routePath==='/annotate'}" @click="router.push('/annotate')"><span>01</span>人工标注</button><AppIcon name="chevron" :size="13" />
+        <button aria-label="审查模式" :class="{active:routePath==='/review'}" @click="router.push('/review')"><span>02</span>审查模式</button><AppIcon name="chevron" :size="13" />
+        <button aria-label="对比确认" :class="{active:routePath==='/confirm'}" @click="router.push('/confirm')"><span>03</span>对比确认</button>
+      </nav>
+      <div class="app-account">
+        <UserGuide :page="routePath" />
+        <button class="quiet-button records-nav" :class="{active:routePath==='/results'}" @click="router.push('/results')"><AppIcon name="list" :size="16" />标注记录</button>
+        <button class="icon-button" :aria-label="theme === 'light' ? '切换深色主题' : '切换浅色主题'" :title="theme === 'light' ? '深色主题' : '浅色主题'" @click="toggleTheme"><AppIcon :name="theme==='light'?'moon':'sun'" /></button>
+        <span class="user-name">{{ user?.name }}</span><button class="quiet-button" @click="signOut">退出</button>
       </div>
     </header>
-    <main class="flex min-h-[calc(100vh-64px)] w-full flex-col px-5 py-5 2xl:px-8">
-      <slot />
-    </main>
+    <main class="app-main"><slot /></main>
   </div>
 </template>

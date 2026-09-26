@@ -1,0 +1,1414 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>审查模式 Demo</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --bg: #0a0e1a;
+  --panel: #0f1729;
+  --panel2: #1a2336;
+  --panel3: #243049;
+  --border: #2a3550;
+  --border-light: #3a4a6b;
+  --text: #e2e8f0;
+  --muted: #7a8aa8;
+  --green: #22c55e;
+  --red: #ef4444;
+  --purple: #a855f7;
+  --blue: #2563eb;
+  --blue-light: #3b82f6;
+  --yellow: #eab308;
+  --orange: #f97316;
+}
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", Roboto, sans-serif;
+  background: var(--bg); color: var(--text);
+  font-size: 13px; overflow: hidden; height: 100vh;
+}
+button { cursor: pointer; font-family: inherit; font-size: 13px; border: none; }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--panel); }
+::-webkit-scrollbar-thumb { background: var(--border-light); border-radius: 3px; }
+
+/* ===== 顶部导航 ===== */
+.top-nav {
+  height: 52px; background: var(--panel); border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; padding: 0 20px; gap: 24px;
+}
+.nav-brand .title { font-weight: 600; font-size: 15px; white-space: nowrap; }
+.nav-brand .sub { font-size: 11px; color: var(--muted); margin-top: 1px; }
+.flow-steps { display: flex; align-items: center; gap: 6px; }
+.flow-step {
+  display: flex; align-items: center; gap: 5px; padding: 5px 12px;
+  border-radius: 4px; color: var(--muted); font-size: 12px;
+}
+.flow-step .num {
+  width: 18px; height: 18px; border-radius: 50%;
+  background: var(--panel3); display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 600;
+}
+.flow-step.active { color: #fff; }
+.flow-step.active .num { background: var(--blue); }
+.flow-arrow { color: var(--muted); font-size: 12px; }
+.nav-tabs { display: flex; gap: 2px; }
+.nav-tab {
+  padding: 6px 16px; border-radius: 4px; background: transparent;
+  color: var(--muted); font-size: 13px;
+}
+.nav-tab.active { background: var(--blue); color: #fff; }
+.nav-tab:hover:not(.active) { background: var(--panel2); color: var(--text); }
+.nav-right { display: flex; align-items: center; gap: 12px; margin-left: auto; }
+.demo-tag {
+  padding: 4px 10px; background: var(--panel3); border-radius: 4px;
+  color: var(--muted); font-size: 12px;
+}
+.btn-logout {
+  padding: 6px 14px; background: var(--panel3); color: var(--muted);
+  border-radius: 4px; font-size: 12px;
+}
+
+/* ===== 主布局 ===== */
+.main { display: flex; flex-direction: column; height: calc(100vh - 52px); overflow: hidden; }
+.top-row { flex: 1; display: flex; overflow: hidden; }
+.sidebar {
+  width: 240px; background: var(--panel); border-right: 1px solid var(--border);
+  display: flex; flex-direction: column;
+}
+.center { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
+.right-panel {
+  width: 260px; background: var(--panel); border-left: 1px solid var(--border);
+  display: flex; flex-direction: column; overflow-y: auto;
+}
+.bottom {
+  height: 220px; flex-shrink: 0; border-top: 1px solid var(--border); display: flex;
+  background: var(--panel); overflow: hidden;
+}
+
+/* ===== 左侧列表 ===== */
+.sidebar-header { padding: 12px; border-bottom: 1px solid var(--border); }
+.sidebar-header h3 { font-size: 13px; margin-bottom: 10px; font-weight: 600; }
+.search-box {
+  position: relative; margin-bottom: 10px;
+}
+.search-box input {
+  width: 100%; background: var(--panel2); border: 1px solid var(--border);
+  color: var(--text); padding: 7px 10px 7px 30px; border-radius: 4px; font-size: 12px;
+}
+.search-box::before {
+  content: "🔍"; position: absolute; left: 9px; top: 50%; transform: translateY(-50%);
+  font-size: 11px; opacity: 0.6;
+}
+.filter-tabs { display: flex; gap: 4px; }
+.filter-tab {
+  padding: 4px 10px; border-radius: 4px; background: var(--panel2);
+  color: var(--muted); font-size: 11px;
+}
+.filter-tab.active { background: var(--blue); color: #fff; }
+.video-list { flex: 1; overflow-y: auto; padding: 8px; }
+.video-card {
+  background: var(--panel2); border: 1px solid var(--border); border-radius: 6px;
+  padding: 10px; margin-bottom: 8px; cursor: pointer; transition: all 0.15s;
+}
+.video-card:hover { border-color: var(--blue-light); }
+.video-card.active { border-color: var(--blue); background: #162033; }
+.video-card .row1 {
+  display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;
+}
+.video-card .name { font-weight: 600; font-size: 13px; }
+.status-badge {
+  padding: 1px 8px; border-radius: 3px; font-size: 10px; font-weight: 500;
+}
+.status-reviewing { background: rgba(37,99,235,0.2); color: #60a5fa; }
+.status-pending { background: rgba(249,115,22,0.2); color: #fb923c; }
+.status-reviewed { background: rgba(34,197,94,0.2); color: #4ade80; }
+.video-card .duration { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+.progress-mini {
+  height: 4px; background: var(--panel3); border-radius: 2px; overflow: hidden;
+  margin-bottom: 6px;
+}
+.progress-mini-fill { height: 100%; background: var(--blue); border-radius: 2px; }
+.video-card .meta { font-size: 11px; color: var(--muted); display: flex; justify-content: space-between; }
+
+/* ===== 中央区域 ===== */
+.center-header {
+  padding: 8px 16px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+  background: var(--panel);
+}
+.center-header .filename { font-size: 14px; font-weight: 600; }
+.center-header .toggle {
+  display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted);
+}
+.center-header .toggle input { cursor: pointer; }
+.center-header .shortcut {
+  padding: 2px 6px; background: var(--panel3); border-radius: 3px; font-size: 10px;
+}
+
+.canvas-area {
+  flex: 1; position: relative; background: #050810;
+  display: flex; align-items: center; justify-content: center; overflow: auto;
+}
+.canvas-inner {
+  position: relative; background: #0a0f1c;
+  box-shadow: 0 0 40px rgba(0,0,0,0.6);
+  transform-origin: center center;
+}
+.frame-img {
+  display: block; user-select: none;
+  background:
+    radial-gradient(circle at 20% 30%, #1a2540 0%, transparent 40%),
+    radial-gradient(circle at 70% 60%, #1a2540 0%, transparent 40%),
+    radial-gradient(circle at 50% 80%, #15203a 0%, transparent 30%),
+    #0a0f1c;
+}
+.bbox {
+  position: absolute; border: 2px solid var(--green); cursor: move;
+  box-sizing: border-box;
+}
+.bbox.modified { border-color: var(--red); }
+.bbox.selected { border-width: 3px; z-index: 5; }
+.bbox-label {
+  position: absolute; top: -16px; left: -2px; background: var(--green);
+  color: #fff; font-size: 10px; padding: 1px 4px; border-radius: 2px; white-space: nowrap;
+  font-weight: 600;
+}
+.bbox.modified .bbox-label { background: var(--red); }
+.handle {
+  position: absolute; width: 8px; height: 8px; background: #fff;
+  border: 1px solid var(--border); z-index: 10;
+}
+.handle.tl { top: -5px; left: -5px; cursor: nwse-resize; }
+.handle.tr { top: -5px; right: -5px; cursor: nesw-resize; }
+.handle.bl { bottom: -5px; left: -5px; cursor: nesw-resize; }
+.handle.br { bottom: -5px; right: -5px; cursor: nwse-resize; }
+
+/* 拖动提示框 */
+.drag-hint {
+  position: absolute; background: rgba(255,255,255,0.95); color: #1a202c;
+  padding: 8px 12px; border-radius: 6px; font-size: 11px; line-height: 1.6;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3); pointer-events: none; z-index: 50;
+  display: none;
+}
+.drag-hint.show { display: block; }
+
+/* 缩放控件 */
+.zoom-controls {
+  position: absolute; bottom: 10px; right: 10px; display: flex; align-items: center;
+  gap: 6px; background: var(--panel); border: 1px solid var(--border);
+  padding: 4px 8px; border-radius: 4px; z-index: 20;
+}
+.zoom-controls button {
+  background: var(--panel2); color: var(--text); width: 22px; height: 22px;
+  border-radius: 3px; font-size: 14px; display: flex; align-items: center; justify-content: center;
+}
+.zoom-controls span { font-size: 12px; color: var(--muted); min-width: 40px; text-align: center; }
+
+/* 底部视频控件 */
+.video-controls {
+  padding: 8px 16px; background: var(--panel); border-top: 1px solid var(--border);
+  display: flex; align-items: center; gap: 12px;
+}
+.play-btn {
+  width: 32px; height: 32px; border-radius: 50%; background: var(--blue);
+  color: #fff; display: flex; align-items: center; justify-content: center; font-size: 14px;
+}
+.video-controls .time { font-size: 12px; color: var(--muted); min-width: 130px; }
+.seek-bar {
+  flex: 1; height: 4px; background: var(--panel3); border-radius: 2px;
+  position: relative; cursor: pointer;
+}
+.seek-fill { height: 100%; background: var(--blue); border-radius: 2px; }
+.frame-info-text { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.frame-nav-btn {
+  background: var(--panel2); color: var(--text); padding: 5px 10px;
+  border-radius: 4px; font-size: 12px;
+}
+.frame-nav-btn:hover:not(:disabled) { background: var(--panel3); }
+.frame-nav-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.jump-input {
+  width: 50px; background: var(--panel2); border: 1px solid var(--border);
+  color: var(--text); padding: 5px 6px; border-radius: 4px; text-align: center; font-size: 12px;
+}
+
+/* 弹窗 */
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: none;
+  align-items: center; justify-content: center; z-index: 1000;
+}
+.modal-overlay.show { display: flex; }
+.modal {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+  padding: 20px 24px; min-width: 320px;
+}
+.modal-header {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 14px;
+}
+.modal-icon {
+  width: 28px; height: 28px; border-radius: 50%; background: rgba(37,99,235,0.2);
+  display: flex; align-items: center; justify-content: center; color: var(--blue-light);
+}
+.modal h3 { font-size: 15px; }
+.modal p { color: var(--muted); line-height: 1.8; font-size: 13px; }
+.modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+
+/* ===== 右侧面板 ===== */
+.panel-section { padding: 14px; border-bottom: 1px solid var(--border); }
+.panel-section h4 {
+  font-size: 12px; color: var(--muted); margin-bottom: 12px;
+  text-transform: none; font-weight: 600; letter-spacing: 0;
+}
+.stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.stat-item { background: var(--panel2); padding: 10px; border-radius: 4px; }
+.stat-item .label { font-size: 11px; color: var(--muted); }
+.stat-item .value { font-size: 20px; font-weight: 600; margin-top: 4px; }
+.stat-item .value.red { color: var(--red); }
+.stat-item .value.green { color: var(--green); }
+
+.operate-hints { margin-bottom: 12px; }
+.operate-hint {
+  display: flex; align-items: flex-start; gap: 6px; padding: 4px 0;
+  font-size: 11px; color: var(--muted); line-height: 1.4;
+}
+.operate-hint .icon { color: var(--blue-light); flex-shrink: 0; }
+
+.btn {
+  padding: 8px 12px; border-radius: 4px; background: var(--panel2);
+  color: var(--text); transition: all 0.15s; width: 100%; display: flex;
+  align-items: center; justify-content: center; gap: 6px; font-size: 13px;
+  margin-bottom: 8px;
+}
+.btn:hover:not(:disabled) { background: var(--panel3); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-primary { background: var(--blue); color: #fff; }
+.btn-primary:hover:not(:disabled) { background: #1d4ed8; }
+
+.save-status {
+  font-size: 11px; color: var(--muted); margin-top: 4px; text-align: center;
+}
+.save-status.saved { color: var(--green); }
+.save-status.saving { color: var(--yellow); }
+
+/* 圆环进度 */
+.progress-circle-wrap {
+  display: flex; align-items: center; gap: 14px; margin-bottom: 12px;
+}
+.progress-circle {
+  width: 70px; height: 70px; position: relative; flex-shrink: 0;
+}
+.progress-circle svg { transform: rotate(-90deg); }
+.progress-circle .pct {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  font-size: 16px; font-weight: 700; color: var(--blue-light);
+}
+.progress-info { flex: 1; }
+.progress-info .row {
+  display: flex; justify-content: space-between; font-size: 12px; padding: 3px 0;
+}
+.progress-info .row .label { color: var(--muted); }
+.progress-info .row .val { color: var(--text); font-weight: 500; }
+.tip-text {
+  font-size: 11px; color: var(--muted); line-height: 1.5; margin-top: 8px;
+  padding: 8px; background: var(--panel2); border-radius: 4px;
+}
+
+/* ===== 底部对比区 ===== */
+.bottom-left {
+  flex: 0 0 280px; border-right: 1px solid var(--border);
+  display: flex; flex-direction: column;
+}
+.bottom-right { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.bottom-header {
+  padding: 8px 12px; border-bottom: 1px solid var(--border); font-weight: 600;
+  font-size: 13px;
+}
+.compare-area {
+  flex: 1; display: flex; align-items: center; padding: 10px; gap: 8px;
+}
+.compare-box { flex: 1; display: flex; flex-direction: column; align-items: center; }
+.compare-box .label {
+  font-size: 11px; color: var(--muted); margin-bottom: 6px;
+}
+.compare-box .label.a { color: var(--green); }
+.compare-box .label.b { color: var(--red); }
+.compare-canvas {
+  width: 100%; height: 100px; background: #0a0f1c; border-radius: 4px;
+  position: relative; overflow: hidden; border: 1px solid var(--border);
+}
+.compare-canvas .bbox { position: absolute; }
+.compare-arrow {
+  color: var(--muted); font-size: 18px; flex-shrink: 0;
+}
+.compare-coords {
+  font-size: 10px; color: var(--muted); margin-top: 5px; text-align: center;
+}
+.compare-empty {
+  display: flex; align-items: center; justify-content: center; height: 100%;
+  color: var(--muted); font-size: 11px;
+}
+
+/* 表格 */
+.table-wrap { flex: 1; overflow: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+thead th {
+  position: sticky; top: 0; background: var(--panel2); padding: 8px 6px;
+  text-align: left; color: var(--muted); font-weight: 500; font-size: 11px;
+  border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+tbody td {
+  padding: 6px; border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+tbody tr { cursor: pointer; }
+tbody tr:hover { background: var(--panel2); }
+tbody tr.selected { background: rgba(37,99,235,0.15); }
+tbody tr.modified-row { background: rgba(239,68,68,0.08); }
+tbody tr.modified-row:hover { background: rgba(239,68,68,0.15); }
+.tag-modified { color: var(--red); font-weight: 500; }
+.tag-unchanged { color: var(--muted); }
+.btn-view {
+  padding: 2px 8px; background: var(--panel3); color: var(--blue-light);
+  border-radius: 3px; font-size: 11px;
+}
+
+/* 快捷键帮助面板 */
+.help-groups { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-top: 8px; }
+.help-group h4 { font-size: 12px; color: var(--blue-light); margin-bottom: 8px; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+.help-table { width: 100%; font-size: 12px; }
+.help-table td { padding: 4px 0; }
+.help-table td:first-child { color: var(--muted); }
+.help-table td:last-child { text-align: right; }
+.help-note { color: var(--muted); font-size: 10px; }
+kbd {
+  display: inline-block; padding: 1px 6px; background: var(--panel3);
+  border: 1px solid var(--border); border-radius: 3px; font-size: 11px;
+  font-family: monospace; min-width: 18px; text-align: center;
+}
+</style>
+</head>
+<body>
+
+<!-- 顶部导航 -->
+<div class="top-nav">
+  <div class="nav-brand">
+    <div class="title">微流控精子识别与提取</div>
+    <div class="sub">PC 端人工标注、AI Tracking 与结果管理</div>
+  </div>
+  <div class="flow-steps">
+    <span class="flow-step"><span class="num">1</span>标注</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-step"><span class="num">2</span>自动入库</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-step active"><span class="num">3</span>审查模式</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-step"><span class="num">4</span>对比确认</span>
+  </div>
+  <div class="nav-tabs">
+    <button class="nav-tab">人工标注</button>
+    <button class="nav-tab">标注结果</button>
+    <button class="nav-tab active">审查模式</button>
+    <button class="nav-tab">对比确认</button>
+  </div>
+  <div class="nav-right">
+    <span class="demo-tag">demo</span>
+    <button class="btn-logout">退出</button>
+  </div>
+</div>
+
+<div class="main">
+  <div class="top-row">
+  <!-- 左侧列表 -->
+  <div class="sidebar">
+    <div class="sidebar-header">
+      <h3>待审查视频列表（已标注）</h3>
+      <div class="search-box">
+        <input type="text" placeholder="搜索视频名称或ID...">
+      </div>
+      <div class="filter-tabs" id="filterTabs">
+        <button class="filter-tab active" data-filter="all">全部</button>
+        <button class="filter-tab" data-filter="reviewing">审查中</button>
+        <button class="filter-tab" data-filter="pending">待审查</button>
+        <button class="filter-tab" data-filter="reviewed">已审查</button>
+      </div>
+    </div>
+    <div class="video-list" id="videoList"></div>
+  </div>
+
+  <!-- 中央区域 -->
+  <div class="center">
+    <div class="center-header">
+      <span class="filename" id="curVideoName">T20x_001.avi</span>
+      <div class="toggle">
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer">
+          <input type="checkbox" id="showAOverlay"> 原标注叠加
+        </label>
+        <span class="shortcut">快捷键</span>
+      </div>
+    </div>
+    <div class="canvas-area" id="canvasArea">
+      <div class="canvas-inner" id="canvasInner" style="width:640px;height:480px">
+        <canvas id="frameCanvas" width="640" height="480" class="frame-img"></canvas>
+      </div>
+      <div class="drag-hint" id="dragHint">
+        拖动框可移动位置<br>
+        拖动四角可调整大小<br>
+        只能修改已有的标注框
+      </div>
+      <div class="zoom-controls">
+        <button id="zoomOut">−</button>
+        <span id="zoomPct">100%</span>
+        <button id="zoomIn">+</button>
+      </div>
+    </div>
+    <div class="video-controls">
+      <button class="play-btn" id="playBtn">▶</button>
+      <span class="time" id="curTimeDisplay">00:06.334 / 00:33.300</span>
+      <div class="seek-bar" id="seekBar">
+        <div class="seek-fill" id="seekFill" style="width:19%"></div>
+      </div>
+      <span class="frame-info-text">第 <b id="curFrame">190</b> / <b id="totalFrames">1000</b> 帧</span>
+      <button class="frame-nav-btn" id="prevFrame">上一帧</button>
+      <button class="frame-nav-btn" id="nextFrame">下一帧</button>
+      <span>跳转到</span>
+      <input type="number" class="jump-input" id="frameJump" min="1" value="190">
+      <button class="frame-nav-btn" id="jumpBtn">确定</button>
+    </div>
+  </div>
+
+  <!-- 右侧面板 -->
+  <div class="right-panel">
+    <div class="panel-section">
+      <h4>当前帧审查统计</h4>
+      <div class="stat-grid">
+        <div class="stat-item">
+          <div class="label">当前帧标注框数</div>
+          <div class="value" id="statTotal">8</div>
+        </div>
+        <div class="stat-item">
+          <div class="label">已修改框</div>
+          <div class="value red" id="statModified">1</div>
+        </div>
+        <div class="stat-item">
+          <div class="label">未修改框</div>
+          <div class="value green" id="statUnmodified">7</div>
+        </div>
+        <div class="stat-item">
+          <div class="label">平均 IoU（修改框）</div>
+          <div class="value" id="statIoU" style="font-size:16px">0.68</div>
+        </div>
+        <div class="stat-item" style="grid-column: span 2;">
+          <div class="label">最大位置偏移</div>
+          <div class="value" id="statMaxShift" style="font-size:16px">6.4 px</div>
+        </div>
+      </div>
+    </div>
+    <div class="panel-section">
+      <h4>审查操作</h4>
+      <div class="operate-hints">
+        <div class="operate-hint"><span class="icon">↗</span>直接拖动标注框进行位置调整</div>
+        <div class="operate-hint"><span class="icon">⤢</span>拖动四角调整框的大小</div>
+        <div class="operate-hint"><span class="icon">⊘</span>只能修改已有的标注框，无法新增或删除</div>
+      </div>
+      <button class="btn" id="undoBtn">↶ 撤销 撤销本帧的上一次修改</button>
+      <button class="btn btn-primary" id="submitBtn">✓ 提交本帧</button>
+      <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
+        <span class="frame-status" id="frameStatus" style="font-size:11px;color:var(--muted)"></span>
+        <span class="save-status" id="saveStatus" style="margin-left:auto">无待保存内容</span>
+      </div>
+    </div>
+    <div class="panel-section">
+      <h4>视频审查进度</h4>
+      <div class="progress-circle-wrap">
+        <div class="progress-circle">
+          <svg width="70" height="70">
+            <circle cx="35" cy="35" r="30" fill="none" stroke="#1a2336" stroke-width="6"/>
+            <circle cx="35" cy="35" r="30" fill="none" stroke="#2563eb" stroke-width="6"
+              stroke-dasharray="188.4" stroke-dashoffset="152.6" stroke-linecap="round" id="circleProg"/>
+          </svg>
+          <div class="pct" id="progPct">19%</div>
+        </div>
+        <div class="progress-info">
+          <div class="row"><span class="label">已审查帧数</span><span class="val" id="submittedFrames">189 / 1000</span></div>
+          <div class="row"><span class="label">修改帧数</span><span class="val" id="modifiedFrames">56</span></div>
+          <div class="row"><span class="label">上次停留帧</span><span class="val" id="lastFrame">190</span></div>
+        </div>
+      </div>
+      <div class="tip-text" id="tipText">所有帧提交后，点击完成视频审查</div>
+      <button class="btn btn-primary" id="finishVideoBtn" style="display:none;margin-top:8px;width:100%">完成视频审查</button>
+    </div>
+  </div>
+  </div><!-- top-row end -->
+
+<!-- 底部对比区 -->
+<div class="bottom">
+  <div class="bottom-left">
+    <div class="bottom-header">当前帧对比（原标注 vs 审查后）</div>
+    <div class="compare-area">
+      <div class="compare-box">
+        <div class="label a">原始标注（A）</div>
+        <div class="compare-canvas" id="compareA">
+          <div class="compare-empty">请选择一个标注框</div>
+        </div>
+        <div class="compare-coords" id="coordsA">—</div>
+      </div>
+      <div class="compare-arrow">→</div>
+      <div class="compare-box">
+        <div class="label b">审查后（当前）<span id="draftTag" style="color:var(--yellow);font-size:10px;margin-left:4px;display:none">草稿</span></div>
+        <div class="compare-canvas" id="compareB">
+          <div class="compare-empty">请选择一个标注框</div>
+        </div>
+        <div class="compare-coords" id="coordsB">—</div>
+      </div>
+    </div>
+  </div>
+  <div class="bottom-right">
+    <div class="bottom-header">当前帧标注对比列表（共 <span id="boxCount">8</span> 个框）</div>
+    <div class="table-wrap">
+      <table id="bboxTable">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>原始标注（A）</th>
+            <th>审查后（当前）</th>
+            <th>状态</th>
+            <th>IoU</th>
+            <th>位置变化 (px)</th>
+            <th>尺寸变化 (px)</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+</div><!-- bottom end -->
+</div><!-- main end -->
+
+<!-- 弹窗 -->
+<div class="modal-overlay" id="modal">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-icon">ⓘ</span>
+      <h3 id="modalTitle">继续上次审查？</h3>
+    </div>
+    <p id="modalBody"></p>
+    <div class="modal-actions" id="modalActions"></div>
+  </div>
+</div>
+
+<!-- 快捷键帮助面板 -->
+<div class="modal-overlay" id="helpModal">
+  <div class="modal" style="min-width:520px">
+    <div class="modal-header">
+      <span class="modal-icon">⌨</span>
+      <h3>快捷键</h3>
+    </div>
+    <div class="help-groups">
+      <div class="help-group">
+        <h4>浏览</h4>
+        <table class="help-table">
+          <tr><td>上一帧</td><td><kbd>←</kbd></td></tr>
+          <tr><td>下一帧</td><td><kbd>→</kbd></td></tr>
+          <tr><td>定位帧号输入框</td><td><kbd>F</kbd></td></tr>
+          <tr><td>执行帧号跳转</td><td><kbd>Enter</kbd> <span class="help-note">（仅输入框）</span></td></tr>
+        </table>
+      </div>
+      <div class="help-group">
+        <h4>对象查看</h4>
+        <table class="help-table">
+          <tr><td>上一个标注框</td><td><kbd>[</kbd></td></tr>
+          <tr><td>下一个标注框</td><td><kbd>]</kbd></td></tr>
+          <tr><td>切换原框叠加</td><td><kbd>O</kbd></td></tr>
+          <tr><td>取消选中 / 取消操作</td><td><kbd>Esc</kbd></td></tr>
+        </table>
+      </div>
+      <div class="help-group">
+        <h4>编辑与提交</h4>
+        <table class="help-table">
+          <tr><td>撤销当前帧编辑</td><td><kbd>Ctrl</kbd>+<kbd>Z</kbd></td></tr>
+          <tr><td>提交本帧</td><td><kbd>Ctrl</kbd>+<kbd>Enter</kbd></td></tr>
+          <tr><td>打开此帮助</td><td><kbd>?</kbd></td></tr>
+        </table>
+      </div>
+    </div>
+    <p style="color:var(--muted);font-size:11px;margin-top:10px;line-height:1.6">
+      方向键只浏览、不移动框；自动保存草稿不等于提交；完成视频需单独点击「完成视频审查」。
+    </p>
+    <div class="modal-actions">
+      <button class="btn btn-primary" style="width:auto" onclick="document.getElementById('helpModal').classList.remove('show')">关闭</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ==================== 模拟数据 ====================
+const VID_W = 640, VID_H = 480;
+
+function randBox() {
+  const w = 20 + Math.floor(Math.random() * 12);
+  const h = 20 + Math.floor(Math.random() * 12);
+  return {
+    x: Math.floor(Math.random() * (VID_W - w - 40)) + 20,
+    y: Math.floor(Math.random() * (VID_H - h - 40)) + 20,
+    w, h
+  };
+}
+
+const videos = [
+  { id:'v1', name:'T20x_001.avi', status:'reviewing', frames:1000, duration:'00:33.300',
+    lastViewed:190, submitted:189, modifiedFrames:56, modifiedBoxes:89 },
+  { id:'v2', name:'T20x_002.avi', status:'pending', frames:850, duration:'00:28.120',
+    lastViewed:0, submitted:0, modifiedFrames:0, modifiedBoxes:0 },
+  { id:'v3', name:'T20x_003.avi', status:'reviewed', frames:1200, duration:'00:40.000',
+    lastViewed:1200, submitted:1200, modifiedFrames:88, modifiedBoxes:120 },
+  { id:'v4', name:'T20x_004.avi', status:'pending', frames:600, duration:'00:20.000',
+    lastViewed:0, submitted:0, modifiedFrames:0, modifiedBoxes:0 },
+  { id:'v5', name:'S20x_005.avi', status:'reviewing', frames:900, duration:'00:30.000',
+    lastViewed:321, submitted:230, modifiedFrames:34, modifiedBoxes:45 },
+];
+
+videos.forEach(v => {
+  v.framesData = [];
+  for (let f = 0; f < v.frames; f++) {
+    const boxCount = 6 + Math.floor(Math.random() * 4);
+    const boxes = [];
+    for (let i = 0; i < boxCount; i++) {
+      const a = randBox();
+      boxes.push({ id:`#${String(i+1).padStart(3,'0')}`, a:{...a}, b:{...a} });
+    }
+    v.framesData.push({ index:f, boxes, status: f<v.submitted?'reviewed':'pending', undoStack:[] });
+  }
+});
+
+let state = { currentVideo:null, currentFrame:189, selectedId:null, showAOverlay:false, draftSaved:true, zoom:1 };
+
+// ==================== 持久化 ====================
+const STORAGE_KEY='review_demo_state_v2';
+function saveState(){
+  try{
+    const data={
+      videos:videos.map(v=>({
+        id:v.id,name:v.name,status:v.status,frames:v.frames,duration:v.duration,
+        lastViewed:v.lastViewed,submitted:v.submitted,modifiedFrames:v.modifiedFrames,modifiedBoxes:v.modifiedBoxes,
+        framesData:v.framesData,
+        bSnapshot:v.bSnapshot||null
+      })),
+      currentVideoId:state.currentVideo?.id,
+      currentFrame:state.currentFrame,
+      savedAt:Date.now()
+    };
+    localStorage.setItem(STORAGE_KEY,JSON.stringify(data));
+    return true;
+  }catch(e){console.warn('保存失败',e);return false;}
+}
+function loadState(){
+  try{
+    const raw=localStorage.getItem(STORAGE_KEY);
+    if(!raw)return false;
+    const data=JSON.parse(raw);
+    if(!data.videos||!Array.isArray(data.videos))return false;
+    data.videos.forEach(saved=>{
+      const v=videos.find(x=>x.id===saved.id);
+      if(v){
+        Object.assign(v,{status:saved.status,lastViewed:saved.lastViewed,
+          submitted:saved.submitted,modifiedFrames:saved.modifiedFrames,modifiedBoxes:saved.modifiedBoxes,
+          framesData:saved.framesData,
+          bSnapshot:saved.bSnapshot||null});
+      }
+    });
+    return true;
+  }catch(e){console.warn('加载失败',e);return false;}
+}
+// 尝试恢复，否则用初始数据保存
+if(!loadState())saveState();
+// saveState 在各操作函数内部调用
+
+// ==================== 工具函数 ====================
+function iou(a,b){const ix=Math.max(a.x,b.x),iy=Math.max(a.y,b.y),ix2=Math.min(a.x+a.w,b.x+b.w),iy2=Math.min(a.y+a.h,b.y+b.h),iw=Math.max(0,ix2-ix),ih=Math.max(0,iy2-iy),inter=iw*ih,union=a.w*a.h+b.w*b.h-inter;return union>0?inter/union:0;}
+function centerShift(a,b){const cax=a.x+a.w/2,cay=a.y+a.h/2,cbx=b.x+b.w/2,cby=b.y+b.h/2;return Math.sqrt((cbx-cax)**2+(cby-cay)**2);}
+function boxModified(b){const a=b.a,x=b.b;return a.x!==x.x||a.y!==x.y||a.w!==x.w||a.h!==x.h;}
+function changeType(b){const a=b.a,x=b.b,p=a.x!==x.x||a.y!==x.y,s=a.w!==x.w||a.h!==x.h;if(!p&&!s)return'未修改';if(p&&s)return'已修改';return p?'已修改':'已修改';}
+function fmt(n,d=2){return Number(n).toFixed(d);}
+
+// ==================== 渲染视频列表 ====================
+function renderVideoList(filter='all'){
+  const list=document.getElementById('videoList');
+  list.innerHTML='';
+  // 更新筛选标签数量
+  document.querySelectorAll('.filter-tab').forEach(tab=>{
+    const f=tab.dataset.filter;
+    const cnt=f==='all'?videos.length:videos.filter(v=>v.status===f).length;
+    const label=f==='all'?'全部':f==='reviewing'?'审查中':f==='pending'?'待审查':'已审查';
+    tab.textContent=`${label} (${cnt})`;
+  });
+  const filtered=videos.filter(v=>filter==='all'||v.status===filter);
+  filtered.forEach(v=>{
+    const card=document.createElement('div');
+    card.className='video-card'+(state.currentVideo?.id===v.id?' active':'');
+    const pct=(v.submitted/v.frames*100).toFixed(1);
+    card.innerHTML=`
+      <div class="row1">
+        <span class="name">${v.name}</span>
+        <span class="status-badge status-${v.status}">${v.status==='pending'?'待审查':v.status==='reviewing'?'审查中':'已审查'}</span>
+      </div>
+      <div class="duration">${v.duration}</div>
+      <div class="progress-mini"><div class="progress-mini-fill" style="width:${pct}%"></div></div>
+      <div class="meta"><span>${v.submitted} / ${v.frames} 帧</span><span>上次停留：${v.lastViewed>0?'第'+v.lastViewed+'帧':'尚未浏览'}</span></div>
+    `;
+    card.onclick=()=>selectVideo(v.id);
+    list.appendChild(card);
+  });
+}
+
+// 放弃当前帧草稿，恢复到上一有效提交（或 A 基准）
+function discardDraft(){
+  const frame=state.currentVideo.framesData[state.currentFrame];
+  if(!frame.hasDraft)return;
+  if(frame.committedB){
+    // 重新编辑已提交帧：恢复上一有效 B 提交
+    frame.committedB.forEach(cb=>{
+      const box=frame.boxes.find(b=>b.id===cb.id);
+      if(box)box.b={...cb.b};
+    });
+    frame.status='reviewed';
+  }else{
+    // 首次编辑未提交：恢复 A 基准
+    frame.boxes.forEach(b=>{b.b={...b.a};});
+    frame.status='pending';
+  }
+  frame.hasDraft=false;
+  frame.undoStack=[];
+  recalcVideoStats();
+  saveState();
+  renderFrame();
+  showSaveStatus('已放弃修改');
+}
+
+// ==================== 选择视频 ====================
+function selectVideo(id){
+  const v=videos.find(x=>x.id===id);if(!v)return;
+  state.currentVideo=v;
+  // F01: 记录真实历史位置，供弹窗使用（renderFrame 会改写 lastViewed）
+  const historicalLastViewed=v.lastViewed;
+  const firstPending=v.framesData.findIndex(f=>f.status==='pending');
+  state.currentFrame=firstPending>=0?firstPending:0;
+  state.selectedId=null;state.draftSaved=true;
+  renderVideoList(document.querySelector('.filter-tab.active').dataset.filter);
+  fitZoom();
+  renderFrame();
+  // F01: 浏览后保存 lastViewed
+  saveState();
+  // 只有有历史访问记录时才弹"继续上次审查"
+  if(historicalLastViewed>0){
+    showModal('继续上次审查？',
+      `上次停留：第 ${historicalLastViewed} 帧<br>已完成：${v.submitted} / ${v.frames} 帧<br>继续审查将进入：第 ${state.currentFrame+1} 帧`,
+      [{text:'查看第1帧',action:()=>{state.currentFrame=0;renderFrame();saveState();}},
+       {text:'继续审查',primary:true,action:()=>{}}]
+    );
+  }
+  // B04: 若当前帧有未提交草稿，提示恢复/放弃
+  const curFrame=v.framesData[state.currentFrame];
+  if(curFrame&&curFrame.hasDraft){
+    showModal('本帧有未提交修改',
+      `第 ${state.currentFrame+1} 帧存在已保存但未提交的草稿编辑。`,
+      [{text:'放弃修改',action:()=>discardDraft()},
+       {text:'继续编辑',primary:true,action:()=>{}}]);
+  }
+}
+// 计算适应窗口的缩放比例
+function fitZoom(){
+  const area=document.getElementById('canvasArea');
+  if(!area)return;
+  const aw=area.clientWidth-20,ah=area.clientHeight-20;
+  const sx=aw/VID_W,sy=ah/VID_H;
+  state.zoom=Math.min(sx,sy,1);
+  const zp=document.getElementById('zoomPct');
+  if(zp)zp.textContent=Math.round(state.zoom*100)+'%';
+}
+
+// ==================== 渲染帧 ====================
+function renderFrame(){
+  const v=state.currentVideo;if(!v)return;
+  const frame=v.framesData[state.currentFrame];
+  // 更新 lastViewed
+  v.lastViewed=state.currentFrame+1;
+  document.getElementById('curVideoName').textContent=v.name;
+  document.getElementById('curFrame').textContent=state.currentFrame+1;
+  document.getElementById('totalFrames').textContent=v.frames;
+  document.getElementById('frameJump').value=state.currentFrame+1;
+  const t=(state.currentFrame/v.frames*33.3).toFixed(3);
+  document.getElementById('curTimeDisplay').textContent=`00:0${t} / ${v.duration}`;
+  document.getElementById('seekFill').style.width=(state.currentFrame/v.frames*100)+'%';
+
+  // F04: 显示当前帧状态，控制提交按钮
+  const fsEl=document.getElementById('frameStatus');
+  const subBtn=document.getElementById('submitBtn');
+  const undoBtn=document.getElementById('undoBtn');
+  const readonly=v.status==='reviewed';
+  if(readonly){
+    fsEl.textContent='● 已完成（只读）';fsEl.style.color='var(--green)';
+    subBtn.disabled=true;subBtn.style.opacity='0.5';
+  }else if(frame.status==='reviewed'){
+    fsEl.textContent='● 已提交';fsEl.style.color='var(--green)';
+    subBtn.disabled=false;subBtn.style.opacity='1';
+  }else if(frame.hasDraft){
+    fsEl.textContent='● 待重新提交';fsEl.style.color='var(--yellow)';
+    subBtn.disabled=false;subBtn.style.opacity='1';
+  }else{
+    fsEl.textContent='● 未审查';fsEl.style.color='var(--muted)';
+    subBtn.disabled=false;subBtn.style.opacity='1';
+  }
+  undoBtn.disabled=readonly||frame.undoStack.length===0;
+
+  const inner=document.getElementById('canvasInner');
+  inner.style.transform=`scale(${state.zoom})`;
+  inner.innerHTML='<canvas id="frameCanvas" width="640" height="480" class="frame-img"></canvas>';
+
+  if(state.showAOverlay){
+    frame.boxes.forEach(box=>{
+      if(boxModified(box)){
+        const el=document.createElement('div');
+        el.style.cssText=`position:absolute;border:2px dashed var(--purple);left:${box.a.x}px;top:${box.a.y}px;width:${box.a.w}px;height:${box.a.h}px;pointer-events:none;`;
+        inner.appendChild(el);
+      }
+    });
+  }
+
+  frame.boxes.forEach(box=>{
+    const el=document.createElement('div');
+    el.className='bbox'+(boxModified(box)?' modified':'')+(state.selectedId===box.id?' selected':'');
+    el.style.left=box.b.x+'px';el.style.top=box.b.y+'px';
+    el.style.width=box.b.w+'px';el.style.height=box.b.h+'px';
+    el.dataset.id=box.id;
+    const label=document.createElement('div');
+    label.className='bbox-label';label.textContent=box.id;
+    el.appendChild(label);
+    if(state.selectedId===box.id){
+      ['tl','tr','bl','br'].forEach(pos=>{
+        const h=document.createElement('div');h.className='handle '+pos;el.appendChild(h);
+      });
+    }
+    el.onmouseenter=()=>{const hint=document.getElementById('dragHint');hint.classList.add('show');
+      hint.style.left=(box.b.x+box.b.w+10)+'px';hint.style.top=box.b.y+'px';};
+    el.onmouseleave=()=>document.getElementById('dragHint').classList.remove('show');
+    el.onmousedown=(e)=>startDrag(e,box,el);
+    inner.appendChild(el);
+  });
+
+  updateStats();renderTable();renderCompare();updateUndoBtn();
+}
+
+// ==================== 拖动 ====================
+let dragState=null;
+let dragMoved=false; // 记录本次拖动是否真的移动了
+function startDrag(e,box,el){
+  // 视频已完成审查时禁止编辑
+  if(state.currentVideo.status==='reviewed')return;
+  state.selectedId=box.id;
+  dragMoved=false;
+  // 保存编辑前的快照（用于撤销）
+  const frame=state.currentVideo.framesData[state.currentFrame];
+  const beforeSnapshot=frame.boxes.map(b=>({id:b.id,b:{...b.b}}));
+  if(e.target.classList.contains('handle')){
+    dragState={type:'resize',box,el,handle:e.target.classList[1],startX:e.clientX,startY:e.clientY,
+      origBox:{...box.b},beforeSnapshot};
+  }else{
+    dragState={type:'move',box,el,startX:e.clientX,startY:e.clientY,
+      origX:box.b.x,origY:box.b.y,beforeSnapshot};
+  }
+  document.addEventListener('mousemove',onDrag);
+  document.addEventListener('mouseup',endDrag);
+  // 不调用 renderFrame，避免重建 DOM 导致元素脱离
+  // 只更新选中状态和统计
+  el.classList.add('selected');
+  el.style.borderWidth='3px';
+  updateStats();renderTable();renderCompare();updateUndoBtn();
+  e.preventDefault();
+}
+function onDrag(e){
+  if(!dragState)return;
+  dragMoved=true;
+  const{box}=dragState;
+  // 缩放坐标换算：屏幕位移 / 缩放比例
+  const dx=(e.clientX-dragState.startX)/state.zoom;
+  const dy=(e.clientY-dragState.startY)/state.zoom;
+  if(dragState.type==='move'){
+    box.b.x=Math.max(0,Math.min(VID_W-box.b.w,dragState.origX+dx));
+    box.b.y=Math.max(0,Math.min(VID_H-box.b.h,dragState.origY+dy));
+  }else{
+    const o=dragState.origBox;
+    if(dragState.handle==='br'){box.b.w=Math.max(5,o.w+dx);box.b.h=Math.max(5,o.h+dy);}
+    else if(dragState.handle==='tr'){box.b.y=Math.min(o.y+o.h-5,o.y+dy);box.b.h=Math.max(5,o.h-dy);box.b.w=Math.max(5,o.w+dx);}
+    else if(dragState.handle==='bl'){box.b.x=Math.min(o.x+o.w-5,o.x+dx);box.b.w=Math.max(5,o.w-dx);box.b.h=Math.max(5,o.h+dy);}
+    else if(dragState.handle==='tl'){box.b.x=Math.min(o.x+o.w-5,o.x+dx);box.b.y=Math.min(o.y+o.h-5,o.y+dy);box.b.w=Math.max(5,o.w-dx);box.b.h=Math.max(5,o.h-dy);}
+  }
+  box.b.x=Math.max(0,Math.min(VID_W-box.b.w,box.b.x));
+  box.b.y=Math.max(0,Math.min(VID_H-box.b.h,box.b.y));
+  box.b.w=Math.min(box.b.w,VID_W-box.b.x);box.b.h=Math.min(box.b.h,VID_H-box.b.y);
+  // 直接更新当前可见元素，不重建
+  const el=dragState.el;
+  el.style.left=box.b.x+'px';el.style.top=box.b.y+'px';
+  el.style.width=box.b.w+'px';el.style.height=box.b.h+'px';
+  el.classList.toggle('modified',boxModified(box));
+  updateStats();renderTable();renderCompare();
+}
+function endDrag(){
+  if(!dragState)return;
+  const frame=state.currentVideo.framesData[state.currentFrame];
+  // 只有真正移动了才登记撤销并保存
+  if(dragMoved){
+    // B01: 已提交帧发生几何变化 → 置为 pending，进度减少
+    const wasReviewed=frame.status==='reviewed';
+    frame.status='pending';
+    frame.hasDraft=true;
+    frame.undoStack.push(dragState.beforeSnapshot);
+    recalcVideoStats();
+    state.draftSaved=false;showSaveStatus(wasReviewed?'已重新编辑，待重新提交':'保存中');
+    const ok=saveState();
+    setTimeout(()=>{
+      state.draftSaved=ok;
+      showSaveStatus(ok?(wasReviewed?'草稿已保存，待重新提交':'草稿已保存'):'保存失败，请重试');
+    },400);
+  }
+  dragState=null;
+  document.removeEventListener('mousemove',onDrag);
+  document.removeEventListener('mouseup',endDrag);
+  renderFrame();
+}
+
+// ==================== 统计 ====================
+function updateStats(){
+  const v=state.currentVideo;const frame=v.framesData[state.currentFrame];
+  const total=frame.boxes.length;
+  const modified=frame.boxes.filter(boxModified).length;
+  const unmodified=total-modified;
+  const modBoxes=frame.boxes.filter(boxModified);
+  const avgIoU=modified>0?modBoxes.reduce((s,b)=>s+iou(b.a,b.b),0)/modified:null;
+  const maxShift=modified>0?Math.max(...modBoxes.map(b=>centerShift(b.a,b.b))):null;
+  document.getElementById('statTotal').textContent=total;
+  document.getElementById('statModified').textContent=modified;
+  document.getElementById('statUnmodified').textContent=unmodified;
+  document.getElementById('statIoU').textContent=avgIoU!==null?fmt(avgIoU):'—';
+  document.getElementById('statMaxShift').textContent=maxShift!==null?fmt(maxShift,1)+' px':'—';
+  document.getElementById('boxCount').textContent=total;
+
+  const pct=(v.submitted/v.frames*100);
+  document.getElementById('progPct').textContent=pct.toFixed(1)+'%';
+  document.getElementById('circleProg').setAttribute('stroke-dashoffset',188.4*(1-pct/100));
+  document.getElementById('submittedFrames').textContent=`${v.submitted} / ${v.frames}`;
+  document.getElementById('modifiedFrames').textContent=v.modifiedFrames;
+  document.getElementById('lastFrame').textContent=state.currentFrame+1;
+  // 完成视频审查按钮：所有帧已提交且视频未完成时显示
+  const finishBtn=document.getElementById('finishVideoBtn');
+  const tipText=document.getElementById('tipText');
+  const hasUnsubmitted=v.framesData.some(f=>f.status!=='reviewed');
+  if(v.status==='reviewed'){
+    finishBtn.style.display='none';
+    tipText.textContent='该视频已完成审查（只读模式）';
+  }else if(hasUnsubmitted){
+    finishBtn.style.display='block';
+    finishBtn.disabled=true;finishBtn.style.opacity='0.5';
+    tipText.textContent='存在未提交帧，请完成所有帧提交';
+  }else{
+    finishBtn.style.display='block';
+    finishBtn.disabled=false;finishBtn.style.opacity='1';
+    tipText.textContent='全部帧已提交，可完成视频审查';
+  }
+}
+function showSaveStatus(text){
+  const el=document.getElementById('saveStatus');el.textContent=text;
+  el.className='save-status'+(text.includes('保存中')?' saving':text.includes('已保存')?' saved':'');
+}
+
+// ==================== 表格 ====================
+function renderTable(){
+  const v=state.currentVideo;const frame=v.framesData[state.currentFrame];
+  const tbody=document.querySelector('#bboxTable tbody');tbody.innerHTML='';
+  frame.boxes.forEach(box=>{
+    const mod=boxModified(box);
+    const tr=document.createElement('tr');
+    tr.className=(state.selectedId===box.id?'selected ':'')+(mod?'modified-row':'');
+    tr.innerHTML=`
+      <td>${box.id}</td>
+      <td>${box.a.x}, ${box.a.y}, ${box.a.w}×${box.a.h}</td>
+      <td>${box.b.x}, ${box.b.y}, ${box.b.w}×${box.b.h}</td>
+      <td class="${mod?'tag-modified':'tag-unchanged'}">${mod?'已修改':'未修改'}</td>
+      <td>${mod?fmt(iou(box.a,box.b)):'—'}</td>
+      <td>${mod?fmt(centerShift(box.a,box.b),1):'—'}</td>
+      <td>${mod?`${box.b.w-box.a.w>=0?'+':''}${box.b.w-box.a.w}, ${box.b.h-box.a.h>=0?'+':''}${box.b.h-box.a.h}`:'—'}</td>
+      <td><button class="btn-view">查看</button></td>
+    `;
+    tr.onclick=()=>{state.selectedId=box.id;renderFrame();};
+    tbody.appendChild(tr);
+  });
+}
+
+// ==================== 局部对比 ====================
+function renderCompare(){
+  const v=state.currentVideo;const frame=v.framesData[state.currentFrame];
+  const box=frame.boxes.find(b=>b.id===state.selectedId);
+  const ca=document.getElementById('compareA'),cb=document.getElementById('compareB');
+  const coordsA=document.getElementById('coordsA'),coordsB=document.getElementById('coordsB');
+  const draftTag=document.getElementById('draftTag');
+  if(!box){
+    ca.innerHTML='<div class="compare-empty">请选择一个标注框</div>';
+    cb.innerHTML='<div class="compare-empty">请选择一个标注框</div>';
+    coordsA.textContent='—';coordsB.textContent='—';draftTag.style.display='none';return;
+  }
+  const mod=boxModified(box);
+  draftTag.style.display=mod&&frame.status==='pending'?'inline':'none';
+  const union={x:Math.min(box.a.x,box.b.x)-30,y:Math.min(box.a.y,box.b.y)-30,
+    x2:Math.min(VID_W,Math.max(box.a.x+box.a.w,box.b.x+box.b.w)+30),
+    y2:Math.min(VID_H,Math.max(box.a.y+box.a.h,box.b.y+box.b.h)+30)};
+  union.x=Math.max(0,union.x);union.y=Math.max(0,union.y);
+  const cw=100,ch=80;
+  const scale=Math.min(cw/(union.x2-union.x),ch/(union.y2-union.y));
+  function draw(container,bbox,color,dashed){
+    const el=document.createElement('div');
+    el.style.cssText=`position:absolute;left:${(bbox.x-union.x)*scale}px;top:${(bbox.y-union.y)*scale}px;width:${bbox.w*scale}px;height:${bbox.h*scale}px;border:2px ${dashed?'dashed':'solid'} ${color};`;
+    container.appendChild(el);
+  }
+  ca.innerHTML='';cb.innerHTML='';
+  draw(ca,box.a,'var(--green)',false);
+  draw(cb,box.b,mod?'var(--red)':'var(--green)',false);
+  coordsA.textContent=`x: ${box.a.x}  y: ${box.a.y}  w: ${box.a.w}  h: ${box.a.h}`;
+  coordsB.textContent=`x: ${box.b.x}  y: ${box.b.y}  w: ${box.b.w}  h: ${box.b.h}`;
+}
+
+// ==================== 操作 ====================
+function prevFrame(){
+  if(state.currentFrame>0){state.currentFrame--;state.selectedId=null;renderFrame();saveState();}
+}
+function nextFrame(){
+  if(state.currentFrame<state.currentVideo.frames-1){state.currentFrame++;state.selectedId=null;renderFrame();saveState();}
+}
+function undo(){
+  if(state.currentVideo.status==='reviewed')return;
+  const frame=state.currentVideo.framesData[state.currentFrame];
+  if(frame.undoStack.length===0)return;
+  const prev=frame.undoStack.pop();
+  prev.forEach(p=>{const box=frame.boxes.find(b=>b.id===p.id);if(box)box.b={...p.b};});
+  // 撤销后帧状态变为待重新提交（若之前已提交）
+  const wasReviewed=frame.status==='reviewed';
+  if(wasReviewed){frame.status='pending';frame.hasDraft=true;recalcVideoStats();}
+  state.draftSaved=false;showSaveStatus('保存中');
+  const ok=saveState();
+  setTimeout(()=>{
+    state.draftSaved=ok;
+    showSaveStatus(ok?'草稿已保存':'保存失败，请重试');
+  },400);
+  renderFrame();
+}
+// 重新聚合视频统计（基于帧状态，不直接累加）
+function recalcVideoStats(){
+  const v=state.currentVideo;
+  let submitted=0,modifiedFrames=0,modifiedBoxes=0;
+  v.framesData.forEach(f=>{
+    if(f.status==='reviewed'){
+      submitted++;
+      const mc=f.boxes.filter(boxModified).length;
+      if(mc>0){modifiedFrames++;modifiedBoxes+=mc;}
+    }
+  });
+  v.submitted=submitted;v.modifiedFrames=modifiedFrames;v.modifiedBoxes=modifiedBoxes;
+}
+function submitFrame(){
+  const v=state.currentVideo;const frame=v.framesData[state.currentFrame];
+  if(v.status==='reviewed'){showModal('提示','该视频已完成审查，不可再提交。',[{text:'确定',primary:true}]);return;}
+  const wasReviewed=frame.status==='reviewed';
+  const prevStatus=frame.status;
+  frame.status='reviewed';
+  frame.hasDraft=false;
+  // B04: 保存本次提交的 B 快照，用于"放弃修改"时恢复
+  frame.committedB=frame.boxes.map(b=>({id:b.id,b:{...b.b}}));
+  // 首次提交将视频切为审查中
+  if(v.status==='pending')v.status='reviewing';
+  recalcVideoStats();
+  // B03: 保存失败则回滚，不推进流程
+  const ok=saveState();
+  if(!ok){
+    frame.status=prevStatus;
+    frame.hasDraft=true;
+    recalcVideoStats();
+    showSaveStatus('保存失败，请重试');
+    return;
+  }
+  const submittedFrameNo=state.currentFrame+1;
+  showSaveStatus(`第 ${submittedFrameNo} 帧已提交`);
+  renderVideoList(document.querySelector('.filter-tab.active').dataset.filter);
+  let next=-1;
+  for(let i=state.currentFrame+1;i<v.frames;i++){if(v.framesData[i].status==='pending'){next=i;break;}}
+  if(next<0){for(let i=0;i<v.frames;i++){if(v.framesData[i].status==='pending'){next=i;break;}}}
+  if(next>=0){state.currentFrame=next;state.selectedId=null;}
+  else{
+    // 全帧已提交，显示完成入口
+    showModal('全部帧已提交',
+      `已提交 ${v.submitted} / ${v.frames} 帧<br>修改帧：${v.modifiedFrames} · 修改框：${v.modifiedBoxes}`,
+      [{text:'继续检查',action:()=>{}},{text:'完成视频审查',primary:true,action:()=>finishVideo()}]);
+  }
+  renderFrame();
+}
+function finishVideo(){
+  const v=state.currentVideo;
+  // B01: 检查实际帧状态，有未提交帧则禁止完成
+  const pendingFrames=v.framesData.filter(f=>f.status!=='reviewed');
+  if(pendingFrames.length>0){
+    showModal('无法完成视频审查',
+      `存在 ${pendingFrames.length} 帧未提交（含重新编辑待重新提交的帧），请先完成所有帧的提交。`,
+      [{text:'确定',primary:true}]);
+    return;
+  }
+  // 生成固定 B 版本快照（包含版本信息）
+  v.bSnapshot={
+    versionId:'B_'+Date.now(),
+    completedAt:new Date().toISOString(),
+    reviewer:'demo-user',
+    frames:v.framesData.map(f=>({status:f.status,boxes:f.boxes.map(b=>({id:b.id,a:{...b.a},b:{...b.b}}))}))
+  };
+  v.status='reviewed';
+  const ok=saveState();
+  if(!ok){
+    showModal('保存失败','固定 B 版本保存失败，请重试。',[{text:'确定',primary:true}]);
+    v.status='reviewing'; // 回滚状态
+    return;
+  }
+  showModal('视频审查完成',
+    `已固定审查版本 B<br>版本号：${v.bSnapshot.versionId}<br>修改帧：${v.modifiedFrames} · 修改框：${v.modifiedBoxes}<br>该视频已进入只读模式`,
+    [{text:'确定',primary:true}]);
+  renderVideoList(document.querySelector('.filter-tab.active').dataset.filter);
+  renderFrame();
+}
+function updateUndoBtn(){
+  const frame=state.currentVideo?.framesData[state.currentFrame];
+  const readonly=state.currentVideo?.status==='reviewed';
+  document.getElementById('undoBtn').disabled=!frame||frame.undoStack.length===0||readonly;
+}
+
+// ==================== 弹窗 ====================
+function showModal(title,body,actions){
+  document.getElementById('modalTitle').textContent=title;
+  document.getElementById('modalBody').innerHTML=body;
+  const ae=document.getElementById('modalActions');ae.innerHTML='';
+  actions.forEach(a=>{
+    const btn=document.createElement('button');
+    btn.className='btn'+(a.primary?' btn-primary':'');
+    btn.style.width='auto';btn.style.margin='0';
+    btn.textContent=a.text;
+    btn.onclick=()=>{document.getElementById('modal').classList.remove('show');a.action&&a.action();};
+    ae.appendChild(btn);
+  });
+  document.getElementById('modal').classList.add('show');
+}
+
+// ==================== 快捷键系统 ====================
+let keyBusy = false; // 切帧/提交进行中
+function isInputFocused(){
+  const t=document.activeElement;
+  return t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable||t.tagName==='SELECT');
+}
+function isModalOpen(){
+  return document.getElementById('modal').classList.contains('show')||
+         document.getElementById('helpModal').classList.contains('show');
+}
+function isReadOnly(){return state.currentVideo?.status==='reviewed';}
+function selectPrevBox(){
+  const frame=state.currentVideo.framesData[state.currentFrame];
+  const boxes=frame.boxes;
+  if(boxes.length===0)return;
+  let idx=boxes.findIndex(b=>b.id===state.selectedId);
+  if(idx<=0){state.selectedId=boxes[0].id;}
+  else{state.selectedId=boxes[idx-1].id;}
+  renderFrame();
+}
+function selectNextBox(){
+  const frame=state.currentVideo.framesData[state.currentFrame];
+  const boxes=frame.boxes;
+  if(boxes.length===0)return;
+  let idx=boxes.findIndex(b=>b.id===state.selectedId);
+  if(idx<0){state.selectedId=boxes[0].id;}
+  else if(idx>=boxes.length-1){state.selectedId=boxes[boxes.length-1].id;}
+  else{state.selectedId=boxes[idx+1].id;}
+  renderFrame();
+}
+function focusFrameJump(){
+  const inp=document.getElementById('frameJump');
+  inp.focus();inp.select();
+}
+// F03: 统一帧号校验与跳转
+function jumpToFrame(){
+  const inp=document.getElementById('frameJump');
+  const val=inp.value.trim();
+  if(!/^\d+$/.test(val)){
+    showModal('提示','请输入有效的整数帧号。',[{text:'确定',primary:true}]);
+    inp.value=state.currentFrame+1;
+    return false;
+  }
+  const n=parseInt(val);
+  if(n<1||n>state.currentVideo.frames){
+    showModal('提示',`帧号需在 1 ~ ${state.currentVideo.frames} 之间。`,[{text:'确定',primary:true}]);
+    inp.value=state.currentFrame+1;
+    return false;
+  }
+  state.currentFrame=n-1;state.selectedId=null;renderFrame();saveState();
+  inp.blur();
+  return true;
+}
+function toggleOverlay(){
+  state.showAOverlay=!state.showAOverlay;
+  document.getElementById('showAOverlay').checked=state.showAOverlay;
+  renderFrame();
+}
+function openHelp(){ document.getElementById('helpModal').classList.add('show'); }
+// 取消拖动：恢复手势开始前几何，移除监听，不入撤销栈
+function cancelDrag(){
+  if(!dragState)return;
+  const{box,origBox,origX,origY}=dragState;
+  if(dragState.type==='resize'){box.b={...origBox};}
+  else{box.b.x=origX;box.b.y=origY;}
+  dragState=null;
+  document.removeEventListener('mousemove',onDrag);
+  document.removeEventListener('mouseup',endDrag);
+  renderFrame();
+}
+function handleEsc(){
+  // 优先级：1.关闭弹窗 2.取消拖动 3.输入框恢复帧号 4.取消选中
+  if(isModalOpen()){
+    document.getElementById('modal').classList.remove('show');
+    document.getElementById('helpModal').classList.remove('show');
+    return;
+  }
+  if(dragState){cancelDrag();return;}
+  if(isInputFocused()&&document.activeElement.id==='frameJump'){
+    document.activeElement.value=state.currentFrame+1; // 恢复当前帧号
+    document.activeElement.blur();
+    return;
+  }
+  if(state.selectedId){
+    state.selectedId=null;
+    renderFrame();
+    return;
+  }
+}
+
+document.addEventListener('keydown',(e)=>{
+  // 输入法组合输入时不触发
+  if(e.isComposing||e.keyCode===229)return;
+  // 忽略自动连发
+  if(e.repeat)return;
+  const ctrl=e.ctrlKey||e.metaKey;
+  const hasMod=e.ctrlKey||e.metaKey||e.altKey;
+
+  // 弹窗打开时，只有 Esc 生效
+  if(isModalOpen()){
+    if(e.key==='Escape'){handleEsc();e.preventDefault();}
+    return;
+  }
+
+  // 焦点在输入框：工作区快捷键不触发
+  if(isInputFocused()){
+    const inp=document.activeElement;
+    if(inp.id==='frameJump'){
+      if(e.key==='Enter'){
+        e.preventDefault();
+        jumpToFrame();
+      }
+      if(e.key==='Escape'){handleEsc();e.preventDefault();}
+    }
+    return;
+  }
+
+  // 拖动中：只允许 Esc 取消
+  if(dragState){
+    if(e.key==='Escape'){handleEsc();e.preventDefault();}
+    return;
+  }
+
+  // 切帧/提交进行中：忽略
+  if(keyBusy)return;
+
+  // Ctrl+Enter 提交
+  if(ctrl&&(e.key==='Enter'||e.key==='\n')){
+    e.preventDefault();
+    keyBusy=true;
+    submitFrame();
+    setTimeout(()=>keyBusy=false,300);
+    return;
+  }
+  // Ctrl+Z 撤销
+  if(ctrl&&(e.key==='z'||e.key==='Z')){
+    e.preventDefault();
+    undo();
+    return;
+  }
+  // 有修饰键的单字母不触发（保留浏览器默认行为如 Ctrl+F）
+  if(hasMod)return;
+
+  // 单键快捷键
+  switch(e.key){
+    case 'ArrowLeft':
+      e.preventDefault();
+      if(state.currentFrame>0){keyBusy=true;prevFrame();setTimeout(()=>keyBusy=false,200);}
+      break;
+    case 'ArrowRight':
+      e.preventDefault();
+      if(state.currentFrame<state.currentVideo.frames-1){keyBusy=true;nextFrame();setTimeout(()=>keyBusy=false,200);}
+      break;
+    case '[':
+      e.preventDefault();selectPrevBox();break;
+    case ']':
+      e.preventDefault();selectNextBox();break;
+    case 'f':case 'F':
+      e.preventDefault();focusFrameJump();break;
+    case 'o':case 'O':
+      e.preventDefault();toggleOverlay();break;
+    case '?':
+      e.preventDefault();openHelp();break;
+    case 'Escape':
+      e.preventDefault();handleEsc();break;
+  }
+});
+
+// ==================== 事件绑定 ====================
+document.querySelectorAll('.filter-tab').forEach(tab=>{
+  tab.onclick=()=>{document.querySelectorAll('.filter-tab').forEach(t=>t.classList.remove('active'));tab.classList.add('active');renderVideoList(tab.dataset.filter);};
+});
+document.getElementById('prevFrame').onclick=prevFrame;
+document.getElementById('prevFrame').title='上一帧（←）';
+document.getElementById('nextFrame').onclick=nextFrame;
+document.getElementById('nextFrame').title='下一帧（→）';
+document.getElementById('jumpBtn').onclick=()=>jumpToFrame();
+document.getElementById('frameJump').title='F 定位，Enter 跳转';
+document.getElementById('undoBtn').onclick=undo;
+document.getElementById('undoBtn').title='撤销（Ctrl+Z）';
+document.getElementById('submitBtn').onclick=submitFrame;
+document.getElementById('submitBtn').title='提交本帧（Ctrl+Enter）';
+document.getElementById('showAOverlay').onchange=(e)=>{state.showAOverlay=e.target.checked;renderFrame();};
+document.querySelector('.shortcut').onclick=openHelp;
+document.querySelector('.shortcut').title='快捷键（?）';
+document.getElementById('zoomIn').onclick=()=>{state.zoom=Math.min(2,state.zoom+0.1);document.getElementById('zoomPct').textContent=Math.round(state.zoom*100)+'%';renderFrame();};
+document.getElementById('zoomOut').onclick=()=>{state.zoom=Math.max(0.3,state.zoom-0.1);document.getElementById('zoomPct').textContent=Math.round(state.zoom*100)+'%';renderFrame();};
+
+document.getElementById('canvasArea').addEventListener('click',(e)=>{
+  if(e.target.id==='canvasArea'||e.target.id==='frameCanvas'||e.target.classList.contains('canvas-inner')){
+    state.selectedId=null;renderFrame();
+  }
+});
+document.getElementById('finishVideoBtn').onclick=finishVideo;
+// 窗口大小变化时重新适应
+let resizeTimer;
+window.addEventListener('resize',()=>{
+  clearTimeout(resizeTimer);
+  resizeTimer=setTimeout(()=>{fitZoom();renderFrame();},200);
+});
+
+// ==================== 初始化 ====================
+renderVideoList('all');
+selectVideo('v1');
+// 暴露到 window 方便调试
+window.state=state;window.videos=videos;
+window.submitFrame=submitFrame;window.undo=undo;window.finishVideo=finishVideo;
+window.selectVideo=selectVideo;
+</script>
+</body>
+</html>

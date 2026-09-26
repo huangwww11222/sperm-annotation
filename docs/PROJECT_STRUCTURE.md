@@ -1,33 +1,63 @@
-# 项目结构
+# 代码地图与运行入口
 
-```text
-E:\\1/
-├─ frontend/                         # Vue 3 + Vite 浏览器应用
-│  ├─ src/api/                       # HTTP API 封装、Token 注入
-│  ├─ src/pages/                     # 登录、标注、结果页面
-│  ├─ src/stores/                    # 前端状态与交互编排
-│  ├─ src/types/                     # 共享 TypeScript 类型
-│  └─ vite.config.ts                 # 开发期 /api 代理
-├─ backend/                          # FastAPI 服务
-│  ├─ app/main.py                    # API 入口、认证、媒体、导出端点
-│  ├─ app/tracker.py                 # Tracking 编排、结果持久化、可视化
-│  ├─ app/services/                  # SAM3、异常检测与可视化等领域服务
-│  ├─ tests/                         # 后端回归测试
-│  ├─ data/app.db                    # SQLite 业务索引
-│  └─ storage/                       # 运行时用户数据（不提交版本库）
-│     ├─ media/                      # 原视频与每个视频的追踪资产
-│     └─ datasets/                   # 导出的训练数据集 ZIP
-└─ docs/                             # 部署、存储和流程文档
+基线：2026-09-27。Vue 3 + TypeScript + Vite；FastAPI + SQLite；SAM3 在后端按需加载。前端依赖见 [package.json](../frontend/package.json)，Python 依赖见 [requirements.txt](../backend/requirements.txt)，不在说明文档复制版本号。
+
+## 按职责找文件
+
+| 职责 | 实现入口 |
+| --- | --- |
+| 路由/认证/布局/主题 | `frontend/src/router/index.ts`、`stores/auth.ts`、`layouts/AppLayout.vue`、`stores/appearance.ts`、`style.css` |
+| 人工标注 UI / 状态 | `pages/AnnotatePage.vue`、`stores/workspace.ts`、`annotation/annotation.css` |
+| 框绘制/坐标/缓存 | `components/AnnotationOverlay.vue`、`annotation/geometry.ts`、`annotation/frameCache.ts` |
+| 送审 | `components/SendToReview.vue`、`api/reviewWorkflowApi.ts`、`backend/app/annotation_completion.py` |
+| B 审查 | `pages/ReviewPage.vue`、`review/geometry.ts`、`review/review.css`、`backend/app/review_workflow.py` 与 `_routes.py` |
+| C 对比确认 | `pages/ConfirmationPage.vue`、`confirmation/ConfirmationImage.vue`、`confirmation/geometry.ts`、`api/confirmationApi.ts`、`backend/app/confirmation_workflow.py` 与 `_routes.py` |
+| 视频进度 | `components/WorkflowProgress.vue`，B 使用右上固定卡片变体，C 使用顶部吸顶条 |
+| 用户使用说明 | `components/UserGuide.vue`；`help/user-guide.md` 为页面阅读和下载的唯一内容源，`AppLayout.vue` 提供入口 |
+| 训练集导出 | `components/TrainingDatasetExport.vue`、`api/trainingExportApi.ts`、`backend/app/training_export.py` 与 `_routes.py` |
+| 记录查询 | `pages/ResultsPage.vue`、`backend/app/db.py` |
+| 媒体/工作区/Tracking API | `api/trackApi.ts`、`api/httpAnnotationApi.ts`、`backend/app/main.py` |
+| Tracking 编排 / 模型 / 异常 | `backend/app/tracker.py`、`services/sam3_engine.py`、`services/anomaly_detector.py`、`services/annotation_seed.py` |
+| 数据库和增量迁移 | `db.py`、`review_schema.py`、三个 workflow/export 模块中的 `migrate()` |
+| 日志/来源锁 | `review_logging.py`、`review_source_lock.py` |
+
+表内未带根路径的前端项均相对 `frontend/src/`，后端项相对 `backend/app/`。具体路由与结构见 [API.md](API.md)。
+
+### 兼容代码不等于当前流程
+
+`review_repository.py`、`review_routes.py` 保留底层/历史能力，活动写入由新 workflow 路由控制。`mockAnnotationApi.ts`、旧 annotation 接口注释、EffectsPage 等兼容代码不能作为“当前登录是 Mock”或“Tracking 只从第 0 帧开始”的依据。当前登录使用真实后端 JWT；实际请求以活动页面调用和 `main.py` 注册的路由为准。
+
+## 本地运行
+
+项目根目录，已安装后端依赖的环境：
+
+```bash
+python -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 3000
 ```
 
-## 前后端职责
+另一终端：
 
-| 层 | 职责 |
-|---|---|
-| `frontend` | 显示原始/逐帧预览，编辑人工框，发起追踪与导出请求，展示异常诊断。 |
-| `backend/app/main.py` | REST API、权限、上传、媒体元数据、任务状态和数据集下载。 |
-| `backend/app/tracker.py` | 用原始帧号调用 SAM3，将结果和异常写入媒体目录。 |
-| `backend/app/services` | 独立的模型适配、异常检测与视频绘制能力。 |
-| `backend/storage` | 与源码、Python 虚拟环境、模型目录分离的用户数据。 |
+```bash
+npm ci --prefix frontend
+npm run dev --prefix frontend
+```
 
-开发时 Vite 将 `/api` 代理到 FastAPI；部署时由 Nginx/Caddy/IIS 托管 `frontend/dist` 并将 `/api` 反向代理给 FastAPI。详细数据位置见 [STORAGE_LAYOUT.md](STORAGE_LAYOUT.md)，部署见 [DEPLOYMENT_WINDOWS.md](DEPLOYMENT_WINDOWS.md)。
+Vite 默认 5173，`/api` 代理到 `http://localhost:3000`。隔离测试使用其他端口：
+
+```bash
+API_PROXY_TARGET=http://127.0.0.1:3301 npm run dev --prefix frontend -- --host 127.0.0.1 --port 5373 --strictPort
+npm run build --prefix frontend
+```
+
+构建含 `vue-tsc --noEmit`；部署 `frontend/dist` 并将 `/api` 代理到 FastAPI。不要把开发测试服务指向业务数据，隔离步骤见 [TESTING.md](TESTING.md)。Windows 命令见 [DEPLOYMENT_WINDOWS.md](DEPLOYMENT_WINDOWS.md)。
+
+## 配置与进程约束
+
+- 后端配置集中在 `backend/app/config.py`，读取 `backend/.env`；模板 `backend/.env.example`。
+- `APP_DATA_DIR`：数据库默认目录及日志；`APP_DB_FILE`：数据库文件；`APP_STORAGE_DIR`：媒体和训练 ZIP。覆盖其中一个不自动迁移其他路径。
+- `SAM3_MODEL_ID`：默认 `backend/track_modul/facebook--sam3/snapshots/master`；模型不随源码提交。
+- `SAM3_DEVICE` / `SAM3_DTYPE` 默认 `cuda` / `bfloat16`；真实 GPU 可用性需单独验收。
+- `SAM3_TRACK_FRAMES` 当前代码默认 **120**，包含 seed 帧；环境变量可覆盖。异常参数见 `services/anomaly_detector.py`，不要在 UI 写死单轮帧数。
+- `JWT_SECRET` 生产环境应配置；不把密钥/token 写入文档或日志。
+- GPU 任务、来源锁及训练导出队列使用进程内状态，保持 **单后端进程、单 Uvicorn worker**。扩容前需要单独设计，不能直接增加 workers。
+- Docker 配置入口为 `compose.yaml`、`.env.docker.example`、前后端 Dockerfile；部署细节见 [DOCKER_DEPLOYMENT.md](DOCKER_DEPLOYMENT.md)。

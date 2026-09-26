@@ -46,7 +46,7 @@ export interface AnnotationObject {
   confidence?: number
   point?: { x: number; y: number }
   bbox?: { x: number; y: number; width: number; height: number }
-  /** 视频标注固定为第一帧，因此当前前端始终为 0。 */
+  /** 原始视频帧号，从 0 开始；界面显示从 1 开始。 */
   frameIndex?: number
   timestampMs?: number
   anomaly?: { type: string; ratio: number; prevArea: number; currArea: number }

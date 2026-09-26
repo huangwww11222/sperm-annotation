@@ -1,40 +1,64 @@
-# 运行数据目录
+# 存储、快照与迁移边界
 
-应用代码、模型和用户生成的数据已分离。默认持久化目录为 `backend/storage/`；可在后端 `.env` 设置 `APP_STORAGE_DIR` 指向数据盘或共享盘。
+基线：2026-09-27。路径来自 [config.py](../backend/app/config.py)。
+
+| 配置 | 默认 | 内容 |
+| --- | --- | --- |
+| `APP_DATA_DIR` | `backend/data` | 默认 DB 目录、`logs/review.log` |
+| `APP_DB_FILE` | `$APP_DATA_DIR/app.db` | SQLite 账号、人工记录、A/B/C/F 和导出任务 |
+| `APP_STORAGE_DIR` | `backend/storage` | `media/`、`datasets/` |
+| `SAM3_MODEL_ID` | `backend/track_modul/facebook--sam3/snapshots/master` | 模型配置与权重 |
+
+修改 DB 路径不自动修改日志路径；修改变量不自动搬迁已有数据。不要将测试目录与业务目录混用。
+
+## 文件与工作区
 
 ```text
-backend/
-├─ app/                         # FastAPI 业务代码
-├─ data/
-│  └─ app.db                    # 用户和人工标注索引（SQLite）
-├─ track_modul/                 # 本地 SAM3 模型；不提交到版本库
-└─ storage/
-   ├─ media/
-   │  └─ <media-id>/
-   │     ├─ <原始上传视频>       # 原始 AVI/MP4 等，从不在上传时转码
-   │     ├─ media.json           # FPS、分辨率、总帧数及上传元数据
-   │     ├─ annotations_frame_*.json
-   │     ├─ workspace_state.json   # 人工框、人工基准、异常/显示等可恢复工作区状态
-   │     ├─ tracker_results.json # 逐行 JSON，AI Tracking 结果
-   │     ├─ tracker_overlay.mp4  # 可视化预览
-   │     └─ .frame_cache/        # 可安全删除的逐帧 JPEG 缓存
-   └─ datasets/
-      ├─ <素材名>_dataset_*.zip # 用户导出的 COCO/YOLO 训练数据集
-      └─ .work/                  # 导出时的短暂工作目录；可在服务停止后清理
+storage/
+  media/<media-id>/
+    原视频（上传时不转码）
+    media.json                   # 原始宽高、FPS、帧数等
+    annotations_frame_*.json     # 每次 Tracking seed
+    tracker_results.json         # JSONL：逐行原始视频帧
+    tracker_overlay.mp4          # 带框预览
+    workspace_state.json         # 可恢复人工/删除/基准/异常/当前位置与设置
+    .frame_cache/                # 逐帧 JPEG 缓存
+  datasets/
+    train_<id>.zip               # 当前训练导出生成包，认证接口下载
+    train_<id>.zip.partial       # 打包临时文件
+    .work/                      # 临时提帧与标签
 ```
 
-## 迁移已有部署
+`workspace_state.json` 临时文件写入后原子替换。AI 逐帧结果不复制进去，加载时与 `tracker_results.json` 合并，人工修正优先，删除标记不能因重新加载复活。
 
-旧版本使用 `backend/track_data/`。升级后该目录保持只读兼容：已有视频、追踪结果和 API 地址继续可用；新上传的素材会写入 `backend/storage/media/`。
+旧媒体没有工作区文件时，只从 seed 的 `source=manual` 恢复人工记录/基准；AI、warning、anomaly 不当人工基准。首次编辑/追踪可写回恢复状态。文件原子替换与 SQLite 事务不是同一跨资源事务；不要假设一个能回滚另一个。
 
-确认升级正常后，可在停掉后端服务的情况下，将旧目录中的**素材子目录**移动到 `backend/storage/media/`。不要移动 `track_data` 根目录本身，也不要覆盖同名 `<media-id>` 目录。迁移前备份 `backend/data/app.db`、旧 `track_data/` 和新 `storage/`。
+## SQLite 数据关系
 
-训练集 ZIP 位于 `storage/datasets/`，原视频位于对应的 `storage/media/<media-id>/`。部署、备份或清理时按这两个目录分别处理即可。
+完整 DDL 在 [review_schema.py](../backend/app/review_schema.py)、[review_workflow.py](../backend/app/review_workflow.py)、[confirmation_workflow.py](../backend/app/confirmation_workflow.py)、[training_export.py](../backend/app/training_export.py)。启动时增量建表，保留历史数据。
 
-## 工作区恢复与去重
+| 数据层 | 表/作用 |
+| --- | --- |
+| 媒体与 A | `media_revisions`、`annotation_baselines`、`baseline_frames` 固定来源、完整帧及对象 |
+| B 编辑 | `review_sessions`、`review_frames.patch_json/state` 保存草稿状态，`submission_id` 保留上次成功引用；提交正文另存不可变表 |
+| 不可变帧提交 | `frame_submissions` + `review_submission_payloads` 存成功提交及净差量 |
+| 固定 B | `review_versions` + `review_version_frames` 完整逐帧对象；`review_changes` 存相对 A 的净变化 |
+| C 决定 | `confirmation_sessions`、`decision_events`、`decision_heads`；事件保留、head 表示当前选择 |
+| C 并发/撤销 | `confirmation_change_versions`、`confirmation_actions` |
+| F | `final_versions`、`final_version_frames`、`confirmation_final_records` 存完整帧、决定快照、前一版本 |
+| 历史/兼容 | `confirmation_reopen_events` 留重新确认记录；`final_frame_objects` 兼容旧对象读取方，不能取代完整帧表 |
+| 游标 | `review_bookmarks`、`confirmation_bookmarks`，按用户与任务隔离、版本独立 |
+| 幂等 | `review_write_receipts` 与业务变化同一事务；`training_exports` 有操作者+请求键唯一约束 |
+| 导出 | `training_exports` 存任务设置、进度、manifest、错误、完成状态 |
 
-`workspace_state.json` 是每个视频唯一的可恢复编辑状态文件，采用临时文件写入后原子替换。它保存人工框、每个 `object_id` 最近一次人工基准、用户隐藏的 Tracking 对象、异常标记/暂停信息、当前帧以及显示和编辑器设置。AI 逐帧结果不复制到该文件，仍以 `tracker_results.json` 为唯一来源，加载时再与人工框合并，避免同一框出现两份。
+A/B/F 不随浏览、缩放、草稿、重新确认而改写。F 的对象集合和类别继承 A，只选择几何来源。旧问题标记表或状态仍可能存在，不表示当前产品启用阻塞/退回流程。
 
-旧素材目录没有 `workspace_state.json` 时，后端会从 `annotations_frame_*.json` 中只提取 `source=manual` 的记录生成兼容状态；AI、warning 和 anomaly 框不会被误当成人工基准。第一次编辑或 AI Tracking 前会把迁移后的状态写回当前素材目录。
+## 备份、兼容和清理
 
-标注结果按“文件、帧、标注人”聚合；同一 `object_id` 的重复保存会在数据库写入时替换旧记录，读取时仍会兼容清理历史版本产生的重复行。
+- 备份至少覆盖实际 DB、storage、仍使用的 `backend/track_data` 及部署配置/模型版本。停写后备份或使用 SQLite 一致性备份，不能在写入中随意复制不完整状态。
+- 当前部署是单进程，不共享一个 DB 给多后端进程；不要将 SQLite 放到 SMB/NFS 供多个实例直接读写。
+- 旧 `backend/track_data/<media-id>` 保留兼容读取；新上传写入 storage/media。受支持的编辑流程仍可能对已定位到的旧媒体目录写入工作区，不能将“兼容读取”误解为整个目录被文件系统锁定只读。
+- 迁移前停后端，备份，然后逐个移动旧素材子目录到 media；不要套入一层 track_data 或覆盖同名 ID。
+- 缺少完整 A/B/空帧的历史任务保持只读并解释原因；不能猜测补帧或冒充可导出 F，应按完整来源重新送审。
+- `.frame_cache` 可重建；训练任务正常完成/失败会清理临时目录。异常进程终止留下的 `.work` / `.partial` 需停服务后核对再清理。
+- 原视频、seed、Tracking、工作区、DB 和历史版本不是缓存。不要因文档整理或测试删除它们。已完成 ZIP 暂无自动过期策略，清理需考虑任务记录及下载关系。

@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import AppIcon from '../components/AppIcon.vue'
 import { listResults } from '../api/httpAnnotationApi'
 
 interface DbRow {
@@ -33,9 +34,11 @@ const rawRows = ref<DbRow[]>([])
 const loading = ref(false)
 const errorMessage = ref('')
 const selectedMediaId = ref('')
+const search = ref(''), page = ref(1)
+const pageSize = 50
 
 const mediaIdentity = (row: DbRow) =>
-  `${row.media_type || 'video'}:${String(row.media_name || row.media_id).trim().toLocaleLowerCase()}`
+  `${row.media_type || 'video'}:${row.media_id}`
 
 const mediaOptions = computed(() => {
   const map = new Map<string, { id: string; name: string; type: string }>()
@@ -62,11 +65,12 @@ const groupedRows = computed<ResultGroup[]>(() => {
   const groups = new Map<string, ResultGroup>()
   for (const row of filteredRows.value) {
     // 标注结果展示当前逻辑状态，而不是重复展示每次 Tracking 产生的保存批次。
-    // 同一文件（兼容历史临时 media_id）、同一帧、同一标注人只显示一行。
+    // Use stable media identity: distinct videos may legitimately share a filename.
     const key = `${mediaIdentity(row)}:${row.frame_index}:${row.user_id}`
     const existing = groups.get(key)
     if (existing) {
       if (row.object_name && !existing.objects.includes(row.object_name)) existing.objects.push(row.object_name)
+      if (row.created_at > existing.savedAt) existing.savedAt = row.created_at
       continue
     }
     groups.set(key, {
@@ -81,7 +85,8 @@ const groupedRows = computed<ResultGroup[]>(() => {
       savedAt: row.created_at,
     })
   }
-  return Array.from(groups.values())
+  const term = search.value.toLowerCase()
+  return Array.from(groups.values()).filter(row => `${row.mediaName} ${row.username} ${row.objects.join(' ')}`.toLowerCase().includes(term))
 })
 
 const formatTimestamp = (ms: number | null) => {
@@ -109,74 +114,29 @@ const load = async () => {
       .filter((row) => row.source === 'manual')
   } catch (error: any) {
     errorMessage.value = error?.message || '读取数据库标注记录失败'
+    console.error('[records.load_failed]', error)
   } finally {
     loading.value = false
   }
 }
 
+const pageCount = computed(() => Math.max(1, Math.ceil(groupedRows.value.length / pageSize)))
+const visibleRows = computed(() => groupedRows.value.slice((page.value-1)*pageSize,page.value*pageSize))
+watch([search,selectedMediaId],()=>{page.value=1})
+watch(pageCount,n=>{page.value=Math.min(page.value,n)})
 onMounted(load)
 </script>
 
 <template>
-  <section class="flex min-h-0 flex-1 flex-col gap-4">
-    <div class="flex flex-wrap items-end justify-between gap-3">
-      <div>
-        <h2 class="text-lg font-semibold">标注结果</h2>
-        <p class="mt-1 text-xs text-slate-500">这里只显示数据库中的人工新增或人工修改记录，不显示 AI Tracking 结果。</p>
-      </div>
-      <div class="flex items-center gap-2">
-        <label class="text-xs text-slate-400">文件</label>
-        <select v-model="selectedMediaId" class="input min-w-[260px]">
-          <option value="">全部文件</option>
-          <option v-for="media in mediaOptions" :key="media.id" :value="media.id">
-            {{ media.name }}（{{ media.type === 'video' ? '视频' : '图片' }}）
-          </option>
-        </select>
-        <button class="btn-secondary" :disabled="loading" @click="load">刷新</button>
-      </div>
-    </div>
-
-    <div v-if="errorMessage" class="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-xs text-red-300">
-      {{ errorMessage }}
-    </div>
-
-    <div class="panel min-h-0 flex-1 overflow-auto">
-      <table class="w-full border-collapse text-left text-xs">
-        <thead class="sticky top-0 bg-slate-900">
-          <tr class="border-b border-slate-800 text-slate-400">
-            <th class="px-4 py-3">文件</th>
-            <th class="px-4 py-3">类型</th>
-            <th class="px-4 py-3">第几帧</th>
-            <th class="px-4 py-3">该帧人工标注对象</th>
-            <th class="px-4 py-3">标注人</th>
-            <th class="px-4 py-3">保存时间</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="row in groupedRows" :key="row.key" class="border-b border-slate-900 align-top hover:bg-slate-900/40">
-            <td class="px-4 py-3 font-medium">{{ row.mediaName }}</td>
-            <td class="px-4 py-3">{{ row.mediaType === 'video' ? '视频' : '图片' }}</td>
-            <td class="px-4 py-3 font-mono">{{ row.frameIndex ?? '-' }}</td>
-            <td class="px-4 py-3">
-              <div class="flex flex-wrap gap-1.5">
-                <span v-for="name in row.objects" :key="name" class="rounded bg-indigo-500/15 px-2 py-1 text-indigo-300">{{ name }}</span>
-                <span v-if="!row.objects.length" class="text-slate-600">-</span>
-              </div>
-              <div v-if="row.timestampMs !== null" class="mt-1 text-[10px] text-slate-600">视频时间 {{ formatTimestamp(row.timestampMs) }}</div>
-            </td>
-            <td class="px-4 py-3">
-              <span class="rounded bg-slate-800 px-2 py-1 text-slate-300">{{ row.username }}</span>
-            </td>
-            <td class="px-4 py-3 text-slate-500">{{ formatSavedAt(row.savedAt) }}</td>
-          </tr>
-          <tr v-if="loading">
-            <td colspan="6" class="px-4 py-16 text-center text-slate-500">正在读取数据库记录…</td>
-          </tr>
-          <tr v-else-if="!groupedRows.length">
-            <td colspan="6" class="px-4 py-16 text-center text-slate-600">当前筛选条件下暂无人工标注记录</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+  <section class="records-page">
+    <header class="records-heading"><div><span class="eyebrow">ANNOTATION RECORDS</span><h2>标注记录</h2><p>回查已入库的人工对象与标注人；最终数据集在对比确认完成后导出。</p></div><button class="btn-secondary" :disabled="loading" @click="load">{{ loading?'读取中…':'刷新记录' }}</button></header>
+    <div class="records-stats"><div><AppIcon name="folder"/><span>素材<strong>{{ mediaOptions.length }}</strong></span></div><div><AppIcon name="list"/><span>当前筛选<strong>{{ groupedRows.length }} <small>条帧记录</small></strong></span></div><p>独立查询入口，无需经过此页即可送审。</p></div>
+    <div class="panel records-panel"><div class="records-filters"><input v-model="search" class="input" aria-label="搜索标注记录" placeholder="搜索素材、对象或标注人…"/><select v-model="selectedMediaId" class="input" aria-label="按素材筛选"><option value="">全部素材</option><option v-for="media in mediaOptions" :key="media.id" :value="media.id">{{ media.name }} · {{ media.id.slice(-8) }}</option></select><span>按素材 / 帧 / 标注人汇总</span></div>
+    <div v-if="errorMessage" class="error-banner" role="alert">{{ errorMessage }}</div>
+    <div class="records-table"><table><thead><tr><th>素材</th><th>帧号</th><th>人工标注对象</th><th>标注人</th><th>最近入库时间</th></tr></thead><tbody><tr v-for="row in visibleRows" :key="row.key"><td><strong>{{ row.mediaName }}</strong><small>{{ row.mediaType==='video'?'视频':'图片' }} · {{ row.mediaId.slice(-10) }}</small></td><td>{{ row.frameIndex===null?'—':row.frameIndex+1 }}<small v-if="row.timestampMs!==null">{{ formatTimestamp(row.timestampMs) }}</small></td><td><div class="record-tags"><span v-for="name in row.objects" :key="name">{{ name }}</span><span v-if="!row.objects.length">—</span></div></td><td>{{ row.username }}</td><td>{{ formatSavedAt(row.savedAt) }}</td></tr><tr v-if="!visibleRows.length"><td colspan="5" class="records-empty">{{ loading?'正在读取记录…':search||selectedMediaId?'没有匹配的记录':'暂无已入库的人工标注记录' }}</td></tr></tbody></table></div>
+    <footer class="records-pagination"><small>第 {{ page }} / {{ pageCount }} 页 · 每页 {{ pageSize }} 条</small><button class="btn-secondary" :disabled="page===1" @click="page--">上一页</button><button class="btn-secondary" :disabled="page===pageCount" @click="page++">下一页</button></footer></div>
   </section>
 </template>
+<style scoped>
+.records-page{max-width:1600px;margin:10px auto;display:flex;flex-direction:column;gap:22px}.records-heading{display:flex;align-items:center;justify-content:space-between}.records-heading h2{font-size:24px;font-weight:650;margin-top:5px}.records-heading p{font-size:12px;color:var(--muted);margin-top:8px}.records-stats{display:flex;gap:16px;align-items:center}.records-stats>div{display:flex;gap:14px;align-items:center;padding:18px 24px;background:var(--surface);border:1px solid var(--line);border-radius:10px;min-width:180px;color:var(--accent)}.records-stats span{font-size:10px;color:var(--muted)}.records-stats strong{display:block;color:var(--text);font-size:24px;font-weight:600}.records-stats strong small{font-size:11px;color:var(--muted);font-weight:400}.records-stats p{margin-left:auto;color:var(--muted);font-size:11px}.records-panel{overflow:hidden}.records-filters{display:flex;gap:12px;padding:17px;border-bottom:1px solid var(--line);align-items:center}.records-filters input{width:300px}.records-filters select{max-width:260px}.records-filters span{margin-left:auto;font-size:11px;color:var(--muted)}.records-table{overflow:auto;max-height:calc(100vh - 360px);min-height:220px}table{width:100%;font-size:12px;border-collapse:collapse}th{position:sticky;top:0;background:var(--surface-subtle);color:var(--muted);text-align:left;font-weight:500}th,td{padding:15px 20px;border-bottom:1px solid var(--line)}td{vertical-align:top}td strong{font-weight:550}td small{display:block;color:var(--muted);font-size:10px;margin-top:5px}tbody tr:hover{background:var(--surface-subtle)}.record-tags{display:flex;gap:6px;flex-wrap:wrap;max-width:400px}.record-tags span{background:var(--accent-soft);color:var(--accent);border-radius:5px;padding:3px 7px;font-size:11px}.records-empty{text-align:center;padding:70px;color:var(--muted)}.records-pagination{display:flex;gap:8px;align-items:center;padding:13px 17px}.records-pagination small{margin-right:auto;color:var(--muted);font-size:11px}
+</style>

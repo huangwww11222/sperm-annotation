@@ -118,18 +118,6 @@ export interface FinalVersion {
   }>
 }
 
-export interface ExportReq {
-  finalVersionIds: string[]
-  format: 'coco' | 'yolo' | 'both'
-}
-
-export interface ExportRes {
-  exportId: string
-  status: 'succeeded' | 'failed'
-  downloadUrl: string
-  manifest: Record<string, unknown>
-}
-
 // ── API 调用 ──
 
 export const reviewApi = {
@@ -185,7 +173,4 @@ export const reviewApi = {
   getFinalVersion: (id: string) =>
     http.get<FinalVersion>(`/final-versions/${id}`),
 
-  // Export
-  exportDataset: (body: ExportReq) =>
-    http.post<ExportRes>('/datasets/exports', body),
 }

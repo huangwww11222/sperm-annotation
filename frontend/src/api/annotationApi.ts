@@ -1,13 +1,8 @@
 import type { AnnotationObject, EffectResult, MediaType } from '../types/annotation'
 
 /**
- * 前端与后端之间的“接口边界”。
- *
- * 这个文件只定义数据契约，不执行任何 HTTP 请求，也不依赖 FastAPI、Python、
- * PyTorch 或 SAM3.1。当前页面使用 mockAnnotationApi 独立运行。
- *
- * 后续接后端时，可以新增一个 httpAnnotationApi.ts，实现同一个 AnnotationApi
- * 接口，再在组件中把 api 替换掉即可；页面业务逻辑无需改动。
+ * 人工标注兼容接口及可选 Mock 实现。活动工作区使用 httpAnnotationApi，
+ * 视频追踪通过 trackApi 调用真实 FastAPI。当前契约入口：docs/API.md。
  */
 export interface UploadMediaRequest {
   file: File
@@ -44,7 +39,7 @@ export interface SegmentRequest {
 export interface TrackRequest {
   mediaId: string
   prompt: string
-  /** 当前产品规则：视频 Tracking 从第一帧开始。 */
+  /** 旧接口兼容字段；活动视频 Tracking 从当前原始帧开始，见 trackApi。 */
   startFrame: number
   endFrame: number
   seedObject: AnnotationObject
@@ -69,7 +64,7 @@ export interface AnnotationApi {
 
 /**
  * 独立运行模式：所有接口均为本地 Mock。
- * 页面启动不需要后端、不需要 .env、不需要网络，也不会发送任何 API 请求。
+ * 仅显式使用此 Mock 的隔离示例无需后端；当前产品页面不以此运行。
  */
 export const mockAnnotationApi: AnnotationApi = {
   async uploadMedia({ file }) {

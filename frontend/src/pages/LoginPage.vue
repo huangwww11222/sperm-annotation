@@ -3,6 +3,9 @@
 import { computed, ref } from 'vue'
 import { useRouter } from '../router'
 import { useAuth } from '../stores/auth'
+import { useAppearance } from '../stores/appearance'
+import AppIcon from '../components/AppIcon.vue'
+const { theme, toggleTheme } = useAppearance()
 
 const router = useRouter()
 const { login, register } = useAuth()
@@ -61,27 +64,28 @@ const submit = async () => {
 </script>
 
 <template>
-  <div class="min-h-screen bg-slate-950 px-5 text-slate-100">
+  <div class="login-page min-h-screen px-5">
+    <button class="quiet-button login-theme" @click="toggleTheme"><AppIcon :name="theme==='light'?'moon':'sun'"/>{{ theme==='light'?'深色模式':'浅色模式' }}</button>
     <div class="mx-auto flex min-h-screen max-w-md items-center justify-center">
-      <section class="panel w-full p-8">
+      <section class="panel w-full p-8 login-card">
         <div class="mb-8">
-          <div class="mb-4 inline-flex h-11 w-11 items-center justify-center rounded-xl bg-indigo-500/15 text-indigo-300">RS</div>
+          <div class="mb-4 inline-flex h-11 w-11 items-center justify-center rounded-xl bg-indigo-500/15 text-[var(--accent)]"><AppIcon name="layers" :size="25" /></div>
           <h1 class="text-xl font-bold">{{ isRegisterMode ? '注册账号' : '登录系统' }}</h1>
-          <p class="mt-2 text-xs leading-5 text-slate-500">
+          <p class="mt-2 text-xs leading-5 text-[var(--muted)]">
             {{ isRegisterMode ? '注册后自动登录，进入稀有精子识别与标注工作台。' : '登录后进入稀有精子识别与标注工作台。' }}
           </p>
         </div>
         <form class="space-y-4" @submit.prevent="submit">
           <label class="block">
-            <span class="mb-2 block text-xs text-slate-400">账号</span>
+            <span class="mb-2 block text-xs text-[var(--muted)]">账号</span>
             <input v-model="username" class="input w-full" autocomplete="username" placeholder="请输入账号" />
           </label>
           <label class="block">
-            <span class="mb-2 block text-xs text-slate-400">密码</span>
+            <span class="mb-2 block text-xs text-[var(--muted)]">密码</span>
             <input v-model="password" class="input w-full" type="password" :autocomplete="isRegisterMode ? 'new-password' : 'current-password'" placeholder="请输入密码" />
           </label>
           <label v-if="isRegisterMode" class="block">
-            <span class="mb-2 block text-xs text-slate-400">确认密码</span>
+            <span class="mb-2 block text-xs text-[var(--muted)]">确认密码</span>
             <input v-model="confirmPassword" class="input w-full" type="password" autocomplete="new-password" placeholder="请再次输入密码" />
           </label>
           <p v-if="error" class="rounded-lg border border-red-400/20 bg-red-400/5 px-3 py-2 text-xs text-red-300">{{ error }}</p>
@@ -91,16 +95,20 @@ const submit = async () => {
         </form>
 
         <div class="mt-6 flex items-center justify-center text-xs">
-          <span class="text-slate-500">{{ isRegisterMode ? '已有账号？' : '还没有账号？' }}</span>
-          <button type="button" class="ml-1 text-indigo-300 hover:underline" @click="toggleMode">
+          <span class="text-[var(--muted)]">{{ isRegisterMode ? '已有账号？' : '还没有账号？' }}</span>
+          <button type="button" class="ml-1 text-[var(--accent)] hover:underline" @click="toggleMode">
             {{ isRegisterMode ? '去登录' : '立即注册' }}
           </button>
         </div>
 
-        <div class="mt-4 rounded-lg border border-slate-800 bg-slate-950/70 p-3 text-[10px] leading-5 text-slate-500">
+        <div class="mt-4 rounded-lg border border-[var(--line)] bg-[var(--surface-subtle)] p-3 text-[10px] leading-5 text-[var(--muted)]">
           账号与密码由后端校验并加密存储，标注结果会自动记录标注人。如忘记密码，请联系管理员。
         </div>
       </section>
     </div>
   </div>
 </template>
+
+<style scoped>
+.login-page{background:radial-gradient(ellipse at 25% 15%,var(--accent-soft),transparent 60%),var(--app-bg);color:var(--text)}.login-card{box-shadow:0 22px 80px #243c5718;border-radius:18px}.login-theme{position:absolute;right:24px;top:24px}
+</style>

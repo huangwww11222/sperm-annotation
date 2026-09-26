@@ -3,6 +3,7 @@ import type { TrackingFrameResult } from '../types/annotation'
 
 const jsonRequest = async <T>(path: string, init: RequestInit = {}): Promise<T> => {
   const res = await fetch(`/api${path}`, {
+    signal: AbortSignal.timeout(30000),
     ...init,
     headers: {
       'Content-Type': 'application/json',
@@ -188,6 +189,7 @@ export const trackApi = {
 
   async getFrameBlob(mediaId: string, frameIndex: number): Promise<Blob> {
     const res = await fetch(`/api/track/frame/${encodeURIComponent(mediaId)}/${encodeURIComponent(frameIndex)}`, {
+      signal: AbortSignal.timeout(20000),
       headers: {
         ...(tokenStore.get() ? { Authorization: `Bearer ${tokenStore.get()}` } : {}),
       },

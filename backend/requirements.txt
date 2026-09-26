@@ -14,3 +14,4 @@ opencv-python>=4.8,<5
 # only requirement specifiers and options.
 pytest>=8,<10
 python-dotenv>=1.0,<2
+PyYAML>=6,<7

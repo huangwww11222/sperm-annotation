@@ -1,612 +1,229 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import SendToReview from '../components/SendToReview.vue'
+import AppIcon from '../components/AppIcon.vue'
+import AnnotationOverlay from '../components/AnnotationOverlay.vue'
 import { useWorkspace } from '../stores/workspace'
-
+import { addLeaveGuard } from '../router'
+import '../annotation/annotation.css'
 const {
-  mediaAssets, selectedMediaId, activeTool, objectNameInput, selectedObjectId,
-  currentFrame, currentTime, videoDuration, videoFps, frameInput, isPlaying,
-  isAiBusy, statusMessage, toastMessage,
-  imageRef, videoRef, exactFrameImageRef, exactFrameUrl, exactFrameLoading, videoPlaybackFallback, annotationHitRef, fileInputRef, videoInputRef,
-  annotationsByMedia, selectedMedia, isVideo, maxFrameIndex, currentMediaId,
-  currentObjects, selectedObject, anomalyObjectIds, anomalyFrames, pausedAnomalies, anomalyPanelVisible, closeAnomalyPanel, formatTime, addObject, resetVideoViewToFirstFrame, trackingFrameCount,
-  ensureVideoFirstFrame, selectTool, onStageClick, tempBbox, onBboxDown, onBboxMove,
-  onBboxUp, onObjectDropdownChange, selectObject, removeObject, renameObject, undo, redo,
-  copyPreviousFrame, brightness, contrast, mediaFilterStyle, resetMediaFilter, annotatedFrameCount,
-  clearSelection, openFilePicker, handleFiles, onImageLoaded, onVideoLoaded,
-  onVideoTimeUpdate, onVideoError, seekToInputFrame, togglePlayback, onVideoEnded,
-  onTimelineClick, runAiTrack, generateAnnotationsJson,
-  exportDataset, resetAnnotationViewForMedia, seekByFrame,
-  zoom, zoomIn, zoomOut, zoomReset, closeMedia, openAnnotationFolderPicker, handleAnnotationFolderFiles,
+  mediaAssets, selectedMediaId, activeTool, objectNameInput, selectedObjectId, currentFrame, currentTime, videoDuration, videoFps, frameInput, isPlaying,
+  isAiBusy, statusMessage, toastMessage, imageRef, videoRef, exactFrameImageRef, exactFrameUrl, exactFrameLoading, videoPlaybackFallback, annotationHitRef, fileInputRef, videoInputRef, annotationFolderInputRef,
+  annotationsByMedia, selectedMedia, isVideo, maxFrameIndex, currentMediaId, currentObjects, selectedObject, displayObjects, editingBlocked, workspaceRestoring,
+  anomalyObjectIds, anomalyFrames, pausedAnomalies, anomalyPanelVisible, closeAnomalyPanel, formatTime, selectTool, onStageClick, tempBbox, onBboxDown, onBboxMove, onBboxUp,
+  selectObject, removeObject, renameObject, undo, redo, canUndo, canRedo, copyPreviousFrame, brightness, contrast, mediaFilterStyle, resetMediaFilter, annotatedFrameCount,
+  clearSelection, openFilePicker, handleFiles, onImageLoaded, onVideoLoaded, onVideoTimeUpdate, onVideoError, seekToInputFrame, togglePlayback, onVideoEnded,
+  onTimelineClick, runAiTrack, resetAnnotationViewForMedia, seekByFrame, zoom, zoomIn, zoomOut, zoomReset, closeMedia, openAnnotationFolderPicker, handleAnnotationFolderFiles,
+  nudgeSelected, cancelAnnotationGesture, frameError, retryExactFrame, saveState, saveError, persistWorkspaceState, playbackRate, pausePlayback,
 } = useWorkspace()
-
-// 画布滚动容器
-const scrollContainerRef = ref<HTMLDivElement | null>(null)
-const containerW = ref(0)
-const containerH = ref(0)
-// 关键：contain 基准只在素材切换或首次有尺寸时锁定一次，
-// 后续容器尺寸变化（如底部播放条出现/消失）不再影响 zoom 对应的实际画面大小
-const containBase = ref<{ w: number; h: number } | null>(null)
-let resizeObserver: ResizeObserver | null = null
-
-// ── 导出训练数据集弹窗 ──
-const exportDialogOpen = ref(false)
-const exportFormat = ref<'coco' | 'yolo' | 'both'>('coco')
-const exportSplitRatio = ref(0.8)   // 0 = 不划分
-const doingExport = ref(false)
-
-const allFrameCount = computed(() => {
-  const objs = annotationsByMedia.value[currentMediaId.value] ?? []
-  return new Set(objs.map((o: any) => o.frameIndex ?? 0)).size
-})
-const allClassNameList = computed(() => {
-  const objs = annotationsByMedia.value[currentMediaId.value] ?? []
-  // 追踪用的实例名带编号（如 sperm 1），训练集类别必须合并为 sperm。
-  const categoryName = (name: string) => name.trim()
-    .replace(/(?:\s*[-_#]?\s*\d+|\s*[（(]\s*\d+\s*[）)])$/, '')
-    .trim() || name.trim()
-  return Array.from(new Set(objs.map((o: any) => categoryName(String(o.name || ''))).filter(Boolean))) as string[]
-})
-
-async function doExportDataset() {
-  if (doingExport.value) return
-  doingExport.value = true
-  try {
-    await exportDataset({ format: exportFormat.value, splitRatio: exportSplitRatio.value })
-    exportDialogOpen.value = false
-  } finally {
-    doingExport.value = false
-  }
-}
-
-const onKeyDown = (e: KeyboardEvent) => {
-  // 输入框内不触发快捷键
-  const tag = (e.target as HTMLElement)?.tagName
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
-  if (isAiBusy.value) return
-
-  switch (e.key) {
-    case 'ArrowLeft':
-      if (e.repeat) return  // 防长按连跳
-      e.preventDefault()
-      seekByFrame(-1)
-      break
-    case 'ArrowRight':
-      if (e.repeat) return  // 防长按连跳
-      e.preventDefault()
-      seekByFrame(1)
-      break
-    case 'Delete':
-    case 'Backspace':
-      if (selectedObjectId.value) {
-        e.preventDefault()
-        removeObject(selectedObjectId.value)
-      }
-      break
-    case 'z': case 'Z':
-      if (e.ctrlKey || e.metaKey) { e.preventDefault(); undo() }
-      break
-    case 'y': case 'Y':
-      if (e.ctrlKey || e.metaKey) { e.preventDefault(); redo() }
-      break
-    case 'c': case 'C':
-      if (isVideo.value) copyPreviousFrame()
-      break
-    case 'p': case 'P':
-      selectTool('point')
-      break
-    case 'b': case 'B':
-      selectTool('bbox')
-      break
-    case 'Escape':
-      clearSelection()
-      break
-  }
-}
-
-// 对象颜色调色板（按 objectId 取色，选中时返回金色）
-const PALETTE = ['#60a5fa', '#34d399', '#f472b6', '#fbbf24', '#a78bfa', '#fb923c', '#22d3ee', '#e879f9', '#84cc16', '#f87171']
-const objColor = (objectId: number, selected: boolean) => {
-  if (selected) return '#fbbf24'
-  return PALETTE[objectId % PALETTE.length]
-}
-
-// 时间线上已标注帧的标记点（限制数量避免渲染过多）
-const annotatedFrameMarkers = computed(() => {
-  const mediaId = currentMediaId.value
-  const all = (annotationsByMedia.value[mediaId] ?? []).map((o: any) => o.frameIndex ?? 0)
-  const sorted = [...new Set(all)].sort((a, b) => a - b)
-  if (sorted.length <= 200) return sorted
-  const step = Math.ceil(sorted.length / 200)
-  return sorted.filter((_, i) => i % step === 0)
-})
-
-// 鼠标坐标显示
+const scrollContainerRef = ref<HTMLDivElement | null>(null), stageRef = ref<HTMLDivElement | null>(null), loupe = ref<HTMLCanvasElement | null>(null)
+const help = ref(false), helpDialog = ref<HTMLElement | null>(null), focused = ref(false), labels = ref(true), hiddenBoxes = ref(false), magnifier = ref(false), inverted = ref(false), enhancing = ref(false), spaceHeld = ref(false)
+const search = ref(''), objectSearch = ref(''), jumpFrame = ref(1)
+const size = ref({ w: 0, h: 0 }), base = ref({ w: 800, h: 450 })
 const mousePixel = ref<{ x: number; y: number } | null>(null)
-const onMouseMoveStage = (e: MouseEvent) => {
-  const media = selectedMedia.value
-  if (!media) { mousePixel.value = null; return }
-  const stage = annotationHitRef.value
-  if (!stage) return
-  const rect = stage.getBoundingClientRect()
-  const px = Math.round(((e.clientX - rect.left) / rect.width) * (media.width || 0))
-  const py = Math.round(((e.clientY - rect.top) / rect.height) * (media.height || 0))
-  mousePixel.value = { x: px, y: py }
+const stageSize = computed(() => ({ w: Math.round(base.value.w * zoom.value), h: Math.round(base.value.h * zoom.value) }))
+const visibleMedia = computed(() => mediaAssets.value.filter(m => m.name.toLowerCase().includes(search.value.toLowerCase())))
+const visibleObjects = computed(() => currentObjects.value.filter(o => o.name.toLowerCase().includes(objectSearch.value.toLowerCase())))
+const filter = computed(() => `${mediaFilterStyle.value} ${inverted.value ? 'invert(1)' : ''}`)
+const saveLabel = computed(() => selectedMedia.value?.serverMediaId ? ({ idle:'自动保存', saving:'保存中…', saved:'已保存', error:'保存失败' }[saveState.value]) : '本机自动保存')
+const markers = computed(() => {
+  const rows = [...new Set((annotationsByMedia.value[currentMediaId.value] ?? []).map(o => o.frameIndex ?? 0))].sort((a,b)=>a-b)
+  return rows.filter((_,i) => i % Math.max(1,Math.ceil(rows.length/200)) === 0)
+})
+let observer: ResizeObserver | null = null, removeGuard: (()=>void) | null = null, pointerRaf = 0
+let pan: { x:number; y:number; left:number; top:number; id:number } | null = null, suppressClick = false, latestMove: PointerEvent | null = null
+let helpPriorFocus: HTMLElement | null = null
+const focusButton = ref<HTMLButtonElement | null>(null)
+let pointerActive = false
+let normalView: { mediaId: string; zoom: number; base: {w:number;h:number}; left: number; top: number; pageY: number } | null = null
+let priorOverflow = '', priorHeaderInert = false
+function restorePage() {
+  document.body.style.overflow = priorOverflow
+  const header = document.querySelector<HTMLElement>('.app-header')
+  if (header) header.inert = priorHeaderInert
 }
-
-onMounted(() => {
-  resizeObserver = new ResizeObserver((entries) => {
-    for (const entry of entries) {
-      containerW.value = entry.contentRect.width
-      containerH.value = entry.contentRect.height
-    }
-  })
-  if (scrollContainerRef.value) resizeObserver.observe(scrollContainerRef.value)
-  window.addEventListener('keydown', onKeyDown)
-})
-onUnmounted(() => {
-  resizeObserver?.disconnect()
-  window.removeEventListener('keydown', onKeyDown)
-})
-
-// 根据锁定的 contain 基准和 zoom 计算画布尺寸
-const stageSize = computed(() => {
-  if (!containBase.value) return { w: 0, h: 0 }
-  return { w: Math.round(containBase.value.w * zoom.value), h: Math.round(containBase.value.h * zoom.value) }
-})
-
-// 锁定 contain 基准：素材切换时重置，首次有有效容器尺寸时计算
-const lockContainBase = () => {
-  const ratio = (selectedMedia.value?.width || 16) / (selectedMedia.value?.height || 9)
-  const cw = containerW.value
-  const ch = containerH.value
-  if (!cw || !ch) return
-  const containW = Math.min(cw, ch * ratio)
-  const containH = containW / ratio
-  containBase.value = { w: containW, h: containH }
+async function toggleFocus() {
+  cancelPointer(); spaceHeld.value = false
+  const scroller = scrollContainerRef.value
+  if (!focused.value) {
+    normalView = { mediaId: currentMediaId.value, zoom: zoom.value, base: {...base.value}, left: scroller?.scrollLeft || 0, top: scroller?.scrollTop || 0, pageY: window.scrollY }
+    priorOverflow = document.body.style.overflow
+    const header = document.querySelector<HTMLElement>('.app-header')
+    priorHeaderInert = header?.inert || false
+    if (header) header.inert = true
+    document.body.style.overflow = 'hidden'
+    focused.value = true
+    zoomReset()
+    await nextTick()
+    size.value = { w: scroller?.clientWidth || 0, h: scroller?.clientHeight || 0 }
+    fit(); scroller?.scrollTo(0, 0)
+  } else {
+    focused.value = false; restorePage()
+    if (normalView?.mediaId === currentMediaId.value) {
+      zoom.value = normalView.zoom; base.value = {...normalView.base}
+    } else zoomReset()
+    await nextTick()
+    size.value = { w: scroller?.clientWidth || 0, h: scroller?.clientHeight || 0 }
+    if (zoom.value === 1) fit()
+    await nextTick()
+    scroller?.scrollTo(normalView?.left || 0, normalView?.top || 0)
+    window.scrollTo(0, normalView?.pageY || 0)
+  }
+  focusButton.value?.focus({preventScroll:true})
 }
-
-watch(selectedMediaId, async (newId) => {
-  containBase.value = null  // 素材切换时解锁
+function fit() {
+  const ratio = (selectedMedia.value?.width || 1600)/(selectedMedia.value?.height || 900)
+  const w = Math.max(1, Math.min(size.value.w-40, (size.value.h-40)*ratio))
+  base.value = {w,h:w/ratio}
+}
+function fitView() { cancelAnnotationGesture(); zoomReset(); fit(); scrollContainerRef.value?.scrollTo(0,0) }
+async function zoomAt(delta:number, point?:{x:number;y:number}) {
+  const el = stageRef.value, scroller = scrollContainerRef.value
+  if (!el || !scroller) return
+  const old = el.getBoundingClientRect(), vp = scroller.getBoundingClientRect()
+  const p = point || {x:vp.left+vp.width/2,y:vp.top+vp.height/2}, nx=(p.x-old.left)/old.width, ny=(p.y-old.top)/old.height
+  if(delta>0)zoomIn(delta);else zoomOut(-delta)
   await nextTick()
-  lockContainBase()        // 立即尝试锁定（此时容器可能已有尺寸）
-  await resetAnnotationViewForMedia(newId)
-  scrollContainerRef.value?.scrollTo({ top: 0, left: 0 })
-})
+  const now=el.getBoundingClientRect();scroller.scrollBy(now.left+nx*now.width-p.x,now.top+ny*now.height-p.y)
+}
+function wheel(e:WheelEvent) { if(e.ctrlKey||e.metaKey) { e.preventDefault();void zoomAt(e.deltaY<0?.15:-.15,{x:e.clientX,y:e.clientY}) } }
+function drawLoupe(e:PointerEvent) {
+  const stage=stageRef.value, media=selectedMedia.value
+  if(!stage||!media)return
+  const rect=stage.getBoundingClientRect(),nx=(e.clientX-rect.left)/rect.width,ny=(e.clientY-rect.top)/rect.height
+  if(nx<0||ny<0||nx>1||ny>1){mousePixel.value=null;return}
+  const w=media.width||1,h=media.height||1
+  mousePixel.value={x:Math.min(w-1,Math.floor(nx*w)),y:Math.min(h-1,Math.floor(ny*h))}
+  if(!magnifier.value||!loupe.value)return
+  const source=isVideo.value ? (exactFrameUrl.value && !isPlaying.value ? exactFrameImageRef.value : videoRef.value) : imageRef.value
+  const ctx=loupe.value.getContext('2d');if(!source||!ctx)return
+  ctx.fillStyle='#0d1726';ctx.fillRect(0,0,200,150)
+  try {ctx.drawImage(source,nx*w-25,ny*h-18.75,50,37.5,0,0,200,150)} catch { return }
+  ctx.strokeStyle='#ffd36d';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(92,75);ctx.lineTo(108,75);ctx.moveTo(100,67);ctx.lineTo(100,83);ctx.stroke()
+}
+function pointerDown(e:PointerEvent) {
+  if((spaceHeld.value||e.button===1)&&!editingBlocked.value){
+    e.preventDefault();const sc=scrollContainerRef.value!;pan={x:e.clientX,y:e.clientY,left:sc.scrollLeft,top:sc.scrollTop,id:e.pointerId};annotationHitRef.value?.setPointerCapture(e.pointerId);suppressClick=true;return
+  }
+  suppressClick=false
+  if(hiddenBoxes.value){hiddenBoxes.value=false;suppressClick=true;return}
+  pointerActive=true
+  onBboxDown(e)
+}
+function processMove() {
+  pointerRaf=0;const e=latestMove;if(!e)return
+  if(pan){scrollContainerRef.value?.scrollTo(pan.left-(e.clientX-pan.x),pan.top-(e.clientY-pan.y))}
+  else onBboxMove(e)
+  drawLoupe(e)
+}
+function pointerMove(e:PointerEvent) {latestMove=e;if(!pointerRaf)pointerRaf=requestAnimationFrame(processMove)}
+function pointerUp(e:PointerEvent) {
+  pointerActive=false
+  if(pointerRaf)cancelAnimationFrame(pointerRaf);pointerRaf=0
+  if(pan){pan=null;annotationHitRef.value?.releasePointerCapture(e.pointerId);return}
+  onBboxUp(e)
+}
+function cancelPointer(){if(pointerRaf)cancelAnimationFrame(pointerRaf);pointerRaf=0;pan=null;pointerActive=false;cancelAnnotationGesture()}
+function stageClick(e:MouseEvent){if(suppressClick){suppressClick=false;return}if(!hiddenBoxes.value)onStageClick(e)}
+async function jump(){frameInput.value=Math.max(0,Math.min(maxFrameIndex.value,Math.floor(Number(jumpFrame.value)||1)-1));await seekToInputFrame();jumpFrame.value=currentFrame.value+1}
+async function retrySave(){try{await persistWorkspaceState(currentMediaId.value,true)}catch{/* The store logs and exposes the failure. */}}
+function enhancement(preset:string){if(preset==='原图'){resetMediaFilter();inverted.value=false}else if(preset==='暗场'){brightness.value=150;contrast.value=125}else{brightness.value=100;contrast.value=160}}
+function keys(e:KeyboardEvent){
+  if(document.querySelector('[data-user-guide][open]'))return
 
-// ResizeObserver 只在 containBase 未锁定时更新，锁定后忽略后续尺寸变化
-watch([containerW, containerH], () => {
-  if (!containBase.value) lockContainBase()
+  if(e.isComposing||document.querySelector('[data-completion-dialog]'))return
+  if(help.value){if(e.key==='Escape'){help.value=false;e.preventDefault()}if(e.key==='Tab'){const nodes=Array.from(helpDialog.value?.querySelectorAll<HTMLElement>('button,input,[tabindex="0"]')||[]);if(nodes.length){e.preventDefault();const i=nodes.indexOf(document.activeElement as HTMLElement);nodes[(i+(e.shiftKey?-1:1)+nodes.length)%nodes.length]?.focus()}}return}
+  if((e.target as HTMLElement)?.closest('input,textarea,select,[contenteditable="true"]'))return
+  if(e.key==='Escape'){e.preventDefault();if(pointerActive||pan){cancelPointer();return}if(focused.value){void toggleFocus();return}cancelPointer();hiddenBoxes.value=false;clearSelection();return}
+  if(e.key.toLowerCase()==='f'&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.repeat){e.preventDefault();void toggleFocus();return}
+  if(isAiBusy.value||workspaceRestoring.value)return
+  if(e.key===' '){e.preventDefault();spaceHeld.value=true;return}
+  if((e.ctrlKey||e.metaKey)&&!e.altKey){if(e.key.toLowerCase()==='z'){e.preventDefault();e.shiftKey?redo():undo()}else if(e.key.toLowerCase()==='y'){e.preventDefault();redo()}return}
+  if(e.altKey){if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)){e.preventDefault();const step=e.shiftKey?10:1;nudgeSelected(e.key==='ArrowLeft'?-step:e.key==='ArrowRight'?step:0,e.key==='ArrowUp'?-step:e.key==='ArrowDown'?step:0)}return}
+  if(e.repeat)return
+  const key=e.key.toLowerCase()
+  if(key==='arrowleft'||key==='arrowright'){e.preventDefault();void seekByFrame((key==='arrowleft'?-1:1)*(e.shiftKey?10:1))}
+  else if(key==='delete'||key==='backspace'){if(selectedObjectId.value){e.preventDefault();removeObject(selectedObjectId.value)}}
+  else if(key==='v'||key==='p'||key==='b')selectTool(key==='v'?'select':key==='p'?'point':'bbox')
+  else if(key==='c')copyPreviousFrame()
+  else if(key==='h')hiddenBoxes.value=!hiddenBoxes.value
+  else if(key==='l')magnifier.value=!magnifier.value
+  else if(key==='k'){e.preventDefault();void togglePlayback()}
+  else if(key==='='||key==='+'){e.preventDefault();void zoomAt(.25)}
+  else if(key==='-'){e.preventDefault();void zoomAt(-.25)}
+  else if(key==='0')fitView()
+  else if(key==='?'){e.preventDefault();help.value=true}
+}
+function keyup(e:KeyboardEvent){if(e.key===' ')spaceHeld.value=false}
+function blur(){spaceHeld.value=false;cancelPointer()}
+function beforeUnload(e:BeforeUnloadEvent){if(saveState.value==='saving'||saveState.value==='error'){e.preventDefault();e.returnValue=''}}
+watch(help,async value=>{if(value){helpPriorFocus=document.activeElement as HTMLElement;await nextTick();helpDialog.value?.querySelector<HTMLElement>('button')?.focus()}else helpPriorFocus?.focus()})
+watch(currentFrame,value=>{jumpFrame.value=value+1;mousePixel.value=null})
+watch(selectedMediaId,async id=>{cancelPointer();objectSearch.value='';mousePixel.value=null;fit();await nextTick();await resetAnnotationViewForMedia(id);scrollContainerRef.value?.scrollTo(0,0)})
+watch(()=>[selectedMedia.value?.width,selectedMedia.value?.height],fit)
+onMounted(()=>{
+  observer=new ResizeObserver(()=>{const scroller=scrollContainerRef.value;if(scroller)size.value={w:scroller.clientWidth,h:scroller.clientHeight};if(zoom.value===1)fit()})
+  if(scrollContainerRef.value)observer.observe(scrollContainerRef.value)
+  window.addEventListener('keydown',keys);window.addEventListener('keyup',keyup);window.addEventListener('blur',blur);window.addEventListener('beforeunload',beforeUnload)
+  removeGuard=addLeaveGuard(async()=>{if(isAiBusy.value)return false;cancelPointer();pausePlayback();try{await persistWorkspaceState(currentMediaId.value,true);return true}catch{return false}})
+  if(selectedMedia.value)void resetAnnotationViewForMedia(selectedMediaId.value)
 })
+onUnmounted(()=>{if(focused.value)restorePage();observer?.disconnect();cancelPointer();pausePlayback();removeGuard?.();window.removeEventListener('keydown',keys);window.removeEventListener('keyup',keyup);window.removeEventListener('blur',blur);window.removeEventListener('beforeunload',beforeUnload)})
 </script>
 <template>
-      <section  class="flex min-h-0 flex-1 flex-col gap-4">
-        <div class="flex flex-wrap items-center justify-between gap-3">
-          <div class="flex items-center gap-4">
-            <h2 class="text-lg font-semibold">人工标注图片 / 视频</h2>
-            <div class="flex items-center gap-2 text-[11px]">
-              <span class="flex items-center gap-1 rounded-full px-2.5 py-1 font-medium" :class="currentObjects.length ? 'bg-emerald-500/15 text-emerald-300' : 'bg-slate-800 text-slate-400'">① 标注</span>
-              <span class="text-slate-600">→</span>
-              <span class="flex items-center gap-1 rounded-full px-2.5 py-1 font-medium" :class="statusMessage.includes('已写入数据库') ? 'bg-emerald-500/15 text-emerald-300' : 'bg-slate-800 text-slate-400'">② 自动入库</span>
-              <span class="text-slate-600">→</span>
-              <span class="flex items-center gap-1 rounded-full px-2.5 py-1 font-medium" :class="isAiBusy ? 'bg-indigo-500/15 text-indigo-300' : 'bg-slate-800 text-slate-400'">③ SAM3 持续追踪</span>
+  <section class="annotation-page" :class="{focused}" data-testid="annotation-page">
+    <input ref="fileInputRef" type="file" accept="image/*" multiple hidden @change="handleFiles(($event.target as HTMLInputElement).files,'image')" />
+    <input ref="videoInputRef" type="file" accept="video/*" multiple hidden @change="handleFiles(($event.target as HTMLInputElement).files,'video')" />
+    <input ref="annotationFolderInputRef" type="file" webkitdirectory directory multiple hidden @change="handleAnnotationFolderFiles(($event.target as HTMLInputElement).files)" />
+    <header v-if="!focused" class="annotation-heading"><div><span class="eyebrow">ANNOTATION STUDIO</span><h2>人工标注 <span>让每一帧都更准确</span></h2></div><div class="heading-actions"><span class="save-indicator" :class="saveState" role="status"><i />{{ saveLabel }}</span><button class="quiet-button" @click="help=true"><AppIcon name="help" :size="16" />快捷键</button><SendToReview /></div></header>
+    <div v-if="saveError" class="error-banner" role="alert">{{ saveError }} <button class="quiet-button" @click="retrySave">重试保存</button></div>
+    <div class="annotation-layout">
+      <aside class="panel asset-panel"><div class="panel-title"><span>素材库</span><span class="badge">{{ mediaAssets.length }}</span></div>
+        <div class="asset-actions"><button class="btn-primary" :disabled="isAiBusy" @click="openFilePicker('video')"><AppIcon name="upload" :size="15" />导入视频</button><button class="btn-secondary" :disabled="isAiBusy" @click="openFilePicker('image')">图片</button></div>
+        <div class="asset-search"><input v-model="search" class="input" placeholder="查找素材…" aria-label="查找素材" /></div>
+        <div class="asset-list"><div v-for="media in visibleMedia" :key="media.id" class="asset-card" :class="{selected:selectedMediaId===media.id}" role="button" :tabindex="isAiBusy?-1:0" :aria-disabled="isAiBusy" @click="!isAiBusy&&(selectedMediaId=media.id)" @keydown.enter="!isAiBusy&&(selectedMediaId=media.id)" @keydown.space.prevent.stop="!isAiBusy&&(selectedMediaId=media.id)">
+          <span class="asset-type">{{ media.type==='video'?'VID':'IMG' }}</span><div><strong :title="media.name">{{ media.name }}</strong><small>{{ media.type==='video'?`${media.frameCount || '—'} 帧 · ${media.fps?.toFixed(1) || 30} fps`:`${media.width || '—'} × ${media.height || '—'}` }}</small></div><button class="asset-close icon-button" :disabled="isAiBusy" title="关闭素材（不会删除后端文件和标注）" aria-label="关闭素材" @click.stop="closeMedia(media.id)"><AppIcon name="close" :size="13" /></button>
+        </div><p v-if="!visibleMedia.length" class="sidebar-empty">{{ search?'没有匹配素材':'导入视频或图片开始标注' }}</p></div>
+        <button class="asset-import quiet-button" :disabled="isAiBusy" @click="openAnnotationFolderPicker"><AppIcon name="folder" :size="16" />加载标注</button>
+      </aside>
+      <section class="panel annotation-workbench">
+        <div class="workbench-title"><div><strong :title="selectedMedia?.name">{{ selectedMedia?.name || '开始一个新的标注' }}</strong><span>{{ selectedMedia?.width || '—' }} × {{ selectedMedia?.height || '—' }}<template v-if="isVideo"> · {{ videoFps.toFixed(1) }} fps</template></span></div><div class="workbench-actions"><template v-if="focused"><span class="save-indicator" :class="saveState" role="status"><i />{{ saveLabel }}</span><button class="quiet-button" :disabled="editingBlocked||!isVideo||!currentObjects.some(o=>o.bbox)" @click="runAiTrack">{{ isAiBusy?'正在追踪…':'AI Tracking' }}</button><button class="quiet-button" @click="help=true" aria-label="快捷键"><AppIcon name="help" :size="16" /></button><SendToReview /></template><button ref="focusButton" class="quiet-button" :aria-pressed="focused" :title="focused?'退出专注模式 (F / Esc)':'专注模式 (F)'" @click="toggleFocus"><AppIcon name="fit" :size="16" />{{ focused?'退出专注':'专注' }}<kbd v-if="focused">Esc</kbd></button></div></div>
+        <div class="annotation-toolbar" aria-label="标注工具">
+          <div class="tool-group"><button v-for="tool in ([['select','cursor','选择','V'],['bbox','box','画框','B'],['point','point','标点','P']] as const)" :key="tool[0]" class="tool-btn" :class="{active:activeTool===tool[0]}" :aria-pressed="activeTool===tool[0]" :disabled="editingBlocked" :title="`${tool[2]} (${tool[3]})`" @click="selectTool(tool[0])"><AppIcon :name="tool[1]" :size="16" />{{ tool[2] }}<kbd>{{ tool[3] }}</kbd></button></div>
+          <div class="tool-group"><button class="icon-button" title="撤销本帧操作 (Ctrl/⌘ Z)" aria-label="撤销本帧操作" :disabled="editingBlocked||!canUndo" @click="undo"><AppIcon name="undo" :size="17" /></button><button class="icon-button" title="重做本帧操作 (Ctrl/⌘ Shift Z)" aria-label="重做本帧操作" :disabled="editingBlocked||!canRedo" @click="redo"><AppIcon name="redo" :size="17" /></button></div>
+          <div class="tool-group display-tools"><button class="icon-button" :class="{active:magnifier}" :aria-pressed="magnifier" title="局部放大镜 (L)" aria-label="局部放大镜" @click="magnifier=!magnifier"><AppIcon name="zoom" /></button><button class="icon-button" :class="{active:hiddenBoxes}" :aria-pressed="hiddenBoxes" title="显示或隐藏标注 (H)" aria-label="显示或隐藏标注" @click="hiddenBoxes=!hiddenBoxes"><AppIcon name="eye" /></button><button class="quiet-button" :class="{active:enhancing}" :aria-expanded="enhancing" @click="enhancing=!enhancing"><AppIcon name="sun" :size="17" />画面增强</button></div>
+        </div>
+        <div v-if="enhancing" class="enhancement-bar"><button v-for="p in ['原图','暗场','低对比']" :key="p" class="quiet-button" @click="enhancement(p)">{{ p }}</button><label>亮度 <input v-model.number="brightness" aria-label="亮度" type="range" min="50" max="200" /></label><label>对比 <input v-model.number="contrast" aria-label="对比度" type="range" min="50" max="220" /></label><label><input v-model="inverted" type="checkbox" />反相</label><span>仅调整预览</span></div>
+        <div class="annotation-canvas">
+          <div ref="scrollContainerRef" class="canvas-scroll" @wheel="wheel">
+            <div ref="stageRef" class="annotation-stage" :style="{width:`${stageSize.w}px`,height:`${stageSize.h}px`}">
+              <template v-if="selectedMedia"><template v-if="isVideo">
+                <video :key="selectedMedia.id" ref="videoRef" :src="selectedMedia.url" class="stage-media" :class="{'hidden-video':videoPlaybackFallback||(exactFrameUrl&&!isPlaying)}" :style="{filter}" preload="metadata" playsinline @loadedmetadata="onVideoLoaded" @timeupdate="onVideoTimeUpdate" @ended="onVideoEnded" @error="onVideoError" />
+                <img v-if="exactFrameUrl&&(!isPlaying||videoPlaybackFallback)" ref="exactFrameImageRef" :src="exactFrameUrl" :alt="`${selectedMedia.name} 第 ${currentFrame+1} 帧`" class="stage-media exact-media" :style="{filter}" />
+              </template><img v-else :key="selectedMedia.id" ref="imageRef" :src="selectedMedia.url" :alt="selectedMedia.name" class="stage-media" :style="{filter}" @load="onImageLoaded" /></template>
+              <div v-else class="canvas-empty"><AppIcon name="upload" :size="36" /><h3>把注意力留给画面</h3><p>导入一段视频，开始精细标注。</p><button class="btn-primary" @click="openFilePicker('video')">导入视频</button></div>
+              <div ref="annotationHitRef" data-testid="annotation-hit" class="annotation-hit" :class="{panning:spaceHeld||pan,selecting:activeTool==='select',locked:editingBlocked}" @click="stageClick" @pointerdown="pointerDown" @pointermove="pointerMove" @pointerup="pointerUp" @pointercancel="cancelPointer" @lostpointercapture="cancelPointer" @pointerleave="mousePixel=null" />
+              <AnnotationOverlay :objects="displayObjects" :selected="selectedObjectId" :width="stageSize.w" :height="stageSize.h" :draft="tempBbox" :labels="labels" :hidden="hiddenBoxes || (!!frameError && !exactFrameUrl)" />
             </div>
           </div>
-          <div class="flex gap-2">
-            <input ref="fileInputRef" type="file" accept="image/*" multiple class="hidden" @change="handleFiles(($event.target as HTMLInputElement).files, 'image')" />
-            <input ref="videoInputRef" type="file" accept="video/*" multiple class="hidden" @change="handleFiles(($event.target as HTMLInputElement).files, 'video')" />
-            <input ref="annotationFolderInputRef" type="file" accept="video/*,.avi,.mov,.mkv,.webm,.m4v,.mpg,.mpeg,.wmv,.flv,.ts,.m2ts,.mts,.3gp,.ogv,.asf,application/json,.json" webkitdirectory directory multiple class="hidden" @change="handleAnnotationFolderFiles(($event.target as HTMLInputElement).files)" />
-            <button class="btn-secondary" @click="openFilePicker('image')">上传图片</button>
-            <button class="btn-secondary" @click="openFilePicker('video')">上传视频</button>
-          </div>
+          <div v-if="exactFrameLoading||workspaceRestoring||isAiBusy" class="canvas-status">{{ isAiBusy?'AI 正在追踪 · 标注暂时锁定':workspaceRestoring?'正在恢复工作区…':'正在读取帧…' }}</div>
+          <div v-if="frameError" class="canvas-error" role="alert">{{ frameError }}<button class="btn-secondary" @click="retryExactFrame">重试读取</button></div>
+          <div v-if="magnifier" class="loupe"><canvas ref="loupe" width="200" height="150" :style="{filter}" /><span>4× 原图局部 · {{ mousePixel?`${mousePixel.x}, ${mousePixel.y}`:'移动指针查看' }}</span></div>
+          <div class="canvas-bottom"><span class="canvas-hint">{{ hiddenBoxes?'标注已隐藏 · H 恢复':spaceHeld?'拖动画面':activeTool==='bbox'?'拖拽画框 · 空格拖动画面':activeTool==='select'?'拖动移动 · 角点缩放':'单击添加标注点' }}</span><div class="canvas-zoom"><button aria-label="缩小画面" @click="zoomAt(-.25)">−</button><button title="适应画面 (0)" @click="fitView">{{ Math.round(zoom*100) }}%</button><button aria-label="放大画面" @click="zoomAt(.25)">＋</button><button aria-label="适应画面" @click="fitView"><AppIcon name="fit" :size="15" /></button></div></div>
         </div>
-
-        <div class="grid min-h-0 flex-1 grid-cols-[260px_minmax(0,1fr)_360px] gap-4">
-          <!-- 左侧素材 -->
-          <aside class="panel min-h-0 overflow-hidden">
-            <div class="panel-title"><span>素材</span><span class="badge">{{ mediaAssets.length }}</span></div>
-            <div class="h-[calc(100%-49px)] space-y-2 overflow-y-auto p-3">
-              <div
-                v-for="media in mediaAssets"
-                :key="media.id"
-                class="group flex w-full items-center gap-3 rounded-xl border p-3 text-left transition cursor-pointer"
-                :class="selectedMediaId === media.id ? 'border-indigo-400 bg-indigo-500/10' : 'border-slate-800 bg-slate-900/50 hover:border-slate-700'"
-                role="button"
-                tabindex="0"
-                @click="selectedMediaId = media.id"
-                @keydown.enter="selectedMediaId = media.id"
-                @keydown.space.prevent="selectedMediaId = media.id"
-              >
-                <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-slate-800 text-[10px] font-bold text-indigo-300">{{ media.type === 'video' ? 'VID' : 'IMG' }}</div>
-                <div class="min-w-0 flex-1">
-                  <div class="truncate text-xs font-medium">{{ media.name }}</div>
-                  <div class="mt-1 text-[10px] text-slate-500">
-                    {{ media.type === 'video' ? `${formatTime(media.duration || 0)} · ${media.fps || 30} FPS` : `${media.width || '-'} × ${media.height || '-'}` }}
-                  </div>
-                </div>
-                <button
-                  class="shrink-0 rounded p-1 text-slate-500 transition hover:bg-slate-700 hover:text-slate-200"
-                  title="关闭素材（不会删除后端文件和标注）"
-                  aria-label="关闭素材"
-                  @click.stop="closeMedia(media.id)"
-                >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
-                </button>
-              </div>
-            </div>
-          </aside>
-
-          <!-- 中央工作区 -->
-          <section class="panel flex min-h-0 flex-col overflow-hidden">
-            <div class="flex shrink-0 items-center justify-between border-b border-slate-800 px-4 py-3">
-              <div class="min-w-0">
-                <h3 class="truncate text-sm font-semibold">{{ selectedMedia?.name || '未选择素材' }}</h3>
-                <p class="mt-1 text-[10px] text-slate-500">
-                  {{ isVideo ? `视频第 ${currentFrame} 帧标注模式` : '图片标注模式' }}
-                  <span v-if="isVideo" class="ml-2 text-indigo-300">Frame {{ currentFrame }} · {{ formatTime(currentTime) }}</span>
-                </p>
-              </div>
-              <div class="flex gap-2">
-                <button class="tool-btn" :class="activeTool === 'select' ? 'active' : ''" :disabled="isAiBusy" @click="selectTool('select')">选择框 <kbd class="ml-1 text-[9px] opacity-50">V</kbd></button>
-                <button class="tool-btn" :class="activeTool === 'point' ? 'active' : ''" :disabled="isAiBusy" @click="selectTool('point')">点标注 <kbd class="ml-1 text-[9px] opacity-50">P</kbd></button>
-                <button class="tool-btn" :class="activeTool === 'bbox' ? 'active' : ''" :disabled="isAiBusy" @click="selectTool('bbox')">框标注 <kbd class="ml-1 text-[9px] opacity-50">B</kbd></button>
-              </div>
-            </div>
-
-            <div class="relative min-h-0 flex-1">
-              <div
-                ref="scrollContainerRef"
-                class="absolute inset-0 flex overflow-auto bg-black p-5"
-                @wheel="(e) => { if (e.ctrlKey || e.metaKey) { e.preventDefault(); if (e.deltaY < 0) zoomIn(0.1); else zoomOut(0.1); } }"
-              >
-                <div
-                  class="relative m-auto shrink-0"
-                  :style="{ width: `${stageSize.w}px`, height: `${stageSize.h}px` }"
-                >
-                    <template v-if="selectedMedia">
-                    <template v-if="isVideo">
-                      <!-- 播放时使用 video；暂停/逐帧标注时使用后端按 frame_index 返回的精确原始帧。 -->
-                      <video
-                        :key="selectedMedia.id"
-                        ref="videoRef"
-                        :src="selectedMedia.url"
-                        class="block h-full w-full select-none object-contain"
-                        :class="videoPlaybackFallback || (exactFrameUrl && !isPlaying) ? 'invisible absolute inset-0' : ''"
-                        :style="{ filter: mediaFilterStyle }"
-                        preload="metadata"
-                        playsinline
-                        @loadedmetadata="onVideoLoaded"
-                        @timeupdate="onVideoTimeUpdate"
-                        @ended="onVideoEnded"
-                        @error="onVideoError"
-                      />
-                      <img
-                        v-if="exactFrameUrl && (!isPlaying || videoPlaybackFallback)"
-                        ref="exactFrameImageRef"
-                        :src="exactFrameUrl"
-                        :alt="`${selectedMedia.name} frame ${currentFrame}`"
-                        class="absolute inset-0 block h-full w-full select-none object-contain"
-                        :style="{ filter: mediaFilterStyle }"
-                      />
-                      <div
-                        v-if="exactFrameLoading && !isPlaying"
-                        class="pointer-events-none absolute inset-0 z-35 flex items-center justify-center bg-black/20"
-                      >
-                        <div class="rounded-lg border border-slate-700 bg-slate-950/80 px-3 py-2 text-xs text-slate-300">
-                          正在读取第 {{ currentFrame }} 帧…
-                        </div>
-                      </div>
-                    </template>
-                    <img
-                      v-else
-                      :key="selectedMedia.id"
-                      ref="imageRef"
-                      :src="selectedMedia.url"
-                      :alt="selectedMedia.name"
-                      class="block h-full w-full select-none object-contain"
-                      :style="{ filter: mediaFilterStyle }"
-                      @load="onImageLoaded"
-                    />
-                    </template>
-                    <div v-else class="flex h-full w-full items-center justify-center text-slate-500 text-sm">请从左侧选择或上传素材</div>
-
-                    <div
-                      ref="annotationHitRef"
-                      :class="['absolute', 'inset-0', 'z-20', 'select-none', activeTool === 'select' ? 'cursor-move' : 'cursor-crosshair']"
-                      style="touch-action: none;"
-                      @click="onStageClick"
-                      @pointerdown="onBboxDown"
-                      @pointermove="onBboxMove"
-                      @pointerup="onBboxUp"
-                      @pointercancel="onBboxUp"
-                      @mousemove="onMouseMoveStage"
-                      @mouseleave="mousePixel = null"
-                    ></div>
-
-                    <svg viewBox="0 0 100 100" preserveAspectRatio="none" class="pointer-events-none absolute inset-0 z-30 h-full w-full">
-                      <g v-for="obj in currentObjects" :key="obj.id">
-                        <rect
-                          v-if="obj.bbox"
-                          :x="obj.bbox.x" :y="obj.bbox.y" :width="obj.bbox.width" :height="obj.bbox.height"
-                          :fill="selectedObjectId === obj.id ? 'rgba(251,191,36,.20)' : 'rgba(99,102,241,.08)'"
-                          :stroke="objColor(obj.objectId ?? 0, selectedObjectId === obj.id)"
-                          :stroke-width="selectedObjectId === obj.id ? 1.0 : 0.4"
-                          :stroke-dasharray="selectedObjectId === obj.id ? '2 1' : ''"
-                          vector-effect="non-scaling-stroke"
-                        />
-                        <circle v-if="obj.point && !obj.bbox" :cx="obj.point.x" :cy="obj.point.y" r="1" :fill="objColor(obj.objectId ?? 0, selectedObjectId === obj.id)" />
-                        <text v-if="obj.point && !obj.bbox" :x="obj.point.x + 1.5" :y="obj.point.y - 1.5" :fill="objColor(obj.objectId ?? 0, false)" font-size="2.3" font-weight="600">{{ obj.name }}</text>
-                        <text v-if="obj.bbox" :x="obj.bbox.x" :y="Math.max(2, obj.bbox.y - 1)" :fill="objColor(obj.objectId ?? 0, false)" font-size="2.2" font-weight="600">{{ obj.name }}</text>
-                        <!-- 选中时显示四角拖拽手柄 -->
-                        <template v-if="selectedObjectId === obj.id && obj.bbox">
-                          <rect :x="obj.bbox.x - 0.8" :y="obj.bbox.y - 0.8" width="1.6" height="1.6" fill="#fbbf24" stroke="#000" :stroke-width="0.2" vector-effect="non-scaling-stroke" />
-                          <rect :x="obj.bbox.x + obj.bbox.width - 0.8" :y="obj.bbox.y - 0.8" width="1.6" height="1.6" fill="#fbbf24" stroke="#000" :stroke-width="0.2" vector-effect="non-scaling-stroke" />
-                          <rect :x="obj.bbox.x - 0.8" :y="obj.bbox.y + obj.bbox.height - 0.8" width="1.6" height="1.6" fill="#fbbf24" stroke="#000" :stroke-width="0.2" vector-effect="non-scaling-stroke" />
-                          <rect :x="obj.bbox.x + obj.bbox.width - 0.8" :y="obj.bbox.y + obj.bbox.height - 0.8" width="1.6" height="1.6" fill="#fbbf24" stroke="#000" :stroke-width="0.2" vector-effect="non-scaling-stroke" />
-                        </template>
-                      </g>
-                      <rect v-if="tempBbox" :x="tempBbox.x" :y="tempBbox.y" :width="tempBbox.width" :height="tempBbox.height" fill="rgba(99,102,241,.08)" stroke="#a5b4fc" stroke-width="0.4" stroke-dasharray="1 0.7" />
-                    </svg>
-                </div>
-              </div>
-
-              <div v-if="isAiBusy" class="pointer-events-none absolute right-8 top-8 z-40 rounded-lg border border-indigo-400/30 bg-slate-950/85 px-3 py-2 text-[11px] text-indigo-200 backdrop-blur">
-                SAM3 正在运行；人工标注已暂时锁定
-              </div>
-
-              <!-- 鼠标坐标 -->
-              <div v-if="mousePixel" class="pointer-events-none absolute left-8 top-8 z-40 rounded-lg border border-slate-700 bg-slate-950/85 px-3 py-1.5 text-[11px] text-slate-300 backdrop-blur">
-                x: {{ mousePixel.x }}, y: {{ mousePixel.y }}
-              </div>
-
-              <!-- 亮度/对比度 -->
-              <div class="absolute left-8 bottom-8 z-40 flex items-center gap-3 rounded-lg border border-slate-700 bg-slate-950/85 px-3 py-2 text-[11px] text-slate-300 backdrop-blur">
-                <span class="text-slate-400">亮度</span>
-                <input type="range" min="50" max="200" v-model.number="brightness" class="w-20 accent-indigo-400" />
-                <span class="text-slate-400">对比度</span>
-                <input type="range" min="50" max="200" v-model.number="contrast" class="w-20 accent-indigo-400" />
-                <button class="rounded px-1.5 py-0.5 text-[10px] text-slate-400 hover:bg-slate-700 hover:text-white" @click="resetMediaFilter">重置</button>
-              </div>
-
-              <div class="absolute bottom-8 right-8 z-40 flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-950/85 px-2 py-1 text-[11px] text-slate-200 backdrop-blur">
-                <button class="rounded px-2 py-1 hover:bg-slate-700" @click="zoomOut()" title="缩小">−</button>
-                <button class="min-w-[48px] px-2 py-1 text-center hover:bg-slate-700" @click="zoomReset" title="重置">{{ Math.round(zoom * 100) }}%</button>
-                <button class="rounded px-2 py-1 hover:bg-slate-700" @click="zoomIn()" title="放大">+</button>
-              </div>
-            </div>
-
-            <div v-if="anomalyPanelVisible && anomalyObjectIds.length > 0" class="relative shrink-0 border-t border-amber-700 bg-amber-950/80 px-4 py-3 text-[11px] text-amber-100">
-              <button class="absolute right-3 top-2 rounded px-2 py-1 text-amber-300 hover:bg-amber-800/60 hover:text-white" title="关闭异常提示（不会删除异常数据或时间轴标记）" @click="closeAnomalyPanel">✕</button>
-              <div class="pr-8 font-semibold text-amber-300">⚠️ Tracking 已暂停在第 {{ currentFrame }} 帧，请人工确认后再继续。</div>
-              <div class="mt-1 text-amber-100/80">如果检查后确认这些框没有问题，可直接再次点击 AI Tracking；本帧异常框会被确认为新的人工基准。</div>
-              <div class="mt-2 grid gap-2 md:grid-cols-2" v-if="pausedAnomalies.length">
-                <div v-for="item in pausedAnomalies" :key="item.objectId" class="rounded border border-amber-700/70 bg-slate-950/45 px-3 py-2">
-                  <div class="font-medium text-amber-200">{{ item.displayName }}：{{ item.title }}</div>
-                  <div class="mt-1 text-slate-200">{{ item.summary }}</div>
-                  <div v-if="item.metrics.length" class="mt-1 text-amber-300">检测值：{{ item.metrics.join(' · ') }}</div>
-                  <div v-if="item.baselineFrame != null" class="mt-1 text-slate-300">最近人工基准：第 {{ item.baselineFrame }} 帧</div>
-                  <div v-if="item.reviewRange" class="mt-1 text-slate-300">建议检查范围：{{ item.reviewRange }}</div>
-                  <div v-if="item.reviewNotice" class="mt-1 font-medium text-amber-200">{{ item.reviewNotice }}</div>
-                  <div class="mt-1 text-emerald-200">处理建议：{{ item.suggestion }}</div>
-                </div>
-              </div>
-              <div v-else class="mt-1">检测到追踪异常。请检查/修正这一帧的标注后，再点击 AI Tracking 继续。</div>
-            </div>
-
-            <div v-if="isVideo" class="shrink-0 border-t border-slate-800 bg-slate-950/80 px-4 py-3">
-              <div class="flex flex-wrap items-center gap-3">
-                <span class="text-[11px] font-medium text-slate-300">视频进度</span>
-                <button class="video-btn primary" @click="togglePlayback">{{ isPlaying ? '暂停' : '播放' }}</button>
-                <span class="text-[10px] text-slate-400">当前第 {{ currentFrame }} 帧 / {{ maxFrameIndex }} 帧</span>
-                <span class="text-[10px] text-emerald-300">已标注 {{ annotatedFrameCount }} / {{ maxFrameIndex + 1 }} 帧</span>
-                <div class="ml-auto flex items-center gap-2">
-                  <button class="btn-secondary" :disabled="isAiBusy || currentFrame === 0" @click="copyPreviousFrame" title="复制上一帧标注">复制上一帧</button>
-                  <span class="text-[10px] text-slate-400">跳转帧</span>
-                  <input v-model.number="frameInput" type="number" min="0" :max="maxFrameIndex" class="input w-24 text-center" :disabled="isAiBusy" @keyup.enter="seekToInputFrame" />
-                  <button class="btn-secondary" :disabled="isAiBusy" @click="seekToInputFrame">跳转</button>
-                </div>
-              </div>
-              <div class="mt-2 flex items-center gap-3 text-[11px] text-slate-400">
-                <span class="w-20">{{ formatTime(currentTime) }}</span>
-                <div class="relative h-5 flex-1 cursor-pointer" @click="onTimelineClick">
-                  <div class="absolute inset-y-1.5 left-0 right-0 rounded-full bg-slate-800"></div>
-                  <div class="absolute inset-y-1.5 left-0 rounded-full bg-indigo-500" :style="{ width: `${videoDuration ? (currentTime / videoDuration) * 100 : 0}%` }"></div>
-                  <!-- 已标注帧的标记点 -->
-                  <div
-                    v-for="f in annotatedFrameMarkers"
-                    :key="f"
-                    class="absolute top-1/2 h-2 w-0.5 -translate-y-1/2 rounded-full bg-emerald-400"
-                    :style="{ left: `${maxFrameIndex ? (f / maxFrameIndex) * 100 : 0}%` }"
-                  ></div>
-                  <!-- 异常帧标记 -->
-                  <div
-                    v-for="(af, i) in anomalyFrames"
-                    :key="'anom-' + i"
-                    class="absolute top-0 h-5 w-1 -translate-x-1/2 rounded-full"
-                    :class="af.level === 'anomaly' ? 'bg-red-500' : af.level === 'disappeared' ? 'bg-purple-500' : 'bg-amber-500'"
-                    :style="{ left: `${maxFrameIndex ? (af.frame_index / maxFrameIndex) * 100 : 0}%` }"
-                    :title="`frame ${af.frame_index}: ${af.reasons.join(', ')}`"
-                  ></div>
-                  <div class="absolute top-0 h-5 w-1 -translate-x-1/2 rounded-full bg-white shadow" :style="{ left: `${videoDuration ? (currentTime / videoDuration) * 100 : 0}%` }"></div>
-                </div>
-                <span class="w-20 text-right">{{ formatTime(videoDuration) }}</span>
-              </div>
-            </div>
-
-            <div class="flex shrink-0 items-center justify-between border-t border-slate-800 px-4 py-3">
-              <div class="text-[11px] text-slate-500">
-                当前工具：<span class="text-indigo-300">{{ activeTool === 'select' ? '选择框' : activeTool === 'point' ? '点标注' : '框标注' }}</span>
-                <span class="mx-2">·</span>{{ statusMessage }}
-                <span class="ml-3 text-slate-600">快捷键：<kbd>←/→</kbd>切帧 <kbd>Del</kbd>删除 <kbd>V/P/B</kbd>选择/点/框 <kbd>Ctrl+Z</kbd>撤销 <kbd>Ctrl+Y</kbd>重做 <kbd>C</kbd>复制上一帧 <kbd>Esc</kbd>取消</span>
-              </div>
-              <div class="flex gap-2">
-                <button class="btn-secondary" @click="clearSelection">取消选择</button>
-                <button class="btn-secondary" :disabled="isAiBusy || !annotatedFrameCount" @click="exportDialogOpen = true">导出训练数据集</button>
-                <button class="btn-secondary" :disabled="isAiBusy" @click="openAnnotationFolderPicker">加载标注</button>
-              </div>
-            </div>
-          </section>
-
-          <!-- 右侧 -->
-          <aside class="flex min-h-0 flex-col gap-4">
-            <section class="panel shrink-0 p-4">
-              <div class="mb-3">
-                <h3 class="text-sm font-semibold">对象名称</h3>
-                <p class="mt-1 text-[10px] text-slate-500">新建对象时使用；对象列表名称来自这里。</p>
-              </div>
-              <div class="flex gap-2">
-                <input v-model="objectNameInput" class="input flex-1" placeholder="例如：rare sperm A" />
-                <button v-if="selectedObjectId" class="btn-secondary shrink-0" :disabled="isAiBusy" @click="renameObject">重命名</button>
-              </div>
-            </section>
-
-            <section class="panel shrink-0 p-4">
-              <div class="mb-3">
-                <h3 class="text-sm font-semibold">AI 辅助</h3>
-                <p class="mt-1 text-[10px] leading-4 text-slate-500">当前流程：①当前帧人工标注自动入库 → ②生成 seed JSON → ③SAM3 持续向后追踪；遇到异常立即暂停，否则到单轮上限或视频末尾。</p>
-              </div>
-              <button class="btn-secondary w-full" :disabled="isAiBusy || !isVideo || !currentObjects.some((o) => o.bbox)" @click="runAiTrack">AI Tracking</button>
-              <p v-if="isVideo" class="mt-2 text-[10px] text-amber-300/80">点击 AI Tracking 会保存当前人工标注并生成 seed JSON，然后持续追踪；完成后定位到实际最后处理帧，可检查后继续。</p>
-            </section>
-
-            <section class="panel flex min-h-0 flex-1 flex-col overflow-hidden">
-              <div class="panel-title"><span>对象列表</span><span class="badge">{{ currentObjects.length }}</span></div>
-              <div v-if="currentObjects.length" class="min-h-0 flex-1 overflow-y-auto p-3">
-                <template v-if="currentObjects.length > 6">
-                  <div class="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-                    <label class="mb-2 block text-[10px] font-medium text-slate-500">对象快速选择（共 {{ currentObjects.length }} 个）</label>
-                    <select v-model="selectedObjectId" class="input w-full" @change="onObjectDropdownChange">
-                      <option v-for="obj in currentObjects" :key="obj.id" :value="obj.id">{{ obj.name }} · {{ obj.source === 'ai' ? 'AI' : '人工' }}</option>
-                    </select>
-                  </div>
-                  <div v-if="selectedObject" class="mt-3 rounded-xl border border-amber-400/40 bg-amber-400/5 p-3">
-                    <div class="flex items-start justify-between gap-2">
-                      <div class="min-w-0">
-                        <div class="truncate text-xs font-semibold">{{ selectedObject.name }}</div>
-                        <div class="mt-1 text-[10px] text-slate-500">
-                          {{ selectedObject.source === 'ai' ? 'AI 标注' : '人工标注' }}
-                          <span v-if="selectedObject.confidence"> · {{ Math.round(selectedObject.confidence * 100) }}%</span>
-                          <span v-if="isVideo"> · 第 {{ currentFrame }} 帧</span>
-                        </div>
-                      </div>
-                      <button class="rounded px-1.5 py-0.5 text-[10px] text-slate-500 transition hover:bg-red-500/10 hover:text-red-300" @click="removeObject(selectedObject.id)">删除</button>
-                    </div>
-                  </div>
-                </template>
-                <div v-else class="space-y-2">
-                  <div
-                    v-for="obj in currentObjects"
-                    :key="obj.id"
-                    class="group cursor-pointer rounded-xl border p-3 transition"
-                    :class="selectedObjectId === obj.id ? 'border-amber-400 bg-amber-400/10' : 'border-slate-800 bg-slate-900/50 hover:border-slate-700'"
-                    @click="selectObject(obj.id)"
-                  >
-                    <div class="flex items-start justify-between gap-2">
-                      <div class="min-w-0">
-                        <div class="truncate text-xs font-semibold">{{ obj.name }}</div>
-                        <div class="mt-1 text-[10px] text-slate-500">
-                          {{ obj.source === 'ai' ? 'AI 标注' : '人工标注' }}
-                          <span v-if="obj.confidence"> · {{ Math.round(obj.confidence * 100) }}%</span>
-                          <span v-if="isVideo"> · 第 {{ currentFrame }} 帧</span>
-                        </div>
-                      </div>
-                      <button class="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-slate-500 transition hover:bg-red-500/10 hover:text-red-300" :disabled="isAiBusy" @click.stop="removeObject(obj.id)">删除</button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div v-else class="flex flex-1 items-center justify-center p-8 text-center text-xs text-slate-600">当前{{ isVideo ? `第 ${currentFrame} 帧` : '图片' }}暂无标注</div>
-            </section>
-          </aside>
+        <div v-if="anomalyPanelVisible && anomalyObjectIds.length" class="tracking-anomaly"><div><strong>追踪暂停 · 请检查第 {{ currentFrame+1 }} 帧</strong><button class="quiet-button" @click="closeAnomalyPanel">收起</button></div><details><summary>{{ pausedAnomalies.length }} 个异常提示 · 查看详情</summary><p>确认这些框没有问题后可继续 AI Tracking；本帧异常框会被确认为新的人工基准。</p><div v-for="item in pausedAnomalies" :key="item.objectId"><b>{{ item.displayName }} · {{ item.title }}</b><p>{{ item.summary }} {{ item.metrics.join(' · ') }}</p><p v-if="item.baselineFrame!=null">最近人工基准：第 {{ item.baselineFrame+1 }} 帧</p><p v-if="item.reviewRange">建议检查范围：{{ item.reviewRange }}</p><p>{{ item.reviewNotice }} {{ item.suggestion }}</p></div></details></div>
+        <div v-if="isVideo" class="annotation-timeline"><div class="timeline-controls"><button class="icon-button" aria-label="上一帧" :disabled="isAiBusy||currentFrame===0" @click="seekByFrame(-1)">←</button><button class="play-button" :aria-label="isPlaying?'暂停':'播放'" :disabled="isAiBusy||exactFrameLoading" @click="togglePlayback"><AppIcon :name="isPlaying?'pause':'play'" :size="15" /></button><button class="icon-button" aria-label="下一帧" :disabled="isAiBusy||currentFrame===maxFrameIndex" @click="seekByFrame(1)">→</button><label class="frame-jump">第 <input v-model.number="jumpFrame" aria-label="跳转帧号" type="number" min="1" :max="maxFrameIndex+1" :disabled="isAiBusy" @change="jump" @keydown.enter="jump" /> / {{ maxFrameIndex+1 }} 帧</label><select v-model.number="playbackRate" aria-label="播放速度" class="speed-select"><option v-for="r in [.25,.5,1,2]" :key="r" :value="r">{{ r }}×</option></select><button class="quiet-button copy-previous" :disabled="editingBlocked||currentFrame===0" title="只补充当前帧缺少的对象 (C)" @click="copyPreviousFrame">复制上一帧 <kbd>C</kbd></button></div>
+          <div class="timeline-track" role="slider" aria-label="视频时间轴" tabindex="0" :aria-valuenow="currentFrame+1" :aria-valuemin="1" :aria-valuemax="maxFrameIndex+1" @click="onTimelineClick"><i class="timeline-base" /><i class="timeline-progress" :style="{width:`${maxFrameIndex?currentFrame/maxFrameIndex*100:0}%`}"/><i v-for="f in markers" :key="f" class="timeline-marker" :style="{left:`${maxFrameIndex?f/maxFrameIndex*100:0}%`}"/><i v-for="a in anomalyFrames" :key="a.frame_index" class="timeline-anomaly" :title="`第 ${a.frame_index+1} 帧：${a.reasons.join(' · ')}`" :style="{left:`${maxFrameIndex?a.frame_index/maxFrameIndex*100:0}%`}"/><i class="timeline-cursor" :style="{left:`${maxFrameIndex?currentFrame/maxFrameIndex*100:0}%`}"/></div><div class="timeline-caption"><span>{{ formatTime(currentTime) }} / {{ formatTime(videoDuration) }}</span><span>{{ annotatedFrameCount }} 帧含标注 <i />绿色为已有标注</span></div>
         </div>
+        <footer class="annotation-status"><span :title="statusMessage">{{ statusMessage }}</span><span v-if="mousePixel">X {{ mousePixel.x }} · Y {{ mousePixel.y }} px</span><span v-else>原图坐标 · 显示增强不影响标注</span></footer>
       </section>
-<transition name="toast">
-  <div v-if="toastMessage" class="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-xl border border-emerald-400/30 bg-slate-900/95 px-5 py-3 text-sm text-emerald-200 shadow-2xl backdrop-blur">
-    ✓ {{ toastMessage }}
-  </div>
-</transition>
-
-<!-- 导出训练数据集弹窗 -->
-<transition name="fade">
-  <div v-if="exportDialogOpen" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" @click.self="exportDialogOpen = false">
-    <div class="w-full max-w-md rounded-2xl border border-slate-700 bg-slate-900 shadow-2xl">
-      <div class="flex items-center justify-between border-b border-slate-800 px-6 py-4">
-        <h2 class="text-base font-semibold text-slate-100">📦 导出训练数据集</h2>
-        <button class="text-slate-500 hover:text-slate-300" @click="exportDialogOpen = false">✕</button>
-      </div>
-
-      <div class="space-y-5 px-6 py-5">
-        <!-- 数据概览 -->
-        <div class="rounded-lg border border-slate-800 bg-slate-950/60 p-4 text-xs">
-          <div class="mb-2 text-[11px] uppercase tracking-wider text-slate-500">数据概览</div>
-          <div class="grid grid-cols-3 gap-3 text-slate-300">
-            <div>
-              <div class="text-lg font-semibold text-indigo-300">{{ allFrameCount }}</div>
-              <div class="text-[10px] text-slate-500">标注帧数</div>
-            </div>
-            <div>
-              <div class="text-lg font-semibold text-emerald-300">{{ allClassNameList.length }}</div>
-              <div class="text-[10px] text-slate-500">类别数</div>
-            </div>
-            <div>
-              <div class="text-lg font-semibold text-amber-300">{{ isVideo ? '视频' : '图片' }}</div>
-              <div class="text-[10px] text-slate-500">素材类型</div>
-            </div>
-          </div>
-          <div v-if="allClassNameList.length" class="mt-3 text-[11px] text-slate-500">
-            类别：<span class="text-slate-300">{{ allClassNameList.join(' · ') }}</span>
-          </div>
-        </div>
-
-        <!-- 格式选择 -->
-        <div>
-          <label class="mb-2 block text-xs font-medium text-slate-400">输出格式</label>
-          <div class="grid grid-cols-3 gap-2">
-            <button
-              v-for="fmt in ([
-                { v: 'coco', label: 'COCO', desc: 'YOLO/DETR 标准' },
-                { v: 'yolo', label: 'YOLO', desc: 'YOLOv5/v8 训练' },
-                { v: 'both', label: '都要', desc: '两种格式都生成' },
-              ] as const)"
-              :key="fmt.v"
-              class="rounded-lg border px-3 py-2 text-left text-xs transition"
-              :class="exportFormat === fmt.v
-                ? 'border-indigo-400 bg-indigo-500/10 text-indigo-200'
-                : 'border-slate-700 bg-slate-950 text-slate-400 hover:border-slate-500'"
-              @click="exportFormat = fmt.v"
-            >
-              <div class="font-semibold">{{ fmt.label }}</div>
-              <div class="mt-0.5 text-[10px] opacity-70">{{ fmt.desc }}</div>
-            </button>
-          </div>
-        </div>
-
-        <!-- 划分比例 -->
-        <div>
-          <label class="mb-2 flex items-center justify-between text-xs font-medium text-slate-400">
-            <span>训练 / 验证集划分</span>
-            <span class="text-slate-500">
-              {{ exportSplitRatio === 0 ? '不划分' : `${Math.round(exportSplitRatio * 100)} / ${Math.round((1 - exportSplitRatio) * 100)}` }}
-            </span>
-          </label>
-          <input type="range" min="0" max="0.9" step="0.1" v-model.number="exportSplitRatio"
-            class="w-full accent-indigo-400" />
-          <div class="mt-1 flex justify-between text-[10px] text-slate-600">
-            <span>全部训练集</span><span>80/20</span><span>90/10</span>
-          </div>
-        </div>
-
-        <p class="rounded-md bg-slate-950/60 p-3 text-[11px] leading-relaxed text-slate-500">
-          💡 导出后会自动抽视频帧、转像素坐标、打包 zip 下载。COCO 格式包含标准 annotations.json；YOLO 格式包含每帧 txt + data.yaml 训练配置。
-        </p>
-      </div>
-
-      <div class="flex gap-2 border-t border-slate-800 px-6 py-4">
-        <button class="btn-secondary flex-1" @click="exportDialogOpen = false">取消</button>
-        <button class="btn-primary flex-1" :disabled="doingExport || allFrameCount === 0" @click="doExportDataset">
-          {{ doingExport ? '正在导出...' : '生成并下载 ZIP' }}
-        </button>
-      </div>
+      <aside class="annotation-inspector">
+        <section class="panel name-panel"><div class="panel-title"><span>{{ selectedObject?'当前对象':'新对象名称' }}</span><span v-if="selectedObject" class="badge">#{{ selectedObject.objectId }}</span></div><div class="inspector-body"><input v-model="objectNameInput" class="input" aria-label="对象名称" placeholder="例如 rare sperm" /><button v-if="selectedObject" class="btn-secondary" :disabled="editingBlocked" @click="renameObject">应用名称</button><div v-if="selectedObject?.bbox" class="object-measure"><span>位置 {{ Math.round(selectedObject.bbox.x*(selectedMedia?.width||0)/100) }}, {{ Math.round(selectedObject.bbox.y*(selectedMedia?.height||0)/100) }}</span><span>{{ (selectedObject.bbox.width*(selectedMedia?.width||0)/100).toFixed(1) }} × {{ (selectedObject.bbox.height*(selectedMedia?.height||0)/100).toFixed(1) }} px</span></div></div></section>
+        <section class="panel object-panel"><div class="panel-title"><span>本帧对象 <span class="badge">{{ currentObjects.length }}</span></span><label class="labels-toggle"><input v-model="labels" type="checkbox" />名称</label></div><div v-if="currentObjects.length>8" class="object-search"><input v-model="objectSearch" class="input" placeholder="查找对象…" aria-label="查找对象" /></div><div class="object-list"><div v-for="obj in visibleObjects" :key="obj.id" class="object-row" :class="{selected:selectedObjectId===obj.id}" @click="selectObject(obj.id)"><button class="object-select" @click.stop="selectObject(obj.id)"><i :class="obj.source"/><span><strong>{{ obj.name }}</strong><small>{{ obj.source==='ai'?'AI 追踪':'人工标注' }}{{ obj.confidence?` · ${Math.round(obj.confidence*100)}%`:'' }}</small></span></button><button class="icon-button remove-object" :aria-label="`删除 ${obj.name}`" :disabled="editingBlocked" @click.stop="removeObject(obj.id)"><AppIcon name="trash" :size="15" /></button></div><div v-if="!visibleObjects.length" class="sidebar-empty"><AppIcon name="box" :size="28"/><p>{{ objectSearch?'没有匹配对象':'本帧还没有标注' }}</p><small>按 B 画框，按 P 标点</small></div></div><div class="object-legend"><span><i class="manual"/>人工</span><span><i class="ai"/>AI</span><span><i class="chosen"/>选中</span></div></section>
+        <section class="panel ai-panel"><div class="ai-heading"><AppIcon name="spark" :size="18"/><strong>AI 辅助追踪</strong></div><p>以当前帧为起点，自动追踪已有目标。</p><button class="btn-primary" :disabled="editingBlocked||!isVideo||!currentObjects.some(o=>o.bbox)" @click="runAiTrack">{{ isAiBusy?'正在追踪…':'AI Tracking' }}</button><small>发现异常时暂停，检查后可继续。</small></section>
+      </aside>
     </div>
-  </div>
-</transition>
+    <Teleport to="body"><div v-if="help" class="dialog-mask" @click.self="help=false"><section ref="helpDialog" class="app-dialog annotation-help" role="dialog" aria-modal="true" aria-labelledby="annotation-help-title"><h2 id="annotation-help-title">标注快捷键</h2><dl><div v-for="[key,desc] in [['V / B / P','选择 / 画框 / 标点'],['← / →','上一帧 / 下一帧'],['Shift + ← / →','前后跳 10 帧'],['空格 + 拖动','平移放大后的画面'],['Ctrl/⌘ + 滚轮','围绕指针缩放'],['+ / − / 0','放大 / 缩小 / 适应画面'],['Alt + 方向键','选中框微调 1 原图像素'],['Alt + Shift + 方向键','选中框微调 10 原图像素'],['Ctrl/⌘ + Z','撤销本帧操作'],['Ctrl/⌘ + Shift + Z / Ctrl + Y','重做本帧操作'],['C','复制上一帧中当前帧缺少的对象'],['Del / Backspace','删除选中对象'],['H / L / F','隐藏框 / 放大镜 / 专注模式'],['K','播放 / 暂停'],['Esc','先取消当前拖动；无拖动时退出专注或取消选择'],['?','打开快捷键说明']]" :key="key"><dt><kbd>{{ key }}</kbd></dt><dd>{{ desc }}</dd></div></dl><p class="muted">输入框中不触发标注快捷键。播放或加载帧时暂停编辑，避免图像与标注错位。</p><div class="app-dialog-actions"><button class="btn-primary" @click="help=false">知道了</button></div></section></div></Teleport>
+  </section>
+  <transition name="toast"><div v-if="toastMessage" class="status-toast" role="status">{{ toastMessage }}</div></transition>
 </template>

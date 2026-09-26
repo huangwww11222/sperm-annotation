@@ -10,7 +10,11 @@ const normalizePath = (path: string): RoutePath => {
 
 const path = ref<RoutePath>(typeof window !== 'undefined' ? normalizePath(window.location.pathname) : '/login')
 
-const navigate = (to: RoutePath, replace = false) => {
+const leaveGuards = new Set<() => Promise<boolean>>()
+export function addLeaveGuard(guard: () => Promise<boolean>) { leaveGuards.add(guard); return () => { leaveGuards.delete(guard) } }
+const canLeave = async () => { for (const guard of leaveGuards) if (!await guard()) return false; return true }
+const navigate = async (to: RoutePath, replace = false) => {
+  if (to !== path.value && !await canLeave()) return false
   const { isAuthenticated } = useAuth()
   const target = to === '/login' || isAuthenticated.value ? to : '/login'
   if (typeof window !== 'undefined') {
@@ -21,8 +25,10 @@ const navigate = (to: RoutePath, replace = false) => {
 }
 
 if (typeof window !== 'undefined') {
-  window.addEventListener('popstate', () => {
+  window.addEventListener('popstate', async () => {
     const requested = normalizePath(window.location.pathname)
+    const previous = path.value
+    if (!await canLeave()) { window.history.pushState({}, '', previous); return }
     const { isAuthenticated } = useAuth()
     path.value = requested !== '/login' && !isAuthenticated.value ? '/login' : requested
   })
@@ -30,6 +36,7 @@ if (typeof window !== 'undefined') {
 
 export const useRouter = () => ({
   path,
+  canLeave,
   push: (to: RoutePath) => navigate(to),
   replace: (to: RoutePath) => navigate(to, true),
 })

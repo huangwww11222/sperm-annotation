@@ -184,6 +184,8 @@ docker compose up -d
 docker compose ps
 ```
 
+业务准入规则见 [WORKFLOW.md](WORKFLOW.md)，存储与排错分别见 [STORAGE_LAYOUT.md](STORAGE_LAYOUT.md)、[TESTING.md](TESTING.md)。当前 Compose 设置 DB 路径，但未设置 `APP_DATA_DIR`，所以文件日志仍位于镜像的默认 data/logs 内；重建容器前需收集日志。若要持久化文件日志，应为 `APP_DATA_DIR` 配置持久卷，不能只凭 DB 卷已挂载就假定日志也已持久化。
+
 查看日志：
 
 ```powershell
@@ -453,7 +455,8 @@ docker compose exec backend ls -la /models/sam3
 - [ ] 原始 FPS、逐帧预览、人工框正常；
 - [ ] AI Tracking、异常暂停、续追正常；
 - [ ] 关闭前端素材后，后端 Storage 文件仍存在且可重新加载；
-- [ ] 数据集导出文件出现在 `storage/datasets`；
+- [ ] 全帧送审 → B 逐帧提交并完成 → C 逐项选择并完成 → 训练 ZIP 出现在 `storage/datasets`；
+- [ ] 未完成 B/C 时拒绝训练导出；重新确认时旧训练包停止下载；
 - [ ] 另一台电脑可以通过服务器 IP 使用；
 - [ ] 防火墙只开放 Web 端口；
 - [ ] 数据库和 Storage 备份、恢复测试通过。

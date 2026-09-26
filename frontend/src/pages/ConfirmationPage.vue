@@ -1,713 +1,253 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-import { useRouter } from '../router'
-import { reviewApi, type ConfirmationSession, type ReviewChange, type FinalVersion } from '../api/reviewApi'
-import { http, tokenStore } from '../api/http'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { confirmationApi as api, type Change, type ConfirmationSession, type FrameContext, type Operation, type Action, type Choice, type Failure } from '../api/confirmationApi'
+import WorkflowProgress from '../components/WorkflowProgress.vue'
+import ConfirmationImage from '../confirmation/ConfirmationImage.vue'
+import TrainingDatasetExport from '../components/TrainingDatasetExport.vue'
+import type { Box } from '../review/geometry'
+import { addLeaveGuard } from '../router'
+import { useAuth } from '../stores/auth'
 
-const router = useRouter()
-
-// ── Toast ──
-const toast = ref<{ type: 'ok' | 'err'; msg: string } | null>(null)
-function showToast(type: 'ok' | 'err', msg: string) {
-  toast.value = { type, msg }
-  setTimeout(() => { if (toast.value?.msg === msg) toast.value = null }, 3500)
+const sessions=ref<ConfirmationSession[]>([]), session=ref<ConfirmationSession|null>(null), items=ref<Change[]>([])
+const selected=ref<string|null>(null), context=ref<FrameContext|null>(null), imageUrl=ref('')
+const query=ref(''), filter=ref('all'), busy=ref(false), error=ref(''), errorCode=ref(''), notice=ref('请选择一个视频开始对比确认。')
+const errorStatus=ref(0), ready=ref(false), exportOpen=ref(false), exportBusy=ref(false)
+const pending=ref<Operation|null>(null), mode=ref('pair'), zoom=ref(5), autoNext=ref(true), jump=ref('1')
+const modal=ref<'help'|'complete'|'reopen'|'conflict'|'resume'|null>(null), dialog=ref<HTMLElement|null>(null)
+const userId=useAuth().user.value?.id||'unknown', journalKey=`confirmation-intent:${userId}`, prefKey=`confirmation-prefs:${userId}`
+let alive=true, leavingForLogin=false, removeGuard=()=>{}, previousFocus:HTMLElement|null=null
+let readRetry:(()=>Promise<void>)|null=null
+const current=computed(()=>items.value.find(x=>x.changeId===selected.value))
+const index=computed(()=>items.value.findIndex(x=>x.changeId===selected.value))
+const frameIndex=computed(()=>current.value?.frameIndex??0)
+const frameItems=computed(()=>items.value.filter(x=>x.frameIndex===frameIndex.value))
+const queueStart=computed(()=>Math.floor(Math.max(0,index.value)/50)*50)
+const queue=computed(()=>items.value.slice(queueStart.value,queueStart.value+50))
+const matching=computed(()=>sessions.value.filter(s=>`${s.media.name} ${s.media.mediaId}`.toLowerCase().includes(query.value.toLowerCase())))
+const visible=computed(()=>matching.value.filter(s=>filter.value==='all'||s.state===filter.value))
+const blocked=computed(()=>busy.value||!!pending.value||!ready.value||exportBusy.value)
+const canChoose=computed(()=>!!session.value?.permissions.canEdit&&!!current.value&&!!imageUrl.value&&!blocked.value)
+const caption=computed(()=>session.value?.state==='confirmed'?'已完成确认 · 当前版本只读':pending.value?'操作尚未确认保存':busy.value?'正在处理…':'所有已选择结果均已保存')
+const stateText=(s:string)=>({pending:'待确认',in_progress:'确认中',confirmed:'已确认'}[s]||'历史任务')
+const count=(state:string)=>state==='all'?matching.value.length:matching.value.filter(s=>s.state===state).length
+const num=(n:number,d=2)=>Number(n.toFixed(d)).toString()
+const signed=(n:number)=>(n>0?'+':'')+num(n,3)
+const position=(b:Box)=>`x ${num(b[0],3)} · y ${num(b[1],3)}`
+const size=(b:Box)=>`${num(b[2]-b[0],3)} × ${num(b[3]-b[1],3)}`
+const label=(c:Change)=>c.decision?c.decision.choice==='A'?'保留 A':'采用 B':'待选择'
+function fail(e:unknown,action:string) {
+  const f=e as Failure
+  error.value=`${f.message||'连接中断，请重试'}${f.requestId?`（记录号 ${f.requestId}）`:''}`;errorCode.value=f.code||'';errorStatus.value=f.status||0
+  console.error('[confirmation.operation_failed]',{action,sessionId:session.value?.id,changeId:selected.value,...f})
 }
-
-// ── 列表视图 ──
-const view = ref<'list' | 'session'>('list')
-const sessions = ref<ConfirmationSession[]>([])
-const finalVersions = ref<FinalVersion[]>([])
-const loading = ref(false)
-const compareMode = ref<'side-by-side' | 'overlay'>('side-by-side')
-
-// ── Session 视图核心状态 ──
-const activeCs = ref<ConfirmationSession | null>(null)
-const changes = ref<ReviewChange[]>([])
-const activeIndex = ref(0)
-const mediaFrameCache = ref<Record<number, string>>({})
-const note = ref('')
-const draftChoice = ref<'A' | 'B' | null>(null)
-
-const currentChange = computed(() => changes.value[activeIndex.value])
-const totalChanges = computed(() => changes.value.length)
-const decidedCount = computed(() => changes.value.filter(c => c.decision).length)
-const progressPct = computed(() => totalChanges.value ? Math.round(decidedCount.value / totalChanges.value * 100) : 0)
-const allDecided = computed(() => totalChanges.value > 0 && decidedCount.value === totalChanges.value)
-
-// ── 原型新增状态 ──
-const leftFilter = ref<'all' | 'pending' | 'confirmed'>('all')
-const leftSearch = ref('')
-const zoomPct = ref(100)
-
-const roi = computed(() => {
-  const c = currentChange.value
-  if (!c) return null
-  const A = c.beforeBbox, B = c.afterBbox
-  if (!A || !B) return null
-  const x1 = Math.min(A[0], B[0]), y1 = Math.min(A[1], B[1])
-  const x2 = Math.max(A[2], B[2]), y2 = Math.max(A[3], B[3])
-  const pad = Math.max(8, Math.round(Math.max(A[2]-A[0], B[2]-B[0], A[3]-A[1], B[3]-B[1]) * 0.5))
-  return { x1: Math.max(0, x1-pad), y1: Math.max(0, y1-pad), x2: x2+pad, y2: y2+pad }
+function update(s:ConfirmationSession) { session.value=s;sessions.value=sessions.value.map(x=>x.id===s.id?s:x) }
+function prefs() {
+  try {localStorage.setItem(prefKey,JSON.stringify({mode:mode.value,zoom:zoom.value,autoNext:autoNext.value,sid:session.value?.id}))}
+  catch(e) {console.warn('[confirmation.preferences_unavailable]',e)}
+}
+watch([mode,zoom,autoNext],prefs)
+function persistIntent() {
+  try {if(pending.value)sessionStorage.setItem(journalKey,JSON.stringify(pending.value));else sessionStorage.removeItem(journalKey);return true}
+  catch(e) {console.warn('[confirmation.intent_backup_unavailable]',e);return false}
+}
+watch(modal,async(value,old)=>{
+  if(value){if(!old)previousFocus=document.activeElement as HTMLElement;await nextTick();dialog.value?.querySelector<HTMLElement>('button')?.focus()}
+  else previousFocus?.focus()
 })
-
-const filteredLeft = computed(() => {
-  let list = sessions.value
-  if (leftFilter.value === 'pending') list = list.filter(s => s.state !== 'confirmed')
-  else if (leftFilter.value === 'confirmed') list = list.filter(s => s.state === 'confirmed')
-  if (leftSearch.value.trim()) {
-    const q = leftSearch.value.toLowerCase()
-    list = list.filter(s => (s as any).mediaId?.toLowerCase?.().includes(q) || s.id.toLowerCase().includes(q))
-  }
-  return list
-})
-
-const pendingCount = computed(() => totalChanges.value - decidedCount.value)
-const adoptedBCount = computed(() => changes.value.filter(c => c.decision?.choice === 'B').length)
-const keptACount = computed(() => changes.value.filter(c => c.decision?.choice === 'A').length)
-
-function zoomIn() { zoomPct.value = Math.min(200, zoomPct.value + 25) }
-function zoomOut() { zoomPct.value = Math.max(50, zoomPct.value - 25) }
-function zoomReset() { zoomPct.value = 100 }
-
-async function loadAll() {
-  loading.value = true
+function clearImage() {if(imageUrl.value)URL.revokeObjectURL(imageUrl.value);imageUrl.value='';context.value=null}
+async function list() {
+  try {sessions.value=(await api.list()).items;readRetry=null;error.value=''}
+  catch(e){fail(e,'list');readRetry=list}
+}
+async function loadItem(id:string|null,savePosition=true) {
+  if(!session.value)return
+  const sid=session.value.id,item=items.value.find(x=>x.changeId===id)
+  selected.value=item?.changeId??null;jump.value=String(Math.max(0,index.value)+1);clearImage()
   try {
-    const [ses, fvs] = await Promise.all([
-      reviewApi.listConfirmations().catch(() => ({ items: [] as ConfirmationSession[] })),
-      reviewApi.listFinalVersions().catch(() => ({ items: [] as FinalVersion[] })),
-    ])
-    sessions.value = ses.items
-    finalVersions.value = fvs.items
-  } catch (e: any) {
-    showToast('err', e?.message || '加载失败')
-  } finally { loading.value = false }
+    const [ctx,blob]=await Promise.all([api.frame(sid,item?.frameIndex??0),api.image(session.value.media.mediaId,item?.frameIndex??0)])
+    const url=URL.createObjectURL(blob),img=new Image();img.src=url
+    try {await img.decode();if(img.naturalWidth!==session.value.media.width||img.naturalHeight!==session.value.media.height)throw {message:'图像尺寸与固定版本不一致，已停止选择。'}}
+    catch(e){URL.revokeObjectURL(url);throw e}
+    if(!alive){URL.revokeObjectURL(url);return}
+    context.value=ctx;imageUrl.value=url;readRetry=null
+    if(savePosition&&!pending.value)await bookmark()
+  } catch(e) {fail(e,'load_frame');readRetry=()=>selectItem(id)}
 }
-onMounted(loadAll)
-
-async function openCs(cs: ConfirmationSession) {
-  loading.value = true
+async function openSession(id:string,resume=true) {
+  if(busy.value||pending.value)return
+  busy.value=true;error.value=''
   try {
-    activeCs.value = await reviewApi.getConfirmation(cs.id)
-    const r = await reviewApi.listChanges(cs.id)
-    changes.value = r.items
-    activeIndex.value = 0
-    await resolveMediaFrames()
-    view.value = 'session'
-  } catch (e: any) {
-    showToast('err', e?.message || '打开失败')
-  } finally { loading.value = false }
+    const [s,cs]=await Promise.all([api.session(id),api.changes(id)])
+    update(s);items.value=cs.items;notice.value='浏览与切换视图不会产生选择。';prefs()
+    const history=s.resume.lastViewedChangeId,first=s.resume.firstPendingChangeId
+    await loadItem(history||first||cs.items[0]?.changeId||null,false)
+    if(resume&&history&&first&&history!==first&&!pending.value)modal.value='resume'
+  }catch(e){fail(e,'open_session');readRetry=()=>openSession(id,resume)}
+  finally{busy.value=false}
 }
+async function selectItem(id:string|null) {
+  if(blocked.value)return
+  busy.value=true;error.value=''
+  try{await loadItem(id)}finally{busy.value=false}
+}
+async function bookmark() {
+  if(!session.value)return
+  if(session.value.resume.lastViewedChangeId===selected.value)return
+  let op:Operation={action:'cursor',sid:session.value.id,changeId:selected.value||undefined,body:{changeId:selected.value,expectedCursorRevision:session.value.resume.cursorRevision},key:crypto.randomUUID()}
+  try {
+    let r
+    try {r=await api.operate(op)}
+    catch(e) {
+      if((e as Failure).code!=='CURSOR_REVISION_CONFLICT')throw e
+      // A browsing position may follow this window after rebasing; it never writes decisions.
+      const fresh=await api.session(op.sid)
+      op={...op,key:crypto.randomUUID(),body:{...op.body,expectedCursorRevision:fresh.resume.cursorRevision}}
+      r=await api.operate(op)
+    }
+    update(r.session);items.value=r.items
+  }catch(e){pending.value=op;persistIntent();fail(e,'bookmark')}
+}
+function operation(action:Action,body:Record<string,unknown>={},changeId?:string) {
+  if(!session.value||blocked.value)return
+  pending.value={action,sid:session.value.id,changeId,body,key:crypto.randomUUID()};persistIntent()
+  void retry()
+}
+async function retry():Promise<boolean> {
+  const op=pending.value
+  if(!op||busy.value)return !op
+  busy.value=true;error.value='';errorCode.value='';modal.value=null
+  let success=false
+  try {
+    const r=await api.operate(op)
+    update(r.session);items.value=r.items;pending.value=null;persistIntent();success=true
+    notice.value=op.action==='finish'?'已生成完整视频的最终版本。':op.action==='reopen'?'已重新开放确认，保留已有选择和历史最终版本。':op.action==='undo'?'已撤销上一次选择，并返回该项。':'已保存到服务器。'
+    let target=op.action==='undo'?r.selectedChangeId:selected.value
+    if(op.action==='decide'&&autoNext.value&&r.nextPendingChangeId)target=r.nextPendingChangeId
+    if(target!==selected.value||!imageUrl.value)await loadItem(target||items.value[0]?.changeId||null,false)
+    if(op.action!=='cursor')await bookmark()
+    if(op.action==='decide'&&r.session.permissions.canComplete&&!pending.value)modal.value='complete'
+  }catch(e){fail(e,op.action)}finally{busy.value=false}
+  return success&&!pending.value
+}
+function choose(choice:Choice) {
+  if(!canChoose.value||!current.value||current.value.decision?.choice===choice)return
+  operation('decide',{choice,expectedDecisionRevision:current.value.decisionRevision},current.value.changeId)
+}
+function undo() {if(!blocked.value&&session.value?.permissions.canUndo&&session.value.undo)operation('undo',{expectedSessionRevision:session.value.revision,actionId:session.value.undo.actionId})}
+function complete() {if(session.value?.permissions.canComplete)operation('finish',{expectedSessionRevision:session.value.revision})}
+function reopen() {if(session.value?.permissions.canReopen)operation('reopen',{expectedSessionRevision:session.value.revision})}
+function move(delta:number) {const row=items.value[index.value+delta];if(row)void selectItem(row.changeId)}
+function jumpTo() {
+  const n=Number(jump.value)
+  if(Number.isInteger(n)&&n>=1&&n<=items.value.length)void selectItem(items.value[n-1]!.changeId)
+  else notice.value=`请输入 1–${items.value.length} 的修改项序号。`
+}
+function contextSelect(objectId:number) {const row=frameItems.value.find(x=>x.objectId===objectId);if(row)void selectItem(row.changeId)}
+function downloadBlob(blob:Blob,name:string) {
+  const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)
+}
+async function download() {
+  if(!session.value?.finalVersionId||blocked.value)return
+  busy.value=true
+  try{downloadBlob(await api.download(session.value.finalVersionId),`${session.value.media.name}-最终标注-${session.value.finalVersionId}.json`);error.value='';notice.value='已导出完整视频 JSON，包含未修改对象、空帧、A/B 几何和最终选择。'}
+  catch(e){fail(e,'export');readRetry=download}finally{busy.value=false}
+}
+function backup() {if(pending.value)downloadBlob(new Blob([JSON.stringify(pending.value,null,2)],{type:'application/json'}),'confirmation-pending-operation.json')}
+async function reloadServer() {
+  // Explicit user resolution of an uncertain/conflicting local intent; never silently discard.
+  const sid=pending.value?.sid||session.value?.id
+  if(!sid)return
+  busy.value=true
+  try {
+    const [s,cs]=await Promise.all([api.session(sid),api.changes(sid)])
+    pending.value=null;persistIntent();update(s);items.value=cs.items;error.value='';modal.value=null
+    await loadItem(selected.value||s.resume.firstPendingChangeId||cs.items[0]?.changeId||null,false)
+    notice.value='已采用服务器当前结果；可以重新选择。'
+  }catch(e){fail(e,'reload_server')}finally{busy.value=false}
+}
+async function retryRead() {if(!readRetry||busy.value)return;const run=readRetry;error.value='';await run()}
+function loginAgain() {if(!persistIntent()&&pending.value)backup();leavingForLogin=true;useAuth().logout()}
+function beforeUnload(e:BeforeUnloadEvent) {if(pending.value||busy.value){e.preventDefault();e.returnValue=''}}
+function keydown(e:KeyboardEvent) {
+  if(document.querySelector('[data-user-guide][open]'))return
 
-async function resolveMediaFrames() {
-  mediaFrameCache.value = {}
-  if (!activeCs.value) return
-  const mediaId = (activeCs.value as any).mediaId
-  if (!mediaId) return
-  const uniqueFrames = new Set(changes.value.map(c => c.frameIndex))
-  for (const fi of uniqueFrames) {
-    mediaFrameCache.value[fi] = `/api/track/frame/${mediaId}/${fi}?token=${tokenStore.get()}`
-  }
-}
-
-function selectDraft(choice: 'A' | 'B') {
-  draftChoice.value = choice
-}
-async function submitChoice() {
-  if (!draftChoice.value || !currentChange.value || !activeCs.value) {
-    showToast('err', '请先选择保留 A 或采纳 B')
+  if(exportOpen.value)return
+  if(modal.value) {
+    if(e.key==='Escape'&&!busy.value){e.preventDefault();modal.value=null}
+    if(e.key==='Tab'&&dialog.value){const nodes=Array.from(dialog.value.querySelectorAll<HTMLElement>('button:not(:disabled),input,a[href]'));const first=nodes[0],last=nodes[nodes.length-1];if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus()}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus()}}
     return
   }
-  const choice = draftChoice.value
-  const cid = currentChange.value.changeId
-  const oldDecision = currentChange.value.decision
-  currentChange.value.decision = { choice, decidedAt: new Date().toISOString() }
-  try {
-    await reviewApi.setDecision(activeCs.value!.id, cid, choice)
-    showToast('ok', `已选择 ${choice === 'A' ? '保留原标注 A' : '采用审查标注 B'}`)
-    draftChoice.value = null
-    activeCs.value = await reviewApi.getConfirmation(activeCs.value!.id)
-    changes.value = await reviewApi.listChanges(activeCs.value!.id).then(r => r.items)
-  } catch (e: any) {
-    currentChange.value.decision = oldDecision
-    showToast('err', e?.message || '提交失败')
-  }
+  const target=e.target as HTMLElement
+  if(e.isComposing||e.repeat||target.closest('input,textarea,select,[contenteditable="true"]'))return
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'&&!e.shiftKey&&!e.altKey){e.preventDefault();undo();return}
+  if(e.ctrlKey||e.metaKey||e.altKey||blocked.value)return
+  if(e.key==='?'){e.preventDefault();modal.value='help'}
+  if(e.shiftKey)return
+  if(e.key.toLowerCase()==='a'){e.preventDefault();choose('A')}
+  if(e.key.toLowerCase()==='b'){e.preventDefault();choose('B')}
+  if(e.key==='ArrowLeft'){e.preventDefault();move(-1)}
+  if(e.key==='ArrowRight'){e.preventDefault();move(1)}
 }
-
-function prevChange() { if (activeIndex.value > 0) { activeIndex.value--; draftChoice.value = null } }
-function nextChange() { if (activeIndex.value < totalChanges.value - 1) { activeIndex.value++; draftChoice.value = null } }
-
-async function doFinalize() {
-  if (!allDecided.value) { showToast('err', '还有未选择的修改项'); return }
-  try {
-    const res = await reviewApi.finalize(activeCs.value!.id)
-    showToast('ok', `Finalize 成功！${res.frameCount} 帧`)
-    await loadAll()
-    view.value = 'list'
-  } catch (e: any) { showToast('err', e?.message || 'Finalize 失败') }
-}
-
-const exportFormat = ref<'coco' | 'yolo' | 'both'>('both')
-async function doExport(fvId: string) {
-  try {
-    const res = await reviewApi.exportDataset({ finalVersionIds: [fvId], format: exportFormat.value })
-    const a = document.createElement('a')
-    a.href = res.downloadUrl; a.download = ''; a.click()
-    showToast('ok', `导出成功`)
-  } catch (e: any) { showToast('err', e?.message || '导出失败') }
-}
-
-function back() { view.value = 'list'; activeCs.value = null; changes.value = []; loadAll() }
-
-// ── Bbox 样式辅助 ──
-function bboxStyle(bbox: number[] | undefined, _color: string) {
-  if (!bbox || bbox.length < 4) return { position: "absolute" as const }
-  return { left: bbox[0]+'px', top: bbox[1]+'px', width: (bbox[2]-bbox[0])+'px', height: (bbox[3]-bbox[1])+'px', position: 'absolute' as const }
-}
-function bboxStyleScaled(bbox: number[] | undefined, color: string) {
-  if (!bbox || bbox.length < 4) return { position: "absolute" as const }
-  return {
-    left: Math.max(0, Math.min(100, bbox[0] / 640 * 100)) + '%',
-    top: Math.max(0, Math.min(100, bbox[1] / 432 * 100)) + '%',
-    width: Math.max(0.5, Math.min(100, (bbox[2]-bbox[0]) / 640 * 100)) + '%',
-    height: Math.max(0.5, Math.min(100, (bbox[3]-bbox[1]) / 432 * 100)) + '%',
-    borderColor: color, position: 'absolute' as const,
-  }
-}
-function deltaDx(c: ReviewChange) { return c.afterBbox[0] - c.beforeBbox[0] }
-function deltaDy(c: ReviewChange) { return c.afterBbox[1] - c.beforeBbox[1] }
-function deltaW(c: ReviewChange) { return (c.afterBbox[2]-c.afterBbox[0]) - (c.beforeBbox[2]-c.beforeBbox[0]) }
-function deltaH(c: ReviewChange) { return (c.afterBbox[3]-c.afterBbox[1]) - (c.beforeBbox[3]-c.beforeBbox[1]) }
+onMounted(async()=>{
+  window.addEventListener('keydown',keydown);window.addEventListener('beforeunload',beforeUnload)
+  removeGuard=addLeaveGuard(async()=>{if(leavingForLogin)return true;if(busy.value||exportBusy.value)return false;if(pending.value)return retry();return true})
+  let last:string|undefined, stored:Operation|null=null
+  try{const p=JSON.parse(localStorage.getItem(prefKey)||'{}');mode.value=p.mode==='overlay'?'overlay':'pair';zoom.value=Math.max(3,Math.min(8,Number(p.zoom)||5));autoNext.value=p.autoNext!==false;last=p.sid;stored=JSON.parse(sessionStorage.getItem(journalKey)||'null')}catch(e){console.warn('[confirmation.restore_preferences_failed]',e)}
+  await list()
+  const id=stored?.sid||last||sessions.value[0]?.id
+  if(id&&sessions.value.some(s=>s.id===id))await openSession(id,!stored)
+  if(stored){pending.value=stored;notice.value='检测到上次未确认保存的操作，请重试原请求或读取服务器结果。';error.value='上次操作的保存结果尚未确认。'}
+  ready.value=true
+})
+onUnmounted(()=>{alive=false;clearImage();removeGuard();window.removeEventListener('keydown',keydown);window.removeEventListener('beforeunload',beforeUnload)})
 </script>
+
 <template>
-  <!-- Toast -->
-  <div v-if="toast"
-       class="fixed top-20 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-lg text-sm shadow-2xl border backdrop-blur transition-opacity"
-       :class="toast.type === 'ok' ? 'bg-emerald-900/80 border-emerald-500/50 text-emerald-200' : 'bg-red-900/80 border-red-500/50 text-red-200'">
-    {{ toast.msg }}
-  </div>
+  <div class="confirmation-page" :data-busy="busy||!ready">
+    <nav class="confirmation-flow" aria-label="当前阶段"><strong>对比确认</strong><span>逐项选择 A / B · 完成后导出训练集</span><small>原始版本永久保留</small><button @click="modal='help'">快捷键 ?</button></nav>
+    <WorkflowProgress v-if="session" label="视频确认进度" :percent="session.progress.percent" :summary="`已选择 ${session.progress.decided} / ${session.progress.totalChanges} 项 · 待选择 ${session.progress.pending} 项`" :detail="`保留 A ${session.progress.keptA} · 采用 B ${session.progress.adoptedB}`" :completed="session.state==='confirmed'" :state="session.state==='confirmed'?'视频已确认 · 最终版本已生成':session.progress.pending===0?(session.progress.totalChanges?'全部已选择 · 待完成视频确认':'无修改项 · 仍需完成视频确认'):'仅统计修改项 · 未修改对象沿用 A'">
+      <button v-if="session.state!=='confirmed'" class="c-primary" data-testid="complete-video" :disabled="blocked||!session.permissions.canComplete" @click="modal='complete'">完成本视频确认</button>
+      <span v-else class="c-state">已完成确认</span>
+    </WorkflowProgress>
+    <div v-if="error" class="confirmation-error" role="alert"><span>{{ error }}</span><button v-if="errorStatus===401" :disabled="busy" @click="loginAgain">保留操作并重新登录</button><template v-if="pending"><button :disabled="busy" @click="retry">重试原请求</button><button :disabled="busy" @click="modal='conflict'">读取服务器结果</button><button @click="backup">备份未决操作</button></template><button v-else :disabled="busy" @click="retryRead">重试加载</button></div>
+    <div class="confirmation-layout">
+      <aside class="c-panel confirmation-sidebar">
+        <div class="c-heading"><h2>待确认视频</h2><button :disabled="blocked" @click="list">刷新</button></div>
+        <div class="c-search"><input v-model="query" aria-label="搜索视频" placeholder="搜索视频名称"/><div class="c-filters"><button v-for="f in [['all','全部'],['pending','待确认'],['in_progress','确认中'],['confirmed','已确认']]" :key="f[0]" :class="{active:filter===f[0]}" @click="filter=f[0]!">{{ f[1] }} {{ count(f[0]!) }}</button></div></div>
+        <div class="c-video-list"><button v-for="s in visible" :key="s.id" class="c-video" :class="{selected:session?.id===s.id}" :data-session-id="s.id" :disabled="blocked" @click="openSession(s.id)"><strong :title="s.media.name">{{ s.media.name }}</strong><small class="c-task-id" :title="s.media.mediaId + ' · ' + s.id">{{ s.media.mediaId }} · {{ s.id.slice(-6) }}</small><span>{{ stateText(s.state) }} <small>{{ s.media.frameCount }} 帧</small></span><progress max="100" :value="s.progress.percent"/><span>{{ s.progress.decided }} / {{ s.progress.totalChanges }} 项 <small>剩余 {{ s.progress.pending }}</small></span></button><p v-if="!visible.length" class="c-empty">没有符合条件的视频。<br>完成审查后，视频会进入这里。</p></div>
+        <p class="c-sidebar-foot">A：原始标注<br>B：已提交的审查版本<br>确认员可与标注员、审查员为同一账号。</p>
+      </aside>
+      <template v-if="session">
+        <main class="confirmation-center">
+          <section class="c-panel c-comparison">
+            <header class="c-heading"><div><h2 :title="session.media.name">{{ session.media.name }}</h2><small data-testid="current-item">第 {{ frameIndex+1 }} / {{ session.media.frameCount }} 帧 <template v-if="current">· 对象 #{{ current.objectId }} · 修改项 {{ index+1 }} / {{ items.length }}</template><template v-else>· 无修改项</template></small></div><span class="c-state">{{ stateText(session.state) }}</span></header>
+            <div class="c-toolbar"><div class="c-segment"><button :class="{active:mode==='pair'}" :aria-pressed="mode==='pair'" @click="mode='pair'">A / B 并排</button><button :class="{active:mode==='overlay'}" :aria-pressed="mode==='overlay'" @click="mode='overlay'">叠加对比</button></div><label>局部缩放 <input v-model.number="zoom" aria-label="局部缩放" type="range" min="3" max="8" step=".5"/> {{ zoom }}×</label></div>
+            <div v-if="imageUrl&&context&&current" class="c-crops" :class="{overlay:mode==='overlay'}">
+              <figure v-for="variant in (mode==='pair'?['A','B']:['overlay']) as ('A'|'B'|'overlay')[]" :key="variant"><figcaption><span v-if="variant!=='B'" class="c-a">A 原始标注 · 虚线</span><span v-if="variant!=='A'" class="c-b">B 审查标注 · 实线</span></figcaption><ConfirmationImage :src="imageUrl" :width="session.media.width" :height="session.media.height" :item="current" :context="context" :variant="variant" :zoom="zoom"/><div class="c-coordinates"><span v-if="variant!=='B'">A · {{ position(current.beforeBbox) }} · {{ size(current.beforeBbox) }} px</span><span v-if="variant!=='A'">B · {{ position(current.afterBbox) }} · {{ size(current.afterBbox) }} px</span></div></figure>
+            </div>
+            <div v-else class="c-empty c-crop-empty">{{ busy?'正在加载当前帧…':items.length?'当前帧图像不可用，请重试加载。':'本视频没有净修改项，所有对象沿用 A，可直接完成确认。' }}</div>
+            <div class="c-context"><div class="c-context-title"><h3>完整帧上下文</h3><small>{{ session.media.width }} × {{ session.media.height }} px · 其他对象淡显</small></div><ConfirmationImage v-if="imageUrl&&context" :src="imageUrl" :width="session.media.width" :height="session.media.height" :item="current" :context="context" variant="full" :zoom="zoom" @select="contextSelect"/><p v-else class="c-empty">图像加载后显示完整帧</p></div>
+          </section>
+          <section class="c-panel c-frame-table"><div class="c-heading"><h2>当前帧修改项 <small>{{ frameItems.length }} 项</small></h2><small>IoU 和位移只表示变化幅度，不代表标注质量</small></div><div class="c-table-scroll"><table><thead><tr><th>对象</th><th>IoU</th><th>中心位移</th><th>A 尺寸 → B 尺寸</th><th>当前选择</th></tr></thead><tbody><tr v-for="c in frameItems" :key="c.changeId" :class="{selected:c.changeId===selected}"><td><button :disabled="blocked" @click="selectItem(c.changeId)">#{{ c.objectId }}</button></td><td>{{ num(c.metrics.iou,3) }}</td><td>{{ num(c.metrics.centerShiftPx) }} px</td><td>{{ size(c.beforeBbox) }} → {{ size(c.afterBbox) }}</td><td :class="c.decision?.choice==='A'?'c-a':c.decision?.choice==='B'?'c-b':''">{{ label(c) }}</td></tr></tbody></table><p v-if="!frameItems.length" class="c-empty">当前帧没有修改项</p></div></section>
+          <section class="c-panel c-queue"><div class="c-queue-nav"><button :disabled="blocked||index<=0" @click="move(-1)">← 上一项</button><span>第 {{ items.length?index+1:0 }} / {{ items.length }} 项</span><button :disabled="blocked||index>=items.length-1" @click="move(1)">下一项 →</button><button :disabled="blocked||!session.resume.firstPendingChangeId" @click="selectItem(session.resume.firstPendingChangeId)">首个待确认</button><label>跳转 <input v-model="jump" aria-label="修改项序号" inputmode="numeric" @keydown.enter="jumpTo"/></label><button :disabled="blocked||!items.length" @click="jumpTo">前往</button></div><div class="c-queue-items"><button v-for="(c,i) in queue" :key="c.changeId" :disabled="blocked" :class="{selected:c.changeId===selected,chosen:!!c.decision}" :title="`第 ${c.frameIndex+1} 帧 · #${c.objectId} · ${label(c)}`" :aria-label="`修改项 ${queueStart+i+1}，${label(c)}`" @click="selectItem(c.changeId)">{{ queueStart+i+1 }}<small>{{ c.decision?.choice||'·' }}</small></button></div><small v-if="items.length>50">显示第 {{ queueStart+1 }}–{{ Math.min(queueStart+50,items.length) }} 项；可用跳转或上一项 / 下一项浏览全部。</small></section>
+        </main>
+        <aside class="confirmation-right">
+          <section class="c-panel c-decision"><div class="c-heading"><h2>确认本项</h2><small>{{ current?label(current):'无修改项' }}</small></div><div class="c-pad"><p v-if="session.readOnlyReason" class="c-notice">{{ session.readOnlyReason }}</p><button v-if="session.permissions.canClaim" class="c-primary c-wide" :disabled="blocked" @click="operation('claim')">领取并开始确认</button><p v-else-if="!session.permissions.canEdit&&session.state!=='confirmed'" class="c-notice">当前任务由已领取的确认员编辑，您可以查看。</p><button class="c-choice c-choice-a" data-testid="choose-a" :aria-pressed="current?.decision?.choice==='A'" :class="{chosen:current?.decision?.choice==='A'}" :disabled="!canChoose" @click="choose('A')"><b>保留原标注 A</b><kbd>A</kbd><small>采用原始位置和尺寸</small></button><button class="c-choice c-choice-b" data-testid="choose-b" :aria-pressed="current?.decision?.choice==='B'" :class="{chosen:current?.decision?.choice==='B'}" :disabled="!canChoose" @click="choose('B')"><b>采用审查标注 B</b><kbd>B</kbd><small>采用审查后的位置和尺寸</small></button><small>点击即保存；可再次选择 A / B 修改结果。</small><label class="c-auto"><input v-model="autoNext" type="checkbox"/>选择后自动跳到下一待确认项</label><button class="c-wide" :disabled="blocked||!session.permissions.canUndo" @click="undo">撤销上一次选择 <small>Ctrl / ⌘ Z</small></button></div></section>
+          <section v-if="session.state==='confirmed'" class="c-panel c-pad c-final"><h2>导出训练数据集</h2><p>最终版本已生成，可导出用于训练的数据集。</p><TrainingDatasetExport v-if="session.finalVersionId && session.permissions.canExport" :key="session.finalVersionId" :final-version-id="session.finalVersionId" :media-name="session.media.name" :disabled="blocked" @open="exportOpen=$event" @busy="exportBusy=$event"/><button class="c-wide" :disabled="blocked||!session.permissions.canExport" @click="download">导出完整视频 JSON</button><button v-if="session.permissions.canReopen" class="c-wide" :disabled="blocked" @click="modal='reopen'">重新确认</button><small v-if="session.finalVersionId" class="c-version" :title="session.finalVersionId">版本 {{ session.finalVersionId }}</small></section>
 
-  <!-- ============ 左栏列表视图 ============ -->
-  <div v-if="view === 'list' || !activeCs" class="space-y-5">
-    <div class="flex items-center justify-between">
-      <h2 class="text-lg font-semibold tracking-wide text-slate-200">对比确认会话</h2>
-      <div class="text-[11px] text-slate-500">共 {{ sessions.length }} 个会话</div>
+          <section class="c-panel c-details"><div class="c-heading"><h2>当前修改详情</h2></div><div v-if="current" class="c-pad"><p class="c-change-type">{{ current.metrics.changeType }}</p><dl class="c-metrics"><div><dt>IoU</dt><dd>{{ num(current.metrics.iou,3) }}</dd></div><div><dt>中心位移</dt><dd>{{ num(current.metrics.centerShiftPx) }} px</dd></div><div><dt>ΔX / ΔY</dt><dd>{{ signed(current.metrics.deltaCenterX) }} / {{ signed(current.metrics.deltaCenterY) }}</dd></div><div><dt>宽 / 高变化</dt><dd>{{ signed(current.metrics.deltaWidth) }} / {{ signed(current.metrics.deltaHeight) }}</dd></div><div><dt>A 尺寸</dt><dd>{{ size(current.beforeBbox) }}</dd></div><div><dt>B 尺寸</dt><dd>{{ size(current.afterBbox) }}</dd></div></dl><small>坐标、尺寸和位移单位均为原图像素。<br>指标不判断 A 或 B 哪个更准确。</small></div><p v-else class="c-empty">无需逐项选择</p></section>
+        </aside>
+      </template>
+      <div v-else class="c-panel c-empty">选择左侧视频，比较原始标注与审查修改。</div>
     </div>
-
-    <div v-if="loading && sessions.length === 0" class="text-center text-slate-500 py-10">加载中...</div>
-    <div v-else-if="sessions.length === 0" class="rounded-xl border border-dashed border-slate-800 p-12 text-center">
-      <div class="text-slate-500 mb-2">没有待确认的视频</div>
-      <div class="text-[11px] text-slate-600">请先去「审查模式」提交并冻结审查结果</div>
-    </div>
-
-    <div v-else class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-      <div v-for="cs in sessions" :key="cs.id"
-           class="group cursor-pointer rounded-xl border border-slate-800 bg-slate-900/50 p-4 transition-all hover:border-indigo-500/60 hover:bg-slate-900"
-           @click="openCs(cs)">
-        <div class="flex items-center justify-between">
-          <span class="text-[11px] font-mono text-slate-500 truncate max-w-[180px]">{{ (cs as any).mediaId || cs.id.slice(-10) }}</span>
-          <span :class="[
-            'rounded-full border px-2 py-0.5 text-[10px] font-medium shrink-0',
-            cs.state === 'confirmed' ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40' :
-            cs.state === 'blocked' ? 'bg-red-500/20 text-red-300 border-red-500/40' :
-            'bg-indigo-500/20 text-indigo-300 border-indigo-500/40'
-          ]">{{ {pending:'待确认',in_progress:'确认中',confirmed:'已确认',blocked:'阻塞',returned:'已退回'}[cs.state] }}</span>
-        </div>
-        <div class="mt-3 flex items-center justify-between text-[11px] text-slate-400">
-          <span>修改项</span>
-          <span class="font-mono text-slate-300">{{ (cs as any).totalChanges ?? 0 }}</span>
-        </div>
-        <div class="mt-1 flex items-center justify-between text-[11px] text-slate-400">
-          <span>已确认</span>
-          <span class="font-mono text-slate-300">{{ (cs as any).decidedCount ?? 0 }}/{{ (cs as any).totalChanges ?? 0 }}</span>
-        </div>
-        <div class="mt-1.5 h-1.5 rounded-full bg-slate-800 overflow-hidden">
-          <div class="h-full bg-gradient-to-r from-indigo-500 to-emerald-500 transition-all"
-               :style="{ width: (cs as any).totalChanges ? Math.round(((cs as any).decidedCount / (cs as any).totalChanges) * 100) + '%' : '0%' }"></div>
-        </div>
-        <button class="mt-3 w-full btn-primary" @click.stop="openCs(cs)">
-          {{ cs.state === 'confirmed' ? '查看已确认' : '继续确认' }} →
-        </button>
-      </div>
-    </div>
-
-    <!-- FinalVersion 导出区 -->
-    <div v-if="finalVersions.length > 0" class="pt-4 border-t border-slate-800">
-      <h3 class="text-sm font-medium text-slate-300 mb-3">最终版本（已确认冻结）</h3>
-      <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        <div v-for="fv in finalVersions" :key="fv.id"
-             class="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-4">
-          <div class="flex items-center justify-between">
-            <span class="font-mono text-[11px] text-emerald-300">{{ fv.id.slice(-12) }}</span>
-            <span class="text-[10px] text-emerald-400">✓ frozen</span>
-          </div>
-          <div class="mt-1 text-[11px] text-slate-500">帧 {{ fv.frameCount }} · 修改 {{ (fv as any).changedFrames ?? 0 }}</div>
-          <div class="mt-3 flex gap-1">
-            <button class="btn-primary !py-1 !px-2 text-[10px]" @click="doExport(fv.id)">📦 导出 COCO/YOLO</button>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- ============ Session 视图（原型 2 & 3 共用） ============ -->
-  <div v-else-if="view === 'session' && activeCs" class="h-[calc(100vh-80px)] overflow-hidden flex flex-col">
-
-    <!-- 顶部面包屑 + 文件信息栏 -->
-    <div class="flex items-center gap-3 px-4 py-2 border-b border-slate-800 bg-slate-900/50">
-      <button class="btn-secondary" @click="back">← 返回列表</button>
-      <div class="text-sm text-slate-200 font-medium">
-        <span class="font-mono">{{ (activeCs as any).mediaId?.slice(0, 10) || activeCs.id.slice(0, 10) }}.avi</span>
-        <span class="ml-3 text-[11px] text-slate-500">总修改项 <span class="text-slate-300 font-mono">{{ totalChanges }}</span>
-          <span class="text-slate-600 mx-2">/</span>
-          当前修改项 <span class="text-slate-300 font-mono">{{ activeIndex + 1 }} / {{ totalChanges }}</span>
-          <span class="text-slate-600 mx-2">·</span>
-          当前帧 <span class="text-slate-300 font-mono">#{{ currentChange?.frameIndex ?? 0 }}</span></span>
-      </div>
-      <span :class="[
-        'rounded-full border px-2 py-0.5 text-[11px]',
-        activeCs.state === 'confirmed' ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40' :
-        activeCs.state === 'blocked' ? 'bg-red-500/20 text-red-300 border-red-500/40' :
-        'bg-indigo-500/20 text-indigo-300 border-indigo-500/40'
-      ]">{{ {pending:'待确认',in_progress:'确认中',confirmed:'已确认',blocked:'阻塞'}[activeCs.state] }}</span>
-    </div>
-
-    <!-- 主三栏 -->
-    <div class="flex-1 grid gap-0 overflow-hidden" style="grid-template-columns: 240px 1fr 320px;">
-
-      <!-- 左栏：已审核视频列表（原型风格） -->
-      <div class="border-r border-slate-800 bg-slate-950/50 flex flex-col overflow-hidden">
-        <div class="px-3 py-2 border-b border-slate-800">
-          <h3 class="text-xs font-medium text-slate-400">已审核视频列表</h3>
-          <div class="mt-1 flex items-center gap-1">
-            <div class="flex items-center rounded border border-slate-700 bg-slate-900/70 flex-1 px-2 py-1">
-              <span class="text-slate-600 text-[10px]">🔍</span>
-              <input v-model="leftSearch" placeholder="搜索视频名称..."
-                     class="flex-1 bg-transparent text-[11px] text-slate-200 placeholder-slate-600 focus:outline-none ml-1" />
-            </div>
-          </div>
-          <div class="mt-1 flex items-center gap-0.5">
-            <button v-for="f in (['all','pending','confirmed'] as const)" :key="f"
-                    class="px-1.5 py-0.5 text-[10px] rounded transition-colors"
-                    :class="leftFilter === f ? 'bg-indigo-500/20 text-indigo-300' : 'text-slate-500 hover:text-slate-300'"
-                    @click="leftFilter = f">
-              {{ {all:`全部(${sessions.length})`, pending:`待确认(${sessions.filter(s=>s.state!=='confirmed').length})`, confirmed:`已确认(${sessions.filter(s=>s.state==='confirmed').length})`}[f] }}
-            </button>
-          </div>
-        </div>
-        <div class="flex-1 overflow-y-auto p-2 space-y-1.5">
-          <div v-for="cs in filteredLeft" :key="cs.id"
-               class="rounded-lg border p-2 transition-colors cursor-pointer"
-               :class="[
-                 cs.id === activeCs.id ? 'border-indigo-500 bg-indigo-500/10' :
-                 'border-slate-800 hover:border-slate-600 bg-slate-900/30'
-               ]" @click="openCs(cs)">
-            <div class="flex items-center gap-2">
-              <div class="w-8 h-6 rounded bg-slate-800 overflow-hidden shrink-0 flex items-center justify-center text-slate-600 text-[10px]">帧</div>
-              <div class="flex-1 min-w-0">
-                <div class="text-[11px] text-slate-300 truncate">{{ (cs as any).mediaId || cs.id.slice(-12) }}</div>
-                <div class="text-[9px] text-slate-500">已确认 {{ (cs as any).decidedCount ?? 0 }} / {{ (cs as any).totalChanges ?? 0 }}</div>
-              </div>
-            </div>
-            <div class="mt-1 h-1 rounded-full bg-slate-800 overflow-hidden">
-              <div class="h-full transition-all"
-                   :class="cs.state === 'confirmed' ? 'bg-emerald-500' : 'bg-indigo-500'"
-                   :style="{ width: (cs as any).totalChanges ? Math.round(((cs as any).decidedCount/(cs as any).totalChanges)*100)+'%' : '0%' }"></div>
-            </div>
-            <div class="mt-1 flex items-center justify-between">
-              <span class="text-[9px] text-slate-600">总修改项 {{ (cs as any).totalChanges ?? 0 }}</span>
-              <span :class="[
-                'text-[9px] font-medium',
-                cs.state === 'confirmed' ? 'text-emerald-400' : 'text-amber-400'
-              ]">{{ cs.state === 'confirmed' ? '✓ 已确认' : '待确认' }}</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- 中央主区 -->
-      <div class="flex flex-col overflow-hidden bg-slate-900/20">
-
-        <!-- 模式切换 Tab（原型顶部） -->
-        <div class="flex items-center gap-2 px-4 py-2 border-b border-slate-800 bg-slate-900/30">
-          <span class="text-[11px] text-slate-500 mr-1">顶部对比模式</span>
-          <div class="flex items-center rounded border border-slate-700 overflow-hidden">
-            <button class="px-3 py-1 text-[11px] transition-colors"
-                    :class="compareMode === 'side-by-side' ? 'bg-indigo-500/20 text-indigo-300' : 'text-slate-400 hover:text-slate-200'"
-                    @click="compareMode = 'side-by-side'">A/B 对比</button>
-            <button class="px-3 py-1 text-[11px] transition-colors"
-                    :class="compareMode === 'overlay' ? 'bg-indigo-500/20 text-indigo-300' : 'text-slate-400 hover:text-slate-200'"
-                    @click="compareMode = 'overlay'">叠加对比</button>
-          </div>
-          <span class="ml-auto text-[10px] text-slate-600">提示：A = 原始标注（紫色虚线）· B = 审查修改（青色实线）</span>
-        </div>
-
-        <!-- 上：ROI 对比区（两种模式切换） -->
-        <div class="border-b border-slate-800 bg-slate-950/30">
-
-          <!-- A/B 并排（原型图 2） -->
-          <template v-if="compareMode === 'side-by-side'">
-            <div class="p-4 grid gap-4" style="grid-template-columns: 1fr 1fr;">
-              <!-- A -->
-              <div class="rounded-lg border border-indigo-500/30 bg-slate-900/50 overflow-hidden">
-                <div class="px-3 py-1.5 border-b border-slate-800 flex items-center justify-between">
-                  <span class="text-[11px] text-indigo-300 font-medium">A 原始标注（标注员）</span>
-                  <span class="text-[10px] text-slate-500 font-mono">ID #{{ currentChange?.objectId ?? 0 }}</span>
-                </div>
-                <div class="relative bg-black flex items-center justify-center" style="min-height: 160px;">
-                  <img v-if="roi && mediaFrameCache[currentChange?.frameIndex ?? -1]"
-                       :src="mediaFrameCache[currentChange!.frameIndex]"
-                       class="max-w-full max-h-[260px] object-contain"
-                       :style="`object-position: center;`" />
-                  <!-- ROI 裁剪：用负 margin 实现 -->
-                  <div v-if="roi" class="absolute inset-0 overflow-hidden pointer-events-none">
-                    <!-- 这里做 ROI 裁剪：把 img 用 transform 或直接裁剪 -->
-                  </div>
-                  <!-- A bbox 紫色虚线（相对当前全图坐标） -->
-                  <div v-if="currentChange"
-                       class="absolute border-2 border-dashed border-indigo-400 pointer-events-none"
-                       :style="bboxStyle(currentChange.beforeBbox, '#818cf8')"></div>
-                </div>
-                <div class="px-3 py-1.5 text-[10px] text-slate-500 font-mono">
-                  A = {{ (currentChange?.beforeBbox ?? []).map((v,i) => i < 2 ? `${v},` : v).join(' ') }}
-                  <span class="ml-3 text-slate-600">w={{ (currentChange?.beforeBbox?.[2] ?? 0) - (currentChange?.beforeBbox?.[0] ?? 0) }} · h={{ (currentChange?.beforeBbox?.[3] ?? 0) - (currentChange?.beforeBbox?.[1] ?? 0) }}</span>
-                </div>
-              </div>
-
-              <!-- B -->
-              <div class="rounded-lg border border-emerald-500/30 bg-slate-900/50 overflow-hidden">
-                <div class="px-3 py-1.5 border-b border-slate-800 flex items-center justify-between">
-                  <span class="text-[11px] text-emerald-300 font-medium">B 审查修改（审查员）</span>
-                  <span class="text-[10px] text-slate-500 font-mono">ID #{{ currentChange?.objectId ?? 0 }}</span>
-                </div>
-                <div class="relative bg-black flex items-center justify-center" style="min-height: 160px;">
-                  <img v-if="roi && mediaFrameCache[currentChange?.frameIndex ?? -1]"
-                       :src="mediaFrameCache[currentChange!.frameIndex]"
-                       class="max-w-full max-h-[260px] object-contain" />
-                  <div v-if="currentChange"
-                       class="absolute border-2 border-emerald-400 pointer-events-none"
-                       :style="bboxStyle(currentChange.afterBbox, '#34d399')"></div>
-                </div>
-                <div class="px-3 py-1.5 text-[10px] text-slate-500 font-mono">
-                  B = {{ (currentChange?.afterBbox ?? []).map((v,i) => i < 2 ? `${v},` : v).join(' ') }}
-                  <span class="ml-3 text-slate-600">w={{ (currentChange?.afterBbox?.[2] ?? 0) - (currentChange?.afterBbox?.[0] ?? 0) }} · h={{ (currentChange?.afterBbox?.[3] ?? 0) - (currentChange?.afterBbox?.[1] ?? 0) }}</span>
-                </div>
-              </div>
-            </div>
-          </template>
-
-          <!-- 叠加对比（原型图 3） -->
-          <template v-else-if="compareMode === 'overlay'">
-            <div class="p-4">
-              <div class="rounded-lg border border-slate-700 bg-slate-900/50 overflow-hidden">
-                <div class="px-3 py-1.5 border-b border-slate-800 flex items-center justify-between">
-                  <span class="text-[11px] text-slate-300 font-medium">叠加对比（同一目标的 A 与 B 标注）</span>
-                  <div class="flex items-center gap-3 text-[10px]">
-                    <span class="flex items-center gap-1"><span class="inline-block w-3 h-3 border-2 border-dashed border-indigo-400 rounded-sm"></span>A 原始标注 #{{ currentChange?.objectId ?? 0 }}</span>
-                    <span class="flex items-center gap-1"><span class="inline-block w-3 h-3 border-2 border-emerald-400 rounded-sm"></span>B 审查修改 #{{ currentChange?.objectId ?? 0 }}</span>
-                  </div>
-                </div>
-                <div class="relative bg-black flex items-center justify-center" style="min-height: 260px;">
-                  <img v-if="mediaFrameCache[currentChange?.frameIndex ?? -1]"
-                       :src="mediaFrameCache[currentChange!.frameIndex]"
-                       class="max-w-full max-h-[320px] object-contain" />
-                  <!-- A 紫色虚线 -->
-                  <div v-if="currentChange"
-                       class="absolute border-2 border-dashed border-indigo-400 pointer-events-none"
-                       :style="bboxStyle(currentChange.beforeBbox, '#818cf8')"></div>
-                  <!-- B 青色实线 -->
-                  <div v-if="currentChange"
-                       class="absolute border-2 border-emerald-400 pointer-events-none"
-                       :style="bboxStyle(currentChange.afterBbox, '#34d399')"></div>
-                  <!-- 标签外置 -->
-                  <div v-if="currentChange"
-                       class="absolute pointer-events-none">
-                    <span class="bg-indigo-500 text-white text-[9px] px-1 rounded font-mono absolute"
-                          :style="{ left: currentChange.beforeBbox[0]+'px', top: (currentChange.beforeBbox[1]-16)+'px' }">A#{{ currentChange.objectId }}</span>
-                    <span class="bg-emerald-500 text-white text-[9px] px-1 rounded font-mono absolute"
-                          :style="{ left: currentChange.afterBbox[0]+'px', top: (currentChange.afterBbox[1]-30)+'px' }">B#{{ currentChange.objectId }}</span>
-                  </div>
-                </div>
-                <div class="px-3 py-1.5 text-[10px] text-slate-500 font-mono flex gap-6">
-                  <span>A: x={{ currentChange?.beforeBbox?.[0] ?? 0 }} / y={{ currentChange?.beforeBbox?.[1] ?? 0 }} / w={{ (currentChange?.beforeBbox?.[2] ?? 0)-(currentChange?.beforeBbox?.[0] ?? 0) }} / h={{ (currentChange?.beforeBbox?.[3] ?? 0)-(currentChange?.beforeBbox?.[1] ?? 0) }}</span>
-                  <span>B: x={{ currentChange?.afterBbox?.[0] ?? 0 }} / y={{ currentChange?.afterBbox?.[1] ?? 0 }} / w={{ (currentChange?.afterBbox?.[2] ?? 0)-(currentChange?.afterBbox?.[0] ?? 0) }} / h={{ (currentChange?.afterBbox?.[3] ?? 0)-(currentChange?.afterBbox?.[1] ?? 0) }}</span>
-                </div>
-              </div>
-            </div>
-          </template>
-        </div>
-
-        <!-- 下 1：当前帧全图（固定展示，原型要求始终展示） -->
-        <div class="border-b border-slate-800 bg-slate-900/30">
-          <div class="flex items-center gap-3 px-4 py-2">
-            <span class="text-[11px] text-slate-400 font-medium">当前帧全图（固定展示）</span>
-            <span class="text-[10px] text-slate-600">· 第 {{ currentChange?.frameIndex ?? 0 }} / {{ (activeCs as any).frameCount ?? '?' }} 帧 · 共 {{ changes.length }} 项修改</span>
-            <span class="ml-auto text-[10px] text-slate-500">缩放
-              <button class="px-1.5 py-0.5 rounded border border-slate-700 hover:text-slate-300" @click="zoomOut">−</button>
-              <span class="mx-1 font-mono w-12 text-center">{{ zoomPct }}%</span>
-              <button class="px-1.5 py-0.5 rounded border border-slate-700 hover:text-slate-300" @click="zoomIn">+</button>
-              <button class="px-1.5 py-0.5 rounded border border-slate-700 hover:text-slate-300 ml-1" @click="zoomReset">重置</button>
-            </span>
-          </div>
-          <div class="px-4 pb-3">
-            <div class="relative rounded-lg border border-slate-700 bg-black overflow-hidden" :style="{ transform: `scale(${zoomPct/100})`, transformOrigin: 'top left' }">
-              <img v-if="currentChange && mediaFrameCache[currentChange.frameIndex]"
-                   :src="mediaFrameCache[currentChange.frameIndex]"
-                   class="w-full h-auto object-contain" style="max-height: 320px;" />
-              <div v-else class="h-[240px] flex items-center justify-center text-slate-600 text-xs">全帧加载中...</div>
-              <!-- 当前帧所有修改项 bbox 叠加 -->
-              <template v-if="currentChange">
-                <template v-for="c in changes.filter(x => x.frameIndex === currentChange.frameIndex)" :key="c.changeId">
-                  <!-- 未选的用低对比 -->
-                  <div v-if="c.changeId !== currentChange.changeId"
-                       class="absolute border border-slate-500/50 pointer-events-none"
-                       :style="bboxStyle(c.decision?.choice === 'B' ? c.afterBbox : c.beforeBbox, '#64748b33')"></div>
-                  <!-- 当前选中的 -->
-                  <div v-else class="absolute border-2 pointer-events-none"
-                       :class="currentChange.decision?.choice === 'A' ? 'border-indigo-400' : 'border-emerald-400'"
-                       :style="bboxStyle(currentChange.decision?.choice === 'A' ? currentChange.beforeBbox : currentChange.afterBbox, currentChange.decision?.choice === 'A' ? '#818cf8' : '#34d399')">
-                    <span class="absolute -top-3 left-0 text-[9px] font-mono bg-slate-900/80 text-slate-200 px-0.5 rounded pointer-events-none">#{{ String(currentChange.objectId).padStart(3,'0') }}</span>
-                  </div>
-                </template>
-              </template>
-            </div>
-            <!-- 上一项 / 下一项 -->
-            <div class="mt-3 flex items-center justify-center gap-2">
-              <button class="btn-secondary !py-1 !px-3 text-[11px]" :disabled="activeIndex === 0" @click="prevChange">← 上一项</button>
-              <span class="text-[11px] text-slate-500">{{ activeIndex + 1 }} / {{ totalChanges }}</span>
-              <button class="btn-secondary !py-1 !px-3 text-[11px]" :disabled="activeIndex === totalChanges - 1" @click="nextChange">下一项 →</button>
-            </div>
-          </div>
-        </div>
-
-        <!-- 下 2：修改项列表（仅被修改的项） -->
-        <div class="flex-1 overflow-y-auto bg-slate-950/20">
-          <div class="px-4 py-2 flex items-center justify-between border-b border-slate-800">
-            <span class="text-[11px] text-slate-400 font-medium">修改项列表（仅显示被审查员修改的部分）</span>
-            <span class="text-[10px] text-slate-600">{{ changes.length }} 项 · {{ changes.filter(c=>c.decision).length }} 已确认</span>
-          </div>
-          <table class="w-full text-[11px]">
-            <thead class="bg-slate-900/50 text-slate-500 sticky top-0 z-10">
-              <tr>
-                <th class="px-2 py-1.5 text-left w-10"></th>
-                <th class="px-2 py-1.5 text-left w-14">ID</th>
-                <th class="px-2 py-1.5 text-left w-16">帧号</th>
-                <th class="px-2 py-1.5 text-left w-16">原缩略图</th>
-                <th class="px-2 py-1.5 text-left w-16">审后缩略图</th>
-                <th class="px-2 py-1.5 text-left w-14">IoU</th>
-                <th class="px-2 py-1.5 text-left w-16">位置变化(px)</th>
-                <th class="px-2 py-1.5 text-left w-14">尺寸变化</th>
-                <th class="px-2 py-1.5 text-left w-24">当前确认结果</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="(c, i) in changes" :key="c.changeId"
-                  class="border-b border-slate-800 cursor-pointer transition-colors"
-                  :class="i === activeIndex ? 'bg-indigo-500/10 border-indigo-500/40' : 'hover:bg-slate-800/30'"
-                  @click="activeIndex = i">
-                <td class="px-2 py-1.5">
-                  <input type="checkbox" class="accent-indigo-500" :checked="!!c.decision" :disabled="true" />
-                </td>
-                <td class="px-2 py-1.5 font-mono text-slate-300">#{{ String(c.objectId).padStart(3,'0') }}</td>
-                <td class="px-2 py-1.5 font-mono text-slate-400">{{ c.frameIndex }}</td>
-                <!-- 缩略图 A（紫色虚线框覆盖） -->
-                <td class="px-2 py-1.5">
-                  <div v-if="mediaFrameCache[c.frameIndex]" class="relative w-12 h-10 rounded bg-black overflow-hidden">
-                    <img :src="mediaFrameCache[c.frameIndex]" class="w-full h-full object-cover" />
-                    <div class="absolute border border-dashed border-indigo-400"
-                         :style="bboxStyleScaled(c.beforeBbox, '#818cf8')"></div>
-                  </div>
-                </td>
-                <!-- 缩略图 B（青色实线） -->
-                <td class="px-2 py-1.5">
-                  <div v-if="mediaFrameCache[c.frameIndex]" class="relative w-12 h-10 rounded bg-black overflow-hidden">
-                    <img :src="mediaFrameCache[c.frameIndex]" class="w-full h-full object-cover" />
-                    <div class="absolute border border-emerald-400"
-                         :style="bboxStyleScaled(c.afterBbox, '#34d399')"></div>
-                  </div>
-                </td>
-                <td class="px-2 py-1.5 font-mono" :class="!c.iou || c.iou > 0.7 ? 'text-emerald-400' : c.iou > 0.4 ? 'text-amber-400' : 'text-red-400'">
-                  {{ c.iou !== undefined && c.iou !== null ? (+c.iou).toFixed(2) : '—' }}
-                </td>
-                <td class="px-2 py-1.5 font-mono text-slate-400">({{ deltaDx(c) }}, {{ deltaDy(c) }})</td>
-                <td class="px-2 py-1.5 font-mono text-slate-400">({{ deltaW(c) }}, {{ deltaH(c) }})</td>
-                <td class="px-2 py-1.5">
-                  <select :value="c.decision?.choice ?? 'pending'"
-                          class="w-full rounded bg-slate-950 border border-slate-700 text-[10px] px-1 py-0.5 focus:border-indigo-500 focus:outline-none"
-                          @change="(e: any) => { const v = e.target.value; if (v === 'A' || v === 'B') selectDraft(v); submitChoice(); }">
-                    <option value="pending">待确认</option>
-                    <option value="A" :disabled="true" class="text-slate-500">保留原标注 A</option>
-                    <option value="A">保留 A</option>
-                    <option value="B">采纳 B</option>
-                  </select>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-
-          <!-- Finalize 区 -->
-          <div v-if="activeCs.state !== 'confirmed'" class="p-4 border-t border-slate-800 flex items-center justify-between">
-            <div class="text-[11px] text-slate-500">
-              全部 {{ totalChanges }} 项：已确认 {{ decidedCount }} · 待确认 <span class="text-amber-400">{{ pendingCount }}</span>
-            </div>
-            <button :disabled="!allDecided"
-                    class="btn-primary !py-1.5"
-                    @click="doFinalize">
-              {{ allDecided ? '🔒 完成全片确认' : `还剩 ${pendingCount} 项待选择` }}
-            </button>
-          </div>
-          <div v-else class="p-4 border-t border-emerald-500/30 bg-emerald-500/5 text-center">
-            <div class="text-[11px] text-emerald-400">✓ 全片确认已完成，最终版本已冻结</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- 右栏：对比确认进度 + 统计 + 操作（原型风格） -->
-      <div class="border-l border-slate-800 bg-slate-950/50 flex flex-col overflow-y-auto">
-
-        <!-- 进度 -->
-        <div class="p-3 border-b border-slate-800">
-          <h3 class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">对比确认进度</h3>
-          <div class="mt-3 relative">
-            <!-- 圆环 -->
-            <div class="flex items-center gap-3">
-              <div class="relative w-[80px] h-[80px] shrink-0">
-                <svg class="w-full h-full -rotate-90" viewBox="0 0 80 80">
-                  <circle cx="40" cy="40" r="32" fill="none" stroke="rgb(30,41,59)" stroke-width="8" />
-                  <!-- 采纳 B 部分（青色） -->
-                  <circle cx="40" cy="40" r="32" fill="none"
-                          stroke="#10b981" stroke-width="8" stroke-linecap="round"
-                          :stroke-dasharray="201"
-                          :stroke-dashoffset="201 * (1 - (totalChanges ? adoptedBCount / totalChanges : 0))" />
-                  <!-- 保留 A 部分（紫色）叠在上面 -->
-                  <circle cx="40" cy="40" r="32" fill="none"
-                          stroke="#6366f1" stroke-width="8" stroke-linecap="round"
-                          :stroke-dasharray="201"
-                          :stroke-dashoffset="201 * (1 - (totalChanges ? adoptedBCount / totalChanges + keptACount / totalChanges : 0))" />
-                </svg>
-                <div class="absolute inset-0 flex items-center justify-center text-sm font-mono font-semibold text-slate-200">{{ progressPct }}%</div>
-              </div>
-              <div class="flex-1 space-y-1.5">
-                <div class="flex items-center justify-between text-[11px]">
-                  <span class="text-slate-500">总修改项</span>
-                  <span class="font-mono text-slate-200">{{ totalChanges }}</span>
-                </div>
-                <div class="flex items-center justify-between text-[11px]">
-                  <span class="text-slate-500">已确认</span>
-                  <span class="font-mono text-emerald-300">{{ decidedCount }}</span>
-                </div>
-                <div class="flex items-center justify-between text-[11px]">
-                  <span class="text-slate-500">待确认</span>
-                  <span class="font-mono text-amber-400">{{ pendingCount }}</span>
-                </div>
-              </div>
-            </div>
-            <!-- 采纳 B / 保留 A -->
-            <div class="mt-3 grid grid-cols-2 gap-2">
-              <div class="rounded-lg border border-emerald-500/40 bg-emerald-500/5 px-2 py-1.5 text-center">
-                <div class="text-[9px] text-slate-500">采纳 B</div>
-                <div class="text-base font-mono font-semibold text-emerald-300">{{ adoptedBCount }}</div>
-              </div>
-              <div class="rounded-lg border border-indigo-500/40 bg-indigo-500/5 px-2 py-1.5 text-center">
-                <div class="text-[9px] text-slate-500">保留 A</div>
-                <div class="text-base font-mono font-semibold text-indigo-300">{{ keptACount }}</div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- 当前修改项信息 -->
-        <div class="p-3 border-b border-slate-800">
-          <h3 class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">当前修改项信息</h3>
-          <div class="mt-2 grid grid-cols-2 gap-2 text-[11px]">
-            <div>
-              <div class="text-slate-500">对象 ID</div>
-              <div class="font-mono text-slate-200 text-sm">#{{ String(currentChange?.objectId ?? 0).padStart(3,'0') }}</div>
-            </div>
-            <div>
-              <div class="text-slate-500">修改项</div>
-              <div class="font-mono text-slate-200 text-sm">{{ currentChange ? (changes.indexOf(currentChange)+1) : 0 }}</div>
-            </div>
-          </div>
-          <div class="mt-3 space-y-1.5 text-[11px]">
-            <div class="flex items-center justify-between">
-              <span class="text-slate-500">IoU (A vs B)</span>
-              <span class="font-mono text-sm"
-                    :class="!currentChange?.iou || currentChange.iou > 0.7 ? 'text-emerald-400' : currentChange.iou > 0.4 ? 'text-amber-400' : 'text-red-400'">
-                {{ currentChange?.iou !== undefined && currentChange?.iou !== null ? (+currentChange.iou).toFixed(2) : '—' }}
-              </span>
-            </div>
-            <div class="flex items-center justify-between">
-              <span class="text-slate-500">位置变化</span>
-              <span class="font-mono text-sm text-slate-300">{{ currentChange ? `${((deltaDx(currentChange)**2+deltaDy(currentChange)**2)**0.5).toFixed(1)} px` : '—' }}</span>
-            </div>
-            <div class="flex items-center justify-between">
-              <span class="text-slate-500">尺寸变化</span>
-              <span class="font-mono text-sm text-slate-300">{{ currentChange ? `+${deltaW(currentChange)} × +${deltaH(currentChange)}` : '—' }}</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- 单选 + 备注 + 提交按钮 -->
-        <div class="p-3 flex-1 flex flex-col gap-3">
-          <h3 class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">最终采用哪一个标注？</h3>
-
-          <!-- A -->
-          <button class="w-full flex items-center gap-2 px-3 py-2 rounded-lg border transition-colors text-left"
-                  :class="(draftChoice ?? currentChange?.decision?.choice) === 'A' ? 'border-indigo-500 bg-indigo-500/10' : 'border-slate-700 hover:border-indigo-500/60'"
-                  :disabled="activeCs.state === 'confirmed'"
-                  @click="selectDraft('A')">
-            <span class="w-4 h-4 rounded-full border-2 border-indigo-400 flex items-center justify-center shrink-0">
-              <span v-if="(draftChoice ?? currentChange?.decision?.choice) === 'A'" class="w-2 h-2 rounded-full bg-indigo-400"></span>
-            </span>
-            <span class="text-[11px] text-slate-200">保留原标注 <span class="text-indigo-400 font-mono">A</span></span>
-          </button>
-
-          <!-- B -->
-          <button class="w-full flex items-center gap-2 px-3 py-2 rounded-lg border transition-colors text-left"
-                  :class="(draftChoice ?? currentChange?.decision?.choice) === 'B' ? 'border-emerald-500 bg-emerald-500/10' : 'border-slate-700 hover:border-emerald-500/60'"
-                  :disabled="activeCs.state === 'confirmed'"
-                  @click="selectDraft('B')">
-            <span class="w-4 h-4 rounded-full border-2 border-emerald-400 flex items-center justify-center shrink-0">
-              <span v-if="(draftChoice ?? currentChange?.decision?.choice) === 'B'" class="w-2 h-2 rounded-full bg-emerald-400"></span>
-            </span>
-            <span class="text-[11px] text-slate-200">采用审查标注 <span class="text-emerald-400 font-mono">B</span></span>
-          </button>
-
-          <!-- 备注 -->
-          <div>
-            <div class="flex items-center justify-between">
-              <span class="text-[11px] text-slate-400">确认备注（可选）</span>
-              <span class="text-[9px] text-slate-600">{{ note.length }}/200</span>
-            </div>
-            <textarea v-model="note" maxlength="200" rows="2"
-                      class="mt-1 w-full rounded-lg bg-slate-950 border border-slate-700 px-2 py-1.5 text-[11px] text-slate-200 placeholder-slate-600 focus:border-indigo-500 focus:outline-none resize-none"
-                      placeholder="输入备注，说明选择的原因..."
-                      :disabled="activeCs.state === 'confirmed'"></textarea>
-          </div>
-
-          <!-- 提交本项确认 -->
-          <button class="w-full btn-primary !py-2 !text-xs"
-                  :disabled="activeCs.state === 'confirmed' || !draftChoice"
-                  @click="submitChoice()">
-            提交本项确认
-          </button>
-
-          <div class="text-[10px] text-slate-600 text-center pt-1 border-t border-slate-800">
-            快捷键: <span class="text-indigo-400">A</span> = 保留原标注
-            <span class="mx-1">·</span>
-            <span class="text-emerald-400">B</span> = 采用审查标注
-          </div>
-        </div>
-      </div>
-    </div>
+    <footer class="confirmation-footer" aria-live="polite"><strong>{{ session?caption:'等待选择视频' }}</strong><span>{{ notice }}</span></footer>
+    <div v-if="modal" class="c-modal-mask" @click.self="!busy&&(modal=null)"><section ref="dialog" class="c-modal" role="dialog" aria-modal="true" aria-labelledby="confirmation-dialog-title">
+      <template v-if="modal==='help'"><h2 id="confirmation-dialog-title">对比确认快捷键</h2><dl><div><dt>A / B</dt><dd>保留 A / 采用 B，立即保存；自动下一项由勾选项控制。</dd></div><div><dt>← / →</dt><dd>浏览上一 / 下一修改项，不创建选择。</dd></div><div><dt>Ctrl / ⌘ Z</dt><dd>撤销本视频上一次选择，返回该项；可连续撤销，刷新后仍有效。</dd></div><div><dt>?</dt><dd>打开本说明。</dd></div><div><dt>Esc / Tab</dt><dd>关闭对话框 / 在对话框内切换焦点。</dd></div></dl><p>输入框、中文输入法组合输入、长按重复键和对话框内不触发业务快捷键。只读、保存中或保存失败待处理时不能选择。完成视频需点击按钮确认。</p><button @click="modal=null">关闭</button></template>
+      <template v-else-if="modal==='complete'"><h2 id="confirmation-dialog-title">完成本视频确认？</h2><p>共 {{ session?.progress.totalChanges }} 个修改项，保留 A {{ session?.progress.keptA }} 项，采用 B {{ session?.progress.adoptedB }} 项。将生成包含全部 {{ session?.media.frameCount }} 帧的最终版本，未修改对象沿用 A，空帧保留。</p><p>完成后只读；可通过“重新确认”创建后续版本。</p><button :disabled="busy" @click="modal=null">继续检查</button><button class="c-primary" :disabled="blocked" @click="complete">确认完成</button></template>
+      <template v-else-if="modal==='reopen'"><h2 id="confirmation-dialog-title">重新确认本视频？</h2><p>保留当前所有选择，允许继续修改。历史最终版本永久保留；重新确认期间暂停导出训练数据集，已有训练包也暂不可下载。再次完成后生成新的最终版本，只能导出该版本的训练数据集。</p><button @click="modal=null">取消</button><button class="c-primary" :disabled="blocked" @click="reopen">开始重新确认</button></template>
+      <template v-else-if="modal==='resume'"><h2 id="confirmation-dialog-title">继续上次的确认进度</h2><p>已恢复上次查看的位置。您也可以跳到首个尚未选择的修改项。</p><button @click="modal=null">留在上次位置</button><button class="c-primary" @click="modal=null;selectItem(session!.resume.firstPendingChangeId)">从首个待确认开始</button></template>
+      <template v-else><h2 id="confirmation-dialog-title">读取服务器当前结果？</h2><p>本地操作可能已经保存，也可能尚未保存。读取成功后，将采用服务器结果并清除本地未决操作。需要时可重新作出选择。</p><p>建议先“重试原请求”；重复请求不会生成重复选择。{{ errorCode?'错误代码：'+errorCode:'' }}</p><button @click="modal=null">取消</button><button @click="backup">备份未决操作</button><button class="c-primary" :disabled="busy" @click="reloadServer">采用服务器结果</button></template>
+    </section></div>
   </div>
 </template>
-
-<style>
-.btn-primary {
-  @apply px-3 py-1.5 text-xs font-medium rounded-lg bg-gradient-to-br from-indigo-500 to-indigo-600 text-white shadow-md shadow-indigo-500/20 hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed transition-all;
-}
-.btn-secondary {
-  @apply px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-700 bg-slate-900/60 text-slate-300 hover:bg-slate-800/60 hover:text-slate-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors;
-}
-</style>
+<style src="../confirmation/confirmation.css"></style>
