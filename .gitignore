@@ -17,5 +17,7 @@ backend/data/app.db-shm
 backend/data/app.db-wal
 
 /work/
+/output/
 
-/output/playwright/
+.DS_Store
+**/.DS_Store
