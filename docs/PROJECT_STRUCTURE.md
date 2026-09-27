@@ -63,5 +63,5 @@ npm run build --prefix frontend
 - `SAM3_TRACK_FRAMES` 当前代码默认 **120**，包含 seed 帧；环境变量可覆盖。异常参数见 `services/anomaly_detector.py`，不要在 UI 写死单轮帧数。
 - `JWT_SECRET` 生产环境应配置；不把密钥/token 写入文档或日志。
 - GPU 任务、来源锁及训练导出队列使用进程内状态，保持 **单后端进程、单 Uvicorn worker**。扩容前需要单独设计，不能直接增加 workers。
-- Docker 默认 CPU 基础模式不启用 AI Tracking；`compose.gpu.yaml` 启用 GPU/模型挂载。两种模式均支持完整人工标注→审查→确认→导出。`SAM3_ENABLED` 的本机开发默认值仍为 true，Compose 明确覆盖。
+- Docker 首次通过部署脚本或配置模板默认启用 GPU + AI Tracking（`compose.yaml` + `compose.gpu.yaml`）；显式 `cpu` 仅人工模式使用基础 Compose，不启用 AI。已有 `.env` 保留原模式。两种模式均支持完整人工标注→审查→确认→导出。`SAM3_ENABLED` 的本机开发默认值仍为 true，Compose 明确覆盖。
 - Docker 设置 `APP_DATA_DIR=/data/database`，日志与 DB 同卷持久化；启动前校验密钥、目录和 GPU 模型条件。部署细节见 [DOCKER_DEPLOYMENT.md](DOCKER_DEPLOYMENT.md)。

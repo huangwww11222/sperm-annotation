@@ -13,7 +13,7 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { throw '请先安�
 Invoke-Docker -DockerArgs @('info', '--format', '{{.OSType}}')
 Invoke-Docker -DockerArgs @('compose', 'version')
 if (-not (Test-Path .env)) {
-    if (-not $Mode) { $Mode = 'cpu' }
+    if (-not $Mode) { $Mode = 'gpu' }
     $files = if ($Mode -eq 'gpu') { 'compose.yaml,compose.gpu.yaml' } else { 'compose.yaml' }
     $bytes = New-Object byte[] 32
     $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
@@ -25,6 +25,7 @@ if (-not (Test-Path .env)) {
     $stream = [IO.File]::Open((Join-Path $PSScriptRoot '.env'), [IO.FileMode]::CreateNew)
     try { $encoded = [Text.Encoding]::UTF8.GetBytes($text); $stream.Write($encoded, 0, $encoded.Length) } finally { $stream.Dispose() }
     $key = $null; $text = $null
+    if ($Mode -eq 'gpu') { Write-Host '默认启用 SAM3 AI：请准备 NVIDIA GPU、容器 GPU 支持和 models/sam3 完整模型；自定义路径在 .env 设置 SAM3_MODEL_HOST_PATH。缺少条件时部署会报错，不自动关闭 AI。' }
     Write-Host "已生成 .env（$Mode 模式）；请长期保留，不要提交到仓库。"
 } elseif ($Mode) {
     $expected = if ($Mode -eq 'gpu') { 'compose.yaml,compose.gpu.yaml' } else { 'compose.yaml' }

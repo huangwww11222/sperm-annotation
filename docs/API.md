@@ -10,7 +10,7 @@
 
 错误包含 `message`、`code`、`requestId`（亦可从 `X-Request-ID` 获取）。401 处理登录；409 处理冲突并保留意图；422 不合法参数；428 契约需要更新。不要统一吞掉错误返回空数据。具体错误以路由为准。
 
-`GET /api/health` 提供进程健康和 `sam3.enabled/modelLoaded`。Docker CPU 基础模式设置 `SAM3_ENABLED=false`，`POST /api/track` 和 `/api/track/rewind` 返回明确 503（不会先删除已有追踪分支）；本机开发默认仍启用。健康正常不等于 GPU/权重推理已验证。
+`GET /api/health` 提供进程健康和 `sam3.enabled/modelLoaded`。Docker 默认安装启用 GPU + AI；显式 CPU 基础模式设置 `SAM3_ENABLED=false`，`POST /api/track` 和 `/api/track/rewind` 返回明确 503（不会先删除已有追踪分支）；本机开发默认仍启用。健康正常不等于 GPU/权重推理已验证。
 
 ## 媒体、标注与追踪
 

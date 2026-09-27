@@ -7,29 +7,30 @@
 | 模式 | 启动文件 | 可用功能 |
 | --- | --- | --- |
 | CPU 基础模式 | `compose.yaml` | 人工标注、逐帧审查、对比确认、YOLO/COCO 导出；不启用 AI Tracking |
-| GPU 模式 | 上述文件 + `compose.gpu.yaml` | 完整工作流和 SAM3 Tracking |
+| GPU 模式（默认） | 上述文件 + `compose.gpu.yaml` | 完整工作流和 SAM3 Tracking |
 
 服务器安装 Docker + Compose 2.20+。Windows 使用 Docker Desktop 的 WSL2 Linux containers；Linux GPU 服务器还需 NVIDIA 驱动及 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)。[Docker 的 GPU 支持说明](https://docs.docker.com/compose/how-tos/gpu-support/)列出了设备挂载条件。
 
-客户端只需浏览器。CPU 模式不需要模型；GPU 模式仍需准备模型及驱动。一键脚本完成应用配置、镜像构建和启动，不代替操作系统、GPU 驱动或模型授权。
+客户端只需浏览器。首次部署脚本不传参数、或按模板配置 `.env` 时，默认选择 GPU 并启用 AI；先按第 3 节准备模型及驱动。仅需人工标注时显式执行 `bash deploy.sh cpu` / `.\deploy.ps1 -Mode cpu`，此模式不需要模型。缺少 GPU 或模型时会报错，不自动关闭 AI。一键脚本完成应用配置、镜像构建和启动，不代替操作系统、GPU 驱动或模型授权。
 
 ## 2. 首次启动
 
 ```bash
 git clone https://github.com/huangwww11222/sperm-annotation.git
 cd sperm-annotation
-bash deploy.sh cpu
+# 先把完整 SAM3 模型放入 models/sam3/，再启动
+bash deploy.sh
 ```
 
 Windows：
 
 ```powershell
-.\deploy.ps1 -Mode cpu
+.\deploy.ps1
 ```
 
 PowerShell 如果阻止运行下载脚本，先检查脚本内容，再根据组织策略放行本次脚本；无需永久修改全局执行策略。
 
-脚本首次生成 `.env`，使用独立随机密钥；重复执行保留配置。成功时会等待 frontend/backend 健康并显示状态。访问 `http://服务器IP:8080`，先注册再登录，没有预设公共账号。服务器防火墙仅开放选定的 Web 端口；后端 3000 端口不映射到宿主机。
+脚本首次生成 `.env`，使用独立随机密钥；重复执行保留配置。已有 CPU 配置不会因更新代码而自动切换，需按第 3 节明确修改 `.env`。成功时会等待 frontend/backend 健康并显示状态。访问 `http://服务器IP:8080`，先注册再登录，没有预设公共账号。服务器防火墙仅开放选定的 Web 端口；后端 3000 端口不映射到宿主机。
 
 源码构建会下载基础镜像和依赖，耗时受网络影响。Python 镜像为 3.12，以满足固定 NumPy 依赖的 Python 要求；先从 CPU/CUDA wheel 源安装匹配的 torch/torchvision，再安装应用依赖。生产镜像不装 pytest；测试依赖单独在 `backend/requirements-dev.txt`。
 
@@ -81,7 +82,7 @@ docker compose exec backend python -c "import torch; print(torch.__version__, to
 
 | 配置 | 默认/用途 |
 | --- | --- |
-| COMPOSE_FILE | CPU 为 compose.yaml；GPU 增加 compose.gpu.yaml |
+| COMPOSE_FILE | 默认 compose.yaml,compose.gpu.yaml（AI）；仅人工模式为 compose.yaml |
 | COMPOSE_PATH_SEPARATOR | 固定逗号，让文件列表在 Linux/Windows 一致 |
 | WEB_PORT / WEB_BIND_ADDRESS | 8080 / 0.0.0.0；反向代理同机时可只绑定 127.0.0.1 |
 | JWT_SECRET | 首次生成的随机密钥；长期保留，修改会使旧登录令牌失效 |
@@ -149,11 +150,11 @@ ghcr.io/huangwww11222/sperm-annotation-frontend:vX.Y.Z
 部署方在 `.env` 填写实际版本对应的 BACKEND_IMAGE / FRONTEND_IMAGE，然后：
 
 ```bash
-bash deploy.sh cpu --pull
-# GPU 配置使用 bash deploy.sh gpu --pull
+bash deploy.sh gpu --pull
+# 仅人工 CPU 配置使用 bash deploy.sh cpu --pull
 ```
 
-Windows：`.\deploy.ps1 -Mode cpu -Pull`。等价命令是 `docker compose pull` 后 `docker compose up -d --no-build --wait`。ARM64 机器目前从源码构建 CPU 版；发布工作流不承诺 ARM64 预构建镜像。
+Windows：`.\deploy.ps1 -Mode gpu -Pull`。等价命令是 `docker compose pull` 后 `docker compose up -d --no-build --wait`。ARM64 机器目前从源码构建 CPU 版；发布工作流不承诺 ARM64 预构建镜像。
 
 离线环境在联网机器 `docker save` 导出对应前后端镜像，到目标服务器 `docker load`；复制 compose.yaml、compose.gpu.yaml（需要 GPU 时）、实际 `.env` 和模型，执行 `docker compose up -d --no-build --wait`。不运行会联网拉取的 `--pull` 模式。CPU/GPU 镜像、平台和 `.env` 名称必须匹配。
 

@@ -29,4 +29,4 @@
 
 ## 第三方交付
 
-根 README 面向安装者，`deploy.sh` / `deploy.ps1` 初始化配置并启动；CPU 基础模式与 GPU 覆盖配置分开。部署修改须读 DOCKER_DEPLOYMENT.md，使用隔离 Compose 项目验证；不能把 CPU 容器测试当成真实 GPU 验收。提交前运行 `python3 scripts/check_repository.py`，运行数据和模型不纳入 Git，也不进入 Docker build context。`db.py` 的查询接口必须保留可选 user_id/media_id/source 过滤，同名视频按 media_id 区分，不能在合并时恢复重复函数。
+根 README 面向安装者，`deploy.sh` / `deploy.ps1` 初始化配置并启动；首次默认 GPU + AI，CPU 仅人工模式须显式选择；已有 .env 不自动切换。CPU 基础模式与 GPU 覆盖配置分开。部署修改须读 DOCKER_DEPLOYMENT.md，使用隔离 Compose 项目验证；不能把 CPU 容器测试当成真实 GPU 验收。提交前运行 `python3 scripts/check_repository.py`，运行数据和模型不纳入 Git，也不进入 Docker build context。`db.py` 的查询接口必须保留可选 user_id/media_id/source 过滤，同名视频按 media_id 区分，不能在合并时恢复重复函数。

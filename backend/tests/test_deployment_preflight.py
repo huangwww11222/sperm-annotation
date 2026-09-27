@@ -62,9 +62,11 @@ def test_compose_modes_preserve_volumes_logs_and_isolate_gpu(tmp_path):
     env.pop('COMPOSE_FILE', None)
     empty_env = tmp_path / 'compose.env'
     empty_env.write_text('')
-    for mode in ('cpu', 'gpu'):
+    for mode in ('cpu', 'gpu', 'template-default'):
         args = ['docker','compose','--env-file',str(empty_env),'-f',str(root/'compose.yaml')]
         if mode == 'gpu': args += ['-f',str(root/'compose.gpu.yaml')]
+        if mode == 'template-default':
+            args = ['docker', 'compose', '--project-directory', str(root), '--env-file', str(root/'.env.docker.example')]
         result = subprocess.run(args+['config','--format','json'],env=env,capture_output=True,text=True,check=True)
         config = json.loads(result.stdout)
         b = config['services']['backend']
@@ -72,12 +74,12 @@ def test_compose_modes_preserve_volumes_logs_and_isolate_gpu(tmp_path):
         targets = {v['target'] for v in b['volumes']}
         assert {'/data/database','/data/storage'} <= targets
         assert b['environment']['APP_DATA_DIR'] == '/data/database'
-        assert b['environment']['SAM3_ENABLED'] == ('true' if mode == 'gpu' else 'false')
-        assert ('/models/sam3' in targets) == (mode == 'gpu')
-        assert bool(b.get('deploy',{}).get('resources',{}).get('reservations',{}).get('devices')) == (mode == 'gpu')
+        assert b['environment']['SAM3_ENABLED'] == ('false' if mode == 'cpu' else 'true')
+        assert ('/models/sam3' in targets) == (mode != 'cpu')
+        assert bool(b.get('deploy',{}).get('resources',{}).get('reservations',{}).get('devices')) == (mode != 'cpu')
 
 
-@pytest.mark.parametrize('mode', ['cpu', 'gpu'])
+@pytest.mark.parametrize('mode', ['', 'cpu', 'gpu'])
 def test_deploy_script_initializes_once_and_preserves_existing_secret(tmp_path, mode):
     if not shutil.which('bash'):
         pytest.skip('Bash entry point')
@@ -89,14 +91,15 @@ def test_deploy_script_initializes_once_and_preserves_existing_secret(tmp_path, 
     docker.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$DOCKER_CALL_LOG"\n')
     docker.chmod(0o755)
     env = {**os.environ, 'PATH':str(binary)+os.pathsep+os.environ['PATH'], 'DOCKER_CALL_LOG':str(tmp_path/'calls')}
-    first = subprocess.run(['bash',str(tmp_path/'deploy.sh'),mode],env=env,capture_output=True,text=True,check=True)
+    selected = mode or 'gpu'
+    first = subprocess.run(['bash',str(tmp_path/'deploy.sh')]+([mode] if mode else []),env=env,capture_output=True,text=True,check=True)
     settings = (tmp_path/'.env').read_text()
     key = next(line.split('=',1)[1] for line in settings.splitlines() if line.startswith('JWT_SECRET='))
     assert len(key) == 64 and key not in first.stdout and key not in first.stderr
-    assert ('COMPOSE_FILE=compose.yaml,compose.gpu.yaml' in settings) == (mode == 'gpu')
-    subprocess.run(['bash',str(tmp_path/'deploy.sh'),mode],env=env,capture_output=True,text=True,check=True)
+    assert ('COMPOSE_FILE=compose.yaml,compose.gpu.yaml' in settings) == (selected == 'gpu')
+    subprocess.run(['bash',str(tmp_path/'deploy.sh')],env=env,capture_output=True,text=True,check=True)
     assert (tmp_path/'.env').read_text() == settings
-    other = 'gpu' if mode == 'cpu' else 'cpu'
+    other = 'gpu' if selected == 'cpu' else 'cpu'
     mismatch = subprocess.run(['bash',str(tmp_path/'deploy.sh'),other],env=env,capture_output=True,text=True)
     assert mismatch.returncode == 2
     assert (tmp_path/'.env').read_text() == settings

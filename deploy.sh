@@ -5,7 +5,7 @@ cd "$(dirname "$0")"
 mode="${1:-}"
 method="${2:-}"
 if [[ "$mode" == "--help" || "$mode" == "-h" ]]; then
-  echo '用法：bash deploy.sh [cpu|gpu] [--pull]；已有 .env 时不覆盖配置。'
+  echo '用法：bash deploy.sh [cpu|gpu] [--pull]；首次默认 GPU + AI；已有 .env 时不覆盖配置。'
   exit 0
 fi
 if [[ -n "$mode" && "$mode" != cpu && "$mode" != gpu ]] || [[ -n "$method" && "$method" != --pull ]]; then
@@ -15,7 +15,7 @@ command -v docker >/dev/null || { echo '请先安装 Docker Engine/Desktop 和 C
 docker info >/dev/null 2>&1 || { echo 'Docker 引擎不可用，请启动 Docker 或检查当前用户权限。' >&2; exit 1; }
 docker compose version >/dev/null
 if [[ ! -f .env ]]; then
-  mode="${mode:-cpu}"
+  mode="${mode:-gpu}"
   secret=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
   files=compose.yaml
   [[ "$mode" != gpu ]] || files=compose.yaml,compose.gpu.yaml
@@ -26,6 +26,9 @@ if [[ ! -f .env ]]; then
     {print}
   ' .env.docker.example > .env)
   unset secret
+  if [[ "$mode" == gpu ]]; then
+    echo "默认启用 SAM3 AI：请准备 NVIDIA GPU、容器 GPU 支持和 models/sam3 完整模型；自定义路径在 .env 设置 SAM3_MODEL_HOST_PATH。缺少条件时部署会报错，不自动关闭 AI。"
+  fi
   echo "已生成 .env（$mode 模式）；请长期保留，不要提交到仓库。"
 elif [[ -n "$mode" ]]; then
   expected=compose.yaml

@@ -4,14 +4,15 @@
 
 **训练集必须经过审查和对比确认后才能导出。** 同一账号可以自审、自确认，也可由团队分工完成。
 
-## 快速开始：Docker 部署
+## 快速开始：默认启用 AI 的 Docker 部署
 
-服务器安装 Docker Engine + Compose（2.20+），或 Docker Desktop。使用者的电脑只需要浏览器，无需 Python、Node.js 或模型环境。
+默认部署启用 SAM3 AI Tracking，面向半自动视频标注。服务器先准备 NVIDIA GPU、驱动、容器 GPU 支持、Docker + Compose（2.20+），以及完整 SAM3 模型（见下方及[部署说明](docs/DOCKER_DEPLOYMENT.md)）。使用者的电脑只需要浏览器，无需 Python、Node.js 或模型环境。
 
 ```bash
 git clone https://github.com/huangwww11222/sperm-annotation.git
 cd sperm-annotation
-bash deploy.sh cpu
+# 先把完整 SAM3 模型放入 models/sam3/，再启动
+bash deploy.sh
 ```
 
 Windows PowerShell：
@@ -19,7 +20,8 @@ Windows PowerShell：
 ```powershell
 git clone https://github.com/huangwww11222/sperm-annotation.git
 cd sperm-annotation
-.\deploy.ps1 -Mode cpu
+# 先把完整 SAM3 模型放入 models/sam3/，再启动
+.\deploy.ps1
 ```
 
 成功后访问 **http://服务器IP:8080**，在登录页注册账号。脚本自动生成 `.env` 和随机登录密钥，构建镜像并等待两个服务健康；再次执行不会覆盖已有配置和数据。首次构建需要访问镜像、Python 和 npm 下载源，不能离线凭空安装依赖。
@@ -27,9 +29,9 @@ cd sperm-annotation
 | 模式 | 功能 | 额外条件 |
 | --- | --- | --- |
 | `cpu` | 人工标注 → 审查 → 确认 → 训练集导出 | 不需要 GPU 或模型；AI Tracking 显示未启用提示 |
-| `gpu` | 上述功能 + SAM3 AI Tracking | NVIDIA GPU、驱动、Container Toolkit / WSL2 GPU 支持和完整 SAM3 模型 |
+| `gpu`（默认） | 上述功能 + SAM3 AI Tracking | NVIDIA GPU、驱动、Container Toolkit / WSL2 GPU 支持和完整 SAM3 模型 |
 
-首次使用 GPU 模式：先把完整模型放入 `models/sam3/`，再运行 `bash deploy.sh gpu`（Windows：`.\deploy.ps1 -Mode gpu`）。已有 `.env` 的模式切换、模型准备及驱动要求见 [Docker 部署说明](docs/DOCKER_DEPLOYMENT.md)。模型不随源码或镜像提供，需要部署方取得访问权限。
+首次不传模式即选择 GPU + AI，也可显式运行 `bash deploy.sh gpu`（Windows：`.\deploy.ps1 -Mode gpu`）。仅需人工标注时才显式选择 `bash deploy.sh cpu` / `.\deploy.ps1 -Mode cpu`。缺少 GPU 或模型时会报错，不自动降级。已有 `.env` 的模式切换、模型准备及驱动要求见 [Docker 部署说明](docs/DOCKER_DEPLOYMENT.md)。模型不随源码或镜像提供，需要部署方取得访问权限。
 
 默认数据保存在 `runtime/database/` 与 `runtime/storage/`，日志在 `runtime/database/logs/`。`.env` 和这些目录需要保留、备份，不能提交到 Git 或随代码清理。
 
@@ -47,7 +49,7 @@ cd sperm-annotation
 
 ```text
 README.md / deploy.sh / deploy.ps1     第三方安装入口
-compose.yaml / compose.gpu.yaml        通用服务与可选 GPU 配置
+compose.yaml / compose.gpu.yaml        基础服务与默认启用的 GPU 覆盖配置
 .env.docker.example                   可提交的配置模板
 backend/                              API、数据库、追踪、测试、Dockerfile
 frontend/                             界面、用户手册、测试、Dockerfile、Nginx

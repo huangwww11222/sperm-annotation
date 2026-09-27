@@ -154,6 +154,8 @@ docker compose down
 
 ## 最近验证记录
 
+2026-09-27 默认 AI 部署调整：首次无参数 Bash/PowerShell 安装及 `.env.docker.example` 默认选择 GPU + AI；显式 CPU 及已有配置保持原行为。部署相关 pytest **14 通过**，含真实 Compose 解析默认模板/GPU/CPU 三种配置；PowerShell 7.4 容器中默认/GPU/CPU 三组模拟 Docker 安装测试通过，验证重复执行保留密钥与模式冲突保护。日志 `work/ai-default-tests.log`、`work/ai-default-powershell.log`。本轮未运行真实 GPU 推理。
+
 2026-09-27 的第三方 Docker 交付整理：先复现了本地 `list_annotations(..., source=...)` 的 TypeError，再修复查询、同名视频身份与旧库补列/建索引顺序。本机后端 **146 通过**；实际 Python 3.12 Linux ARM64 CPU 镜像中 **145 通过、1 跳过**（镜像内不安装 Docker CLI，Compose 解析项在宿主机已通过）。生产前后端镜像构建通过，后端 `pip check` 通过，SAM3 Tracker Model/Processor 可导入；实际版本为 Python 3.12.14、NumPy 2.5.3、torch 2.14.0+cpu。
 
 实际隔离 Compose 从空库完成 SPA/健康检查、注册、真实 AVI 上传、人工记录保存/查询、工作区保存、B/C 显式完成、YOLO 真实图片和标签导出；删除并重建容器后，原登录令牌、工作区、确认版本与 ZIP 均保留。Bash CPU/GPU 初始化保护由 pytest 覆盖；PowerShell 7.4 容器内通过 CPU/GPU 两组模拟 Docker 的安装配置测试，**不是 Windows/WSL2 实机验收**。仓库检查、155 个本地文档链接检查通过；从 Git 索引移除的 164 个运行文件仍全部保留在本地。
