@@ -1,7 +1,7 @@
 {
   "format": "annotation-workspace-v1",
-  "frontendMediaId": "local-167eac2c-af5e-41ad-9eb1-41d3ca4905d8",
-  "updatedAt": "2026-09-26T18:21:29.925Z",
+  "frontendMediaId": "server-9844c40d86052dc55baa650902ee6a9e_001",
+  "updatedAt": "2026-09-27T02:12:10.834Z",
   "currentFrame": 35,
   "manualAnnotations": [
     {
@@ -334,5 +334,5 @@
     "selectedObjectId": "manual-1790443986864-dhx6l"
   },
   "mediaId": "9844c40d86052dc55baa650902ee6a9e_001",
-  "updatedBy": 3
+  "updatedBy": 1
 }

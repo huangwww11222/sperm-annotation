@@ -23,6 +23,11 @@ def test_anomaly_panel_contract_keeps_markers_and_uses_real_names() -> None:
     close_panel_block = store[store.index("const closeAnomalyPanel"):store.index("const lastPausedContext")]
     assert "anomalyFrames.value = []" not in close_panel_block
     assert "anomalyPanelVisible.value = true" in store
+    assert "const trackingPausedFrame = computed" in store
+    assert "trackingPausedFrame+1" in page
+    assert "请注意查看前几帧是否已经出现框偏移" in page
+    anomaly_panel = page[page.index('class="tracking-anomaly"'):page.index('class="annotation-timeline"')]
+    assert "currentFrame+1" not in anomaly_panel
 
 
 def test_direct_retry_promotes_only_paused_objects_to_manual_baselines() -> None:

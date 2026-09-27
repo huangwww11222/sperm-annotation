@@ -119,7 +119,7 @@ def insert_annotations(rows: list[dict[str, Any]]) -> int:
     return len(rows)
 
 
-<<<<<<< HEAD
+
 def list_annotations(user_id: int, media_id: str | None = None) -> list[dict[str, Any]]:
     sql = "SELECT a.*, u.username FROM annotations a LEFT JOIN users u ON u.id=a.user_id WHERE a.user_id=?"
     params: list[Any] = [user_id]
@@ -127,7 +127,7 @@ def list_annotations(user_id: int, media_id: str | None = None) -> list[dict[str
         sql += " AND a.media_id=?"
         params.append(media_id)
     sql += " ORDER BY a.id DESC"
-=======
+
 def list_annotations(user_id: int | None = None, media_id: str | None = None, source: str | None = None) -> list[dict[str, Any]]:
     sql = "SELECT a.*, u.username FROM annotations a LEFT JOIN users u ON u.id=a.user_id WHERE 1=1"
     params: list[Any] = []
@@ -141,7 +141,7 @@ def list_annotations(user_id: int | None = None, media_id: str | None = None, so
         sql += " AND a.source=?"
         params.append(source)
     sql += " ORDER BY a.created_at DESC, a.id DESC"
->>>>>>> 64a29f5 (first commit)
+
     with connect() as conn:
         rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
 
