@@ -1,12 +1,14 @@
 > 当前部署指引；业务规则见 [WORKFLOW.md](WORKFLOW.md)，统一文档入口见 [README.md](README.md)。
 
-# Windows 部署说明
+# Windows 本机开发部署说明
+
+第三方直接使用请优先按 [Docker 部署说明](DOCKER_DEPLOYMENT.md) 运行 `deploy.ps1`；本页面向需要本机 Python/Node 环境的开发者。
 
 本项目是前后端分离架构：Vue/Vite 前端通过 `/api` 调用 FastAPI 后端；SAM3 模型和视频、SQLite 数据都在后端机器上。因此，把项目复制到另一台电脑后，需要同时部署两个进程（开发模式）或将前端构建为静态文件并交给反向代理（生产模式）。
 
 ## 1. 目标机器准备
 
-- Windows 10/11 x64；Python 与 Node 环境请对齐项目 Dockerfile（Python 3.11、Node 22）及锁定依赖。
+- Windows 10/11 x64；Python 与 Node 环境请对齐项目 Dockerfile（Python 3.12、Node 22）及锁定依赖。
 - 若使用 AI Tracking：NVIDIA GPU、与 `torch==2.14.0` 安装包相匹配的显卡驱动/CUDA 运行环境，并有足够显存。没有 NVIDIA GPU 时可设 `SAM3_DEVICE=cpu`，但速度会显著下降。
 - 复制或重新取得 SAM3 模型目录。模型不在 `requirements.txt` 中，默认路径为 `backend/track_modul/facebook--sam3/snapshots/master`，也可通过 `SAM3_MODEL_ID` 指定绝对路径。
 
@@ -29,7 +31,7 @@ BACKEND_PORT=3000
 
 ```powershell
 cd E:\rare-sperm\backend
-py -3.11 -m venv .venv
+py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install -r requirements.txt

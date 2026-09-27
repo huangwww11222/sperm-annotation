@@ -6,6 +6,9 @@
 
 | 职责 | 实现入口 |
 | --- | --- |
+| Docker 部署入口 | 根目录 `deploy.sh` / `deploy.ps1`、`compose.yaml` / `compose.gpu.yaml`、`.env.docker.example` |
+| 容器启动前检查 | `backend/app/deployment_check.py`、`backend/docker-entrypoint.sh` |
+| 仓库与容器验收 | `scripts/check_repository.py`、`scripts/docker_smoke.py`、`.github/workflows/` |
 | 路由/认证/布局/主题 | `frontend/src/router/index.ts`、`stores/auth.ts`、`layouts/AppLayout.vue`、`stores/appearance.ts`、`style.css` |
 | 人工标注 UI / 状态 | `pages/AnnotatePage.vue`、`stores/workspace.ts`、`annotation/annotation.css` |
 | 框绘制/坐标/缓存 | `components/AnnotationOverlay.vue`、`annotation/geometry.ts`、`annotation/frameCache.ts` |
@@ -29,7 +32,7 @@
 
 ## 本地运行
 
-项目根目录，已安装后端依赖的环境：
+第三方部署先使用根 README 的 Docker 入口。以下为开发模式；后端使用 Python 3.12（锁定 NumPy 需要 3.12+），前端 Node 22。项目根目录，已安装后端依赖的环境：
 
 ```bash
 python -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 3000
@@ -60,4 +63,5 @@ npm run build --prefix frontend
 - `SAM3_TRACK_FRAMES` 当前代码默认 **120**，包含 seed 帧；环境变量可覆盖。异常参数见 `services/anomaly_detector.py`，不要在 UI 写死单轮帧数。
 - `JWT_SECRET` 生产环境应配置；不把密钥/token 写入文档或日志。
 - GPU 任务、来源锁及训练导出队列使用进程内状态，保持 **单后端进程、单 Uvicorn worker**。扩容前需要单独设计，不能直接增加 workers。
-- Docker 配置入口为 `compose.yaml`、`.env.docker.example`、前后端 Dockerfile；部署细节见 [DOCKER_DEPLOYMENT.md](DOCKER_DEPLOYMENT.md)。
+- Docker 默认 CPU 基础模式不启用 AI Tracking；`compose.gpu.yaml` 启用 GPU/模型挂载。两种模式均支持完整人工标注→审查→确认→导出。`SAM3_ENABLED` 的本机开发默认值仍为 true，Compose 明确覆盖。
+- Docker 设置 `APP_DATA_DIR=/data/database`，日志与 DB 同卷持久化；启动前校验密钥、目录和 GPU 模型条件。部署细节见 [DOCKER_DEPLOYMENT.md](DOCKER_DEPLOYMENT.md)。

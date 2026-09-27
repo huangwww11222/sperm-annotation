@@ -12,6 +12,5 @@ opencv-python>=4.8,<5
 # CUDA 13.2 wheel installation is performed by install-pytorch-cu132.bat.
 # Shell commands cannot be put here: pip install -r requirements.txt accepts
 # only requirement specifiers and options.
-pytest>=8,<10
 python-dotenv>=1.0,<2
 PyYAML>=6,<7

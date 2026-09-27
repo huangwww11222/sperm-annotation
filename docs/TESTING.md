@@ -6,7 +6,7 @@
 
 后端导入/启动会初始化 DB 和表。运行 pytest、夹具、调试服务器前同时指定 `APP_DATA_DIR`、`APP_DB_FILE`、`APP_STORAGE_DIR`，不要使用业务默认目录。夹具只允许 `work/` 下规定的路径。旧 `backend/track_data` 仍可能被兼容读取，浏览器标注测试应筛选测试媒体，不能随便点用户素材。
 
-下列命令在项目根目录执行。`work/review-venv/bin/python` 是本机已有测试解释器；其他机器替换为安装了后端依赖的 Python，例如 `backend/.venv/bin/python`；Windows 见 [部署说明](DEPLOYMENT_WINDOWS.md)。测试脚本额外使用 `httpx`（FastAPI TestClient）。
+下列命令在项目根目录执行。`work/review-venv/bin/python` 是本机已有测试解释器；其他机器替换为安装了后端依赖的 Python，例如 `backend/.venv/bin/python`；Windows 见 [部署说明](DEPLOYMENT_WINDOWS.md)。本机测试额外安装 `backend/requirements-dev.txt`（pytest、httpx）；生产镜像不安装测试依赖。
 
 ```bash
 APP_DATA_DIR="$PWD/work/agent-test-data" \
@@ -33,6 +33,7 @@ npm run build --prefix frontend
 | C 选择/恢复/最终版本 | `test_confirmation_workflow.py`、`test:confirmation` | `confirmation-browser.mjs`（39）、`confirmation-failure-browser.mjs`（30） |
 | 训练导出/门禁/版本 | `test_training_export.py` | `training-export-browser.mjs`（29） |
 | 全窗口专注、视频进度 | 上述对应页面回归、构建 | `workspace-layout-browser.mjs`（49） |
+| 数据库查询/升级、Docker 发布 | `test_annotation_result_dedupe.py`、`test_deployment_preflight.py`、`test_docker_deployment_contract.py` | 下方容器验收；不是只运行前端构建 |
 | 核心操作优先级、用户说明 | 上述 B/C/导出回归、构建 | `workspace-priority-browser.mjs`（35） |
 
 括号为当前脚本检查数量，**不是每次修改自动通过的结果**。测试源位于 `backend/tests/` 与 `frontend/tests/`。
@@ -96,6 +97,42 @@ Vite 调试脚本若需要访问 workspace，须导入浏览器实际已加载�
 
 结束后只停止自己启动的测试服务器；业务数据不清理。截图/控制台保存在 `output/playwright/`，命令日志放 `work/`。
 
+## 仓库与 Docker 交付验收
+
+`python3 scripts/check_repository.py` 检查 Git 跟踪文件，拒绝业务数据、模型、本机密钥、冲突标记和重复 Python 顶层定义。它读取索引中的文件列表；新文件提交后同样受 CI 检查，不扫描用户运行目录内容。
+
+容器测试使用实际生产 Dockerfile、Python 3.12 和隔离存储。CPU 容器覆盖基本流程，不能代替 CUDA/真实权重推理。以下为 POSIX 示例，必须使用未占用端口和新的测试数据目录，不指向生产数据：
+
+```bash
+export COMPOSE_FILE="$PWD/compose.yaml"
+export COMPOSE_PROJECT_NAME=annotation-ci
+export APP_DATA_ROOT="$PWD/work/docker-smoke-data"
+export WEB_PORT=18080
+export WEB_BIND_ADDRESS=127.0.0.1
+export SMOKE_ORIGIN=http://127.0.0.1:18080
+export JWT_SECRET="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+export BACKEND_IMAGE=annotation-ci-backend:cpu
+export FRONTEND_IMAGE=annotation-ci-frontend:local
+
+docker build -f backend/Dockerfile -t "$BACKEND_IMAGE" .
+docker build -f frontend/Dockerfile -t "$FRONTEND_IMAGE" .
+docker compose config --quiet
+docker compose -f compose.yaml -f compose.gpu.yaml config --quiet
+docker compose up -d --no-build --wait --wait-timeout 180
+python3 scripts/docker_smoke.py --fresh
+docker compose down
+docker compose up -d --no-build --wait --wait-timeout 180
+python3 scripts/docker_smoke.py --verify-restart
+docker compose logs --tail=100 backend frontend
+docker compose down
+```
+
+`--fresh` 验证空数据库起步，已有测试数据时使用新隔离目录。脚本生成真实 AVI，验证注册、人工保存和查询（防止 db.py 参数回退）、工作区、B/C 显式完成、YOLO 图像/标签及重建后令牌/数据/训练包。只允许 loopback 地址和 `work/` 下数据；恢复凭据写入已忽略的 `work/docker-smoke-state.json`，不要上传它。
+
+后端也在同一 Python 3.12 镜像中回归，隔离变量设置方法见 `.github/workflows/ci.yml`。Bash 初始化由 pytest 的模拟 Docker 用例验证随机密钥、重复运行和模式冲突保护；Windows CI 通过 `scripts/test_deploy.ps1` 做相同的 PowerShell 配置测试，不代表 WSL2/GPU 的实际服务器验收。
+
+`.github/workflows/ci.yml` 在 PR/main 验证；`release-images.yml` 在版本标签推送后调用验证，再发布镜像。新增工作流需推送后实际运行，不能把本地配置校验说成 GitHub Actions 已通过。镜像需要在 Packages 确认访问权限。
+
 ## 日志驱动排查
 
 1. 从页面错误获取请求号和动作；查看控制台与 Network 的实际响应，先分清客户端模拟故障还是服务端真实拒绝。
@@ -116,6 +153,12 @@ Vite 调试脚本若需要访问 workspace，须导入浏览器实际已加载�
 日志不记录 JWT/密码；不要记录每个鼠标移动。浏览器 route 注入的 503 不会出现在服务端日志；数据库触发器故障测试验证真实事务回滚与日志。
 
 ## 最近验证记录
+
+2026-09-27 的第三方 Docker 交付整理：先复现了本地 `list_annotations(..., source=...)` 的 TypeError，再修复查询、同名视频身份与旧库补列/建索引顺序。本机后端 **146 通过**；实际 Python 3.12 Linux ARM64 CPU 镜像中 **145 通过、1 跳过**（镜像内不安装 Docker CLI，Compose 解析项在宿主机已通过）。生产前后端镜像构建通过，后端 `pip check` 通过，SAM3 Tracker Model/Processor 可导入；实际版本为 Python 3.12.14、NumPy 2.5.3、torch 2.14.0+cpu。
+
+实际隔离 Compose 从空库完成 SPA/健康检查、注册、真实 AVI 上传、人工记录保存/查询、工作区保存、B/C 显式完成、YOLO 真实图片和标签导出；删除并重建容器后，原登录令牌、工作区、确认版本与 ZIP 均保留。Bash CPU/GPU 初始化保护由 pytest 覆盖；PowerShell 7.4 容器内通过 CPU/GPU 两组模拟 Docker 的安装配置测试，**不是 Windows/WSL2 实机验收**。仓库检查、155 个本地文档链接检查通过；从 Git 索引移除的 164 个运行文件仍全部保留在本地。
+
+测试项目 `annotation-deploy-audit`，数据位于 `work/docker-deploy-release-check`；日志 `work/deploy-*.log`。本机 Docker Hub 令牌端点连接重置，使用 Docker Official Images 的 ECR Public 副本取得基础镜像后完成构建，没有修改用户 Docker 镜像源或业务配置。此次未运行真实 CUDA/模型权重推理，未在 GitHub 触发 CI，也未发布镜像；新增 CI 发布流程需要推送后执行。测试期间未使用生产 DB/storage。
 
 2026-09-27 的操作优先级与用户说明调整：新增检查 **35**、专注/布局 **49**、B 正常 **27**、C 正常 **39**、C 故障恢复 **30**、训练导出 **29**、外观/记录 **14** 均通过，浏览器本轮合计 **223 项**。后端全量 **133 通过**，前端几何/缓存 **5+6+4 通过**，类型检查和生产构建通过；当前和归档文档的 **148 个本地链接**无失效。
 

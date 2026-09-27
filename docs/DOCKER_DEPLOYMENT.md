@@ -1,462 +1,189 @@
-# Docker 多用户部署说明
+# Docker 部署与运维
 
-本文档适用于把本项目部署到一台中央 Windows/Linux 电脑，由局域网内多名用户通过浏览器共同使用。部署后的数据库、原视频、人工标注、Tracking 结果和训练数据集都保存在服务器宿主机，不会随容器更新而丢失。
+面向把工具安装到自己服务器的使用者。浏览器共享同一个账号库和素材库，服务器保管所有视频和标注。当前只支持一个后端容器、一个 Uvicorn worker；SQLite、任务状态和锁不支持横向扩容。
 
-> 当前版本使用 SQLite，并且 GPU 任务队列、任务状态和锁都保存在单个 FastAPI 进程内。因此必须只运行 **一个 backend 容器、一个 Uvicorn worker**。不要在多台电脑分别启动 backend 后共同读写一个 `app.db`。
+## 1. 选择部署模式
 
-## 1. 部署架构
+| 模式 | 启动文件 | 可用功能 |
+| --- | --- | --- |
+| CPU 基础模式 | `compose.yaml` | 人工标注、逐帧审查、对比确认、YOLO/COCO 导出；不启用 AI Tracking |
+| GPU 模式 | 上述文件 + `compose.gpu.yaml` | 完整工作流和 SAM3 Tracking |
 
-```text
-用户 A/B/C 的浏览器
-        │
-        │ http://服务器IP:8080
-        ▼
-frontend 容器（Nginx）
-  ├─ Vue 静态页面
-  └─ /api/* 反向代理
-        │
-        ▼
-backend 容器（FastAPI，单实例）
-  ├─ NVIDIA GPU / SAM3
-  ├─ /data/database/app.db
-  ├─ /data/storage/media
-  └─ /data/storage/datasets
+服务器安装 Docker + Compose 2.20+。Windows 使用 Docker Desktop 的 WSL2 Linux containers；Linux GPU 服务器还需 NVIDIA 驱动及 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)。[Docker 的 GPU 支持说明](https://docs.docker.com/compose/how-tos/gpu-support/)列出了设备挂载条件。
+
+客户端只需浏览器。CPU 模式不需要模型；GPU 模式仍需准备模型及驱动。一键脚本完成应用配置、镜像构建和启动，不代替操作系统、GPU 驱动或模型授权。
+
+## 2. 首次启动
+
+```bash
+git clone https://github.com/huangwww11222/sperm-annotation.git
+cd sperm-annotation
+bash deploy.sh cpu
 ```
 
-客户端电脑不需要安装 Docker、Python、Node.js 或 SAM3，只需要浏览器。所有人访问同一台服务器的 Web 地址，即可共享同一个账号库、素材库和标注结果。
-
-## 2. 项目已提供的 Docker 文件
-
-```text
-compose.yaml                 # 统一启动 frontend + backend
-.env.docker.example          # Docker 环境变量模板
-.dockerignore                # 排除模型、数据库、storage 等大文件
-backend/Dockerfile           # Python、CUDA PyTorch、FastAPI、OpenCV
-frontend/Dockerfile          # Node 构建 + Nginx 运行
-frontend/nginx.conf          # SPA、/api 代理、2GB 上传和长超时
-```
-
-后端镜像不会包含以下内容，它们必须通过宿主机目录挂载：
-
-- `app.db`；
-- `storage/`；
-- SAM3 模型权重；
-- 密钥和生产环境配置。
-
-## 3. 服务器要求
-
-### 3.1 Windows 服务器
-
-推荐：
-
-- Windows 10/11 x64；
-- NVIDIA 显卡和支持当前 CUDA PyTorch 的驱动；
-- Docker Desktop，使用 WSL2 Linux containers；
-- 至少预留模型、镜像、原视频和导出数据集所需磁盘空间；
-- 建议 16GB 以上内存；显存大小决定可处理的视频规模。
-
-安装完成后检查：
+Windows：
 
 ```powershell
-docker version
-docker compose version
-nvidia-smi
+.\deploy.ps1 -Mode cpu
 ```
 
-Docker Desktop 中需要启用 WSL2 backend，并确认 Docker 可以访问 NVIDIA GPU。
+PowerShell 如果阻止运行下载脚本，先检查脚本内容，再根据组织策略放行本次脚本；无需永久修改全局执行策略。
 
-### 3.2 Linux 服务器
+脚本首次生成 `.env`，使用独立随机密钥；重复执行保留配置。成功时会等待 frontend/backend 健康并显示状态。访问 `http://服务器IP:8080`，先注册再登录，没有预设公共账号。服务器防火墙仅开放选定的 Web 端口；后端 3000 端口不映射到宿主机。
 
-需要安装 Docker Engine、Docker Compose 插件、NVIDIA 驱动和 NVIDIA Container Toolkit，并保证普通 `docker run --gpus all ...` 能看到显卡。
+源码构建会下载基础镜像和依赖，耗时受网络影响。Python 镜像为 3.12，以满足固定 NumPy 依赖的 Python 要求；先从 CPU/CUDA wheel 源安装匹配的 torch/torchvision，再安装应用依赖。生产镜像不装 pytest；测试依赖单独在 `backend/requirements-dev.txt`。
 
-## 4. 准备持久化目录
+失败时先看脚本输出和 `docker compose logs --tail=100 backend frontend`。初始化失败不清空数据，不通过换密钥或删数据库来“修复”。Docker Hub / PyPI / npm 连接失败时修复服务器网络、配置可信镜像源，或使用已经发布/离线导入的镜像。
 
-推荐在服务器单独的数据盘建立：
+## 3. GPU 与 SAM3 模型
+
+GPU 当前发布目标为 Linux amd64 / Windows x64 WSL2，不提供 Apple Silicon 的 CUDA。驱动须支持选择的 CUDA PyTorch wheel；当前 GPU 默认 cu132。配置 GPU 前先验证宿主机 `nvidia-smi` 和 Docker GPU 访问。
+
+从 [SAM3 官方模型页面](https://huggingface.co/facebook/sam3)申请访问、按其条款下载完整快照，放在：
 
 ```text
-D:\sperm-annotation-data\
-├─ database\
-│  └─ app.db                 # 首次启动时自动创建
-├─ storage\
-│  ├─ media\                # 原视频、seed、Tracking 结果、overlay
-│  └─ datasets\             # COCO/YOLO 导出包
-└─ backups\
-
-D:\sperm-models\sam3\       # SAM3 模型快照
+models/sam3/
+  config.json
+  preprocessor_config.json 或 processor_config.json
+  model.safetensors 或全部权重分片与索引
+  其他模型文件
 ```
 
-PowerShell：
+也可从已能运行项目的机器复制完整快照；若原快照包含指向缓存目录的符号链接，需要连同实际文件复制，不能留下指向容器外的断链。不要只复制某个权重文件。
 
-```powershell
-New-Item -ItemType Directory -Force D:\sperm-annotation-data\database
-New-Item -ItemType Directory -Force D:\sperm-annotation-data\storage\media
-New-Item -ItemType Directory -Force D:\sperm-annotation-data\storage\datasets
-New-Item -ItemType Directory -Force D:\sperm-annotation-data\backups
-New-Item -ItemType Directory -Force D:\sperm-models\sam3
+全新配置执行：
+
+```bash
+bash deploy.sh gpu
 ```
 
-不要把 SQLite 的 `app.db` 放在 SMB/NFS 网络共享盘上。SQLite 文件应位于运行 backend 的 Docker 服务器本地磁盘，所有用户通过 FastAPI 访问它，而不是直接访问数据库文件。
+Windows 使用 `.\deploy.ps1 -Mode gpu`。模型不在默认目录时，先修改 `.env` 中的 `SAM3_MODEL_HOST_PATH` 后重新运行。配置可使用 Linux 绝对路径或 Windows 正斜杠路径，如 `D:/sperm-models/sam3`。
 
-## 5. 准备 SAM3 模型
-
-模型默认从宿主机目录只读挂载到容器 `/models/sam3`。
-
-可以选择：
-
-1. 从当前开发电脑复制现有模型快照；
-2. 使用项目对应模型仓库的官方方式下载到服务器；
-3. 在有网络的电脑下载后，通过移动硬盘迁移。
-
-最终目录必须包含模型加载所需的配置、权重和处理器文件。例如：
-
-```text
-D:\sperm-models\sam3\
-├─ config.json
-├─ model.safetensors 或模型分片
-├─ preprocessor_config.json
-└─ 其他模型文件
-```
-
-如果你当前模型位于：
-
-```text
-backend\track_modul\facebook--sam3\snapshots\master
-```
-
-可以直接把 `master` 目录中的全部内容复制到 `D:\sperm-models\sam3`。不要只复制某一个权重文件。
-
-## 6. 配置根目录 `.env`
-
-在项目根目录执行：
-
-```powershell
-Copy-Item .env.docker.example .env
-notepad .env
-```
-
-至少修改：
+**已有 CPU 配置或旧版本配置升级**：保留 `.env` 的 JWT_SECRET 和 APP_DATA_ROOT，在 `.env` 设置：
 
 ```dotenv
-WEB_PORT=8080
-JWT_SECRET=替换为至少32字节的随机密钥
-APP_DATA_ROOT=D:/sperm-annotation-data
-SAM3_MODEL_HOST_PATH=D:/sperm-models/sam3
-SAM3_DEVICE=cuda
-SAM3_DTYPE=bfloat16
-SAM3_TRACK_FRAMES=120
+COMPOSE_PATH_SEPARATOR=,
+COMPOSE_FILE=compose.yaml,compose.gpu.yaml
+SAM3_MODEL_HOST_PATH=./models/sam3
 ```
 
-Windows 路径建议使用正斜杠 `/`。`JWT_SECRET` 必须固定保存；以后修改它会使所有用户当前登录令牌失效。
+再运行 `bash deploy.sh gpu` / `.\deploy.ps1 -Mode gpu`。切回 CPU 则设置 `COMPOSE_FILE=compose.yaml`，并清除或改成 CPU 对应的 `BACKEND_IMAGE`。如果脚本检测到指定模式与旧 `.env` 不一致，会停止并说明如何修改，不默默覆盖配置。
 
-可用 PowerShell 生成密钥：
+启动前检查会验证目录可写、密钥有效、模型配置/权重分片完整，以及 CUDA 和 Transformers 类能否导入。失败记录 `deployment.preflight_failed`；成功记录 `deployment.ready`。这不等于真实推理已经验收，首次 Tracking 才加载权重，仍需用实际视频测试。
 
-```powershell
-$bytes = New-Object byte[] 32
-[Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
-[Convert]::ToHexString($bytes)
+```bash
+docker compose exec backend python -c "import torch; print(torch.__version__, torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
 ```
 
-将输出复制到 `.env` 的 `JWT_SECRET=` 后面。
+## 4. 配置与持久化
 
-## 7. 从源码构建并启动
+`.env.docker.example` 是模板，实际配置仅放根目录 `.env`。脚本和 Compose 不读取 `backend/.env` 来部署容器；后者仅用于本机 Python 开发。不要将 `.env` 当 shell 脚本 source。
 
-### 7.1 构建
+| 配置 | 默认/用途 |
+| --- | --- |
+| COMPOSE_FILE | CPU 为 compose.yaml；GPU 增加 compose.gpu.yaml |
+| COMPOSE_PATH_SEPARATOR | 固定逗号，让文件列表在 Linux/Windows 一致 |
+| WEB_PORT / WEB_BIND_ADDRESS | 8080 / 0.0.0.0；反向代理同机时可只绑定 127.0.0.1 |
+| JWT_SECRET | 首次生成的随机密钥；长期保留，修改会使旧登录令牌失效 |
+| APP_DATA_ROOT | ./runtime；可改为本机数据盘，不能把 SQLite 放在 SMB/NFS |
+| SAM3_MODEL_HOST_PATH | ./models/sam3；只读挂载，GPU 必须存在 |
+| SAM3_DTYPE / SAM3_TRACK_FRAMES | bfloat16 / 120；仅 GPU 启用推理 |
+| PYTORCH_INDEX_URL | GPU wheel 源，默认 cu132；CPU 构建固定使用 CPU wheel |
+| BACKEND_IMAGE / FRONTEND_IMAGE | 源码构建可留空；拉取预构建镜像时必须写实际发布的同版本名称 |
 
-在项目根目录执行：
-
-```powershell
-docker compose build --pull
+```text
+runtime/
+  database/app.db        账号、人工记录、审查、确认和导出任务
+  database/logs/         review.log 及轮转日志
+  storage/media/         原视频、seed、Tracking、工作区与帧缓存
+  storage/datasets/      训练包
 ```
 
-后端构建会执行两段安装：
+保持旧部署的 `/data/database/app.db` 和 `/data/storage` 挂载位置，新增 `APP_DATA_DIR=/data/database` 使业务日志同样持久化。Docker 标准输出日志限制为 10 MB × 3；业务文件日志也轮转。重建容器不会删除宿主机绑定目录。
 
-1. 从 `PYTORCH_INDEX_URL` 安装项目锁定的 CUDA PyTorch；
-2. 安装 `backend/requirements.txt` 中的 FastAPI、Transformers、OpenCV 等依赖。
+## 5. 常用操作与故障定位
 
-Windows 的 `install-pytorch-cu132.bat` 不会在 Linux 容器内运行，因此 CUDA wheel 源已经放入 `backend/Dockerfile`。
-
-如果目标机器无法访问 PyTorch 或 npm 下载源，应先配置代理/镜像源，或者在可联网电脑构建镜像后再推送/导出镜像。
-
-### 7.2 启动
-
-```powershell
-docker compose up -d
+```bash
 docker compose ps
-```
-
-业务准入规则见 [WORKFLOW.md](WORKFLOW.md)，存储与排错分别见 [STORAGE_LAYOUT.md](STORAGE_LAYOUT.md)、[TESTING.md](TESTING.md)。当前 Compose 设置 DB 路径，但未设置 `APP_DATA_DIR`，所以文件日志仍位于镜像的默认 data/logs 内；重建容器前需收集日志。若要持久化文件日志，应为 `APP_DATA_DIR` 配置持久卷，不能只凭 DB 卷已挂载就假定日志也已持久化。
-
-查看日志：
-
-```powershell
+docker compose logs --tail=100 backend frontend
 docker compose logs -f backend
-docker compose logs -f frontend
+docker compose stop
+docker compose start
 ```
 
-默认访问：
+`/api/health` 检查应用进程；`sam3.enabled` 区分是否启用 AI，`modelLoaded` 表示是否已实际加载。健康检查通过不代表 GPU 推理成功。CPU 模式的 AI 请求及追踪回退返回明确 503 提示，避免在未启用 AI 时先截断旧追踪结果；人工 seed JSON 保存仍可使用。
 
-```text
-http://服务器IP:8080
-```
+| 现象 | 首先检查 |
+| --- | --- |
+| list_annotations/source 参数异常 | 是否部署了合并修复后的版本，重建后端镜像；不要混用两份 db.py |
+| Cannot install numpy / Python version | 后端基础镜像须 Python 3.12；不要改回 3.11 |
+| 无法获取镜像令牌、连接重置、下载超时 | 镜像仓库/软件源网络，尚未运行到业务代码 |
+| nvidia device driver / CUDA 不可用 | 驱动、Container Toolkit、GPU Compose 文件、CPU/GPU 镜像是否选对 |
+| preflight_failed | 日志中具体缺失的密钥、挂载目录、模型配置或权重；不要只重启循环 |
+| 502，尤其后端重建后 | backend 是否健康；执行 docker compose restart frontend 刷新 Nginx 上游 |
+| 上传 413 | 默认 2 GiB；更大文件须同时调整 Nginx 和后端 MAX_VIDEO_BYTES |
+| 保存失败 | 保留前端修改，记录请求号；检查 database/logs/review.log，按 [TESTING.md](TESTING.md) 排查 |
+| 视频有标注但不能导出 | 先完成 B、C 显式完成操作；重新确认后不能使用旧版本训练包 |
 
-服务器本机可以访问：
+## 6. 预构建镜像与离线部署
 
-```text
-http://127.0.0.1:8080
-```
+源码部署执行的是：
 
-其他电脑使用 `ipconfig` 查到的服务器局域网 IPv4 地址，例如：
-
-```text
-http://192.168.1.20:8080
-```
-
-需要在 Windows 防火墙中仅对可信局域网开放 `.env` 中的 `WEB_PORT`。后端 3000 端口没有映射到宿主机，不应单独对外开放。
-
-## 8. 验证 GPU 和后端环境
-
-容器启动后执行：
-
-```powershell
-docker compose exec backend python -c "import torch; print('torch=', torch.__version__); print('cuda=', torch.cuda.is_available()); print('device=', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
-```
-
-期望：
-
-```text
-cuda= True
-device= 你的 NVIDIA 显卡名称
-```
-
-后端健康检查：
-
-```powershell
-Invoke-RestMethod http://127.0.0.1:8080/api/health
-```
-
-第一次点击 AI Tracking 时才会真正加载 SAM3，因此第一次运行会比后续运行慢。
-
-## 9. 迁移现有数据库和 Storage
-
-迁移前先停止旧后端和 Docker backend，防止复制过程中仍有写入：
-
-```powershell
-docker compose stop backend
-```
-
-复制：
-
-```text
-旧 backend/data/app.db
-    → D:/sperm-annotation-data/database/app.db
-
-旧 backend/storage/*
-    → D:/sperm-annotation-data/storage/*
-```
-
-如果旧版本还有 `backend/track_data/<media-id>`，将它下面的素材子目录逐个复制到：
-
-```text
-D:/sperm-annotation-data/storage/media/<media-id>
-```
-
-不要覆盖同名目录。迁移前保留完整备份。
-
-完成后：
-
-```powershell
-docker compose start backend
-docker compose logs -f backend
-```
-
-## 10. 多用户共享方式
-
-所有用户都访问同一个网址：
-
-```text
-http://服务器IP:8080
-```
-
-共享关系如下：
-
-- 账号和人工标注索引：同一个 `app.db`；
-- 原视频：同一个 `storage/media`；
-- Tracking JSON、异常结果、overlay：对应视频目录；
-- 训练数据集：同一个 `storage/datasets`；
-- 每个用户使用自己的登录账号。
-
-当前版本有以下限制：
-
-1. GPU Tracking 全局串行，一次只处理一个任务；
-2. 任意 Tracking 运行时，当前逻辑可能暂时阻止其他用户保存人工标注；
-3. 不要启动 `--workers 2`，也不要扩展多个 backend 容器；
-4. 两个人不要同时修改同一个视频的同一帧；
-5. 浏览器中的部分编辑状态保存在各自浏览器 localStorage，尚不支持实时协同编辑。
-
-小团队可以按以上方式使用。若后续需要多后端、高并发或实时协作，应将 SQLite 迁移到 PostgreSQL，并用 Redis/持久任务表保存队列和锁，同时保留单一 GPU Worker。
-
-## 11. 构建后推送到镜像仓库
-
-如果不想在对方电脑上安装 Python/Node 依赖并现场构建，可以把前后端镜像推送到 Docker Hub、Harbor、GHCR 等镜像仓库。
-
-在构建电脑的 `.env` 中设置：
-
-```dotenv
-BACKEND_IMAGE=你的仓库地址/rare-sperm-backend:v1
-FRONTEND_IMAGE=你的仓库地址/rare-sperm-frontend:v1
-```
-
-然后：
-
-```powershell
-docker login 你的仓库地址
-docker compose build
-docker compose push
-```
-
-对方电脑只需要取得以下文件：
-
-- `compose.yaml`；
-- `.env`；
-- SAM3 模型目录；
-- 需要迁移的 database/storage 数据。
-
-对方执行：
-
-```powershell
-docker login 你的仓库地址
-docker compose pull
-docker compose up -d --no-build
-```
-
-镜像只包含运行环境和代码，不包含数据库、Storage、模型及 `.env` 密钥。
-
-## 12. 完全离线部署
-
-联网电脑构建后：
-
-```powershell
-docker save -o rare-sperm-images.tar rare-sperm-annotation-backend:local rare-sperm-annotation-frontend:local
-```
-
-将以下内容复制到离线服务器：
-
-- `rare-sperm-images.tar`；
-- `compose.yaml`；
-- `.env`；
-- SAM3 模型目录；
-- database/storage 数据目录。
-
-离线服务器执行：
-
-```powershell
-docker load -i rare-sperm-images.tar
-docker compose up -d --no-build
-```
-
-如果 `.env` 中的 `BACKEND_IMAGE`、`FRONTEND_IMAGE` 名称与导入镜像不一致，需要改成 `docker images` 显示的名称。
-
-## 13. 更新项目
-
-源码构建方式：
-
-```powershell
+```bash
 docker compose build --pull
-docker compose up -d
+docker compose up -d --no-build --wait
 ```
 
-镜像仓库方式：
-
-```powershell
-docker compose pull
-docker compose up -d --no-build
-```
-
-不要删除 `APP_DATA_ROOT` 指向的目录。重新创建容器不会删除绑定目录中的 `app.db`、视频或训练数据集。
-
-## 14. 备份与恢复
-
-SQLite 和 Storage 应作为同一个备份批次处理。
-
-建议备份步骤：
-
-1. 通知用户停止保存和 Tracking；
-2. `docker compose stop backend`；
-3. 复制 `database/app.db`；
-4. 复制整个 `storage/`；
-5. 记录当前镜像版本和 SAM3 模型版本；
-6. `docker compose start backend`。
-
-至少备份：
+免构建部署需要维护者先发布镜像。仓库的 `.github/workflows/release-images.yml` 在推送 `vX.Y.Z` 标签后执行 CI，通过后发布三种 Linux amd64 镜像：
 
 ```text
-D:/sperm-annotation-data/database/app.db
-D:/sperm-annotation-data/storage/media/
-D:/sperm-annotation-data/storage/datasets/
-根目录 .env（安全保存，不公开）
+ghcr.io/huangwww11222/sperm-annotation-backend:vX.Y.Z-cpu
+ghcr.io/huangwww11222/sperm-annotation-backend:vX.Y.Z-gpu
+ghcr.io/huangwww11222/sperm-annotation-frontend:vX.Y.Z
 ```
 
-恢复时先停止 backend，再恢复数据库和 Storage，确认目录权限后重新启动。
+发布源码前运行 `python3 scripts/check_repository.py`。运行目录应从 Git 跟踪中移除但保留宿主机文件；`.gitignore` 不会自动移除已经跟踪的文件，也不会清除已推送的历史。如果旧提交含真实业务数据，应由维护者单独安排历史清理，不能把当前目录干净等同于历史无数据。不要在部署或文档整理时自动改写远端历史。
 
-## 15. 常见问题
+这些是命名规则，**不是已存在的版本声明**。维护者在 GitHub Packages 确认三个镜像构建成功并设为对使用者可访问；公共源码不自动意味着镜像包已经公开。参考 [GitHub 官方镜像发布说明](https://docs.github.com/en/actions/tutorials/publish-packages/publish-docker-images)。
 
-### 15.1 `could not select device driver "nvidia"`
+部署方在 `.env` 填写实际版本对应的 BACKEND_IMAGE / FRONTEND_IMAGE，然后：
 
-Docker 没有获得 GPU。检查 NVIDIA 驱动、Docker Desktop WSL2 GPU 支持或 NVIDIA Container Toolkit，然后重新启动 Docker。
-
-### 15.2 `torch.cuda.is_available()` 为 `False`
-
-检查：
-
-- `.env` 中 `SAM3_DEVICE=cuda`；
-- Compose 中 GPU reservation 未被删除；
-- 宿主机驱动支持所安装的 CUDA PyTorch；
-- `docker compose exec backend nvidia-smi` 是否正常。
-
-### 15.3 找不到 SAM3 模型
-
-检查 `.env` 的 `SAM3_MODEL_HOST_PATH` 是否是模型文件所在目录，而不是它的父目录；再检查：
-
-```powershell
-docker compose exec backend ls -la /models/sam3
+```bash
+bash deploy.sh cpu --pull
+# GPU 配置使用 bash deploy.sh gpu --pull
 ```
 
-### 15.4 上传出现 `413 Request Entity Too Large`
+Windows：`.\deploy.ps1 -Mode cpu -Pull`。等价命令是 `docker compose pull` 后 `docker compose up -d --no-build --wait`。ARM64 机器目前从源码构建 CPU 版；发布工作流不承诺 ARM64 预构建镜像。
 
-确认运行的是项目提供的 `frontend/nginx.conf`，其中 `client_max_body_size 2g`。若需要更大文件，还要同步修改后端 `MAX_VIDEO_BYTES`。
+离线环境在联网机器 `docker save` 导出对应前后端镜像，到目标服务器 `docker load`；复制 compose.yaml、compose.gpu.yaml（需要 GPU 时）、实际 `.env` 和模型，执行 `docker compose up -d --no-build --wait`。不运行会联网拉取的 `--pull` 模式。CPU/GPU 镜像、平台和 `.env` 名称必须匹配。
 
-### 15.5 AVI 能上传但浏览器不能直接播放
+## 7. 迁移现有数据库和 Storage
 
-项目会使用后端逐帧预览。检查容器中的 OpenCV/FFmpeg、视频是否能解码，以及 `/api/track/frame/...` 请求。
+先停旧后端和新后端，完整备份，确认没有写入或 Tracking：
 
-### 15.6 `401 Unauthorized`
-
-登录令牌过期或 `JWT_SECRET` 被修改。重新登录；若每次容器重启都失效，检查 `.env` 是否一直使用同一个 `JWT_SECRET`。
-
-### 15.7 容器重建后视频或数据库消失
-
-检查 `docker inspect` 或 `docker compose config`，确认：
-
-```text
-宿主机 APP_DATA_ROOT/storage  → /data/storage
-宿主机 APP_DATA_ROOT/database → /data/database
+```bash
+docker compose stop
 ```
 
-不要把生产数据只写在容器可写层中。
+复制旧 `backend/data/app.db` 到实际 `APP_DATA_ROOT/database/app.db`，复制整个旧 `backend/storage` 内容到 `APP_DATA_ROOT/storage`。SQLite 若仍存在有效 WAL，不能只拷主文件；优先正常停机后备份整个数据库目录。旧 `backend/track_data/<id>` 逐个迁移至 `storage/media/<id>`，不覆盖同名素材。
 
-## 16. 上线验收清单
+启动会增量建表，不删除 A/B/F 历史。缺少完整快照的旧任务保持只读，不能猜测补帧。已有数据若记录了跨机器绝对路径，需要确认原视频能按媒体 ID 找到后再做业务验收，不能以登录成功代替迁移成功。
 
-- [ ] `docker compose ps` 中 frontend/backend 均正常；
-- [ ] `/api/health` 返回 `ok: true`；
-- [ ] 容器中 CUDA 可用；
-- [ ] SAM3 模型目录完整；
-- [ ] 注册、登录、401 跳转正常；
-- [ ] 上传 MP4 和 AVI 正常；
-- [ ] 原始 FPS、逐帧预览、人工框正常；
-- [ ] AI Tracking、异常暂停、续追正常；
-- [ ] 关闭前端素材后，后端 Storage 文件仍存在且可重新加载；
-- [ ] 全帧送审 → B 逐帧提交并完成 → C 逐项选择并完成 → 训练 ZIP 出现在 `storage/datasets`；
-- [ ] 未完成 B/C 时拒绝训练导出；重新确认时旧训练包停止下载；
-- [ ] 另一台电脑可以通过服务器 IP 使用；
-- [ ] 防火墙只开放 Web 端口；
-- [ ] 数据库和 Storage 备份、恢复测试通过。
+## 8. 更新、备份与恢复
+
+升级前安排停写，记录当前 Git 标签/镜像摘要及模型版本，并备份：实际 database 整个目录、storage 整个目录、`.env` 和模型来源。源码和数据目录分开存放；不要对业务目录执行 git clean。
+
+升级：先备份，再更新到已验收的源码标签，执行部署脚本；预构建方式改 `.env` 镜像版本后 pull/up。新镜像包含新增迁移时，不保证旧程序能直接读取升级后的 DB；回滚时恢复同批次数据库与 storage，再启动旧镜像。
+
+恢复：停服务，恢复完整备份，保持挂载路径与文件权限正确，再启动并抽查已有视频、审查/确认状态和训练包下载。
+
+## 9. 交付与验收
+
+- 全新机器能从 README 完成安装，启动日志无 preflight_failed。
+- 注册、登录、真实视频上传、标注保存、重新打开可恢复。
+- B 逐帧显式提交、C 显式完成、YOLO/COCO 图像标签一致；旧接口和旧最终版本不能绕过导出门禁。
+- 重建容器后账号、工作区、最终版本、训练 ZIP 和日志保留。
+- GPU 模式额外用真实视频验证 Tracking、异常暂停、续追及显存表现；CPU CI 不替代 GPU 验收。
+- 共享团队使用边界见根 README；公开访问要配 HTTPS 和组织访问控制。
+
+项目提供 `scripts/docker_smoke.py` 对隔离容器执行真实上传、完整工作流、训练包与重建恢复验收；复现环境与结果统一记录在 [TESTING.md](TESTING.md)。

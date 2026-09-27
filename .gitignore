@@ -21,3 +21,10 @@ backend/data/app.db-wal
 
 .DS_Store
 **/.DS_Store
+
+/models/
+/.env.*
+!/.env.docker.example
+*.db
+*.db-shm
+*.db-wal

@@ -44,7 +44,6 @@ CREATE TABLE IF NOT EXISTS annotations (
 );
 CREATE INDEX IF NOT EXISTS idx_ann_user ON annotations(user_id);
 CREATE INDEX IF NOT EXISTS idx_ann_media ON annotations(media_id);
-CREATE INDEX IF NOT EXISTS idx_ann_batch ON annotations(batch_id);
 """
 
 
@@ -62,6 +61,7 @@ def init_db() -> None:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(annotations)")}
         if "batch_id" not in cols:
             conn.execute("ALTER TABLE annotations ADD COLUMN batch_id TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ann_batch ON annotations(batch_id)")
         conn.commit()
 
 
@@ -120,14 +120,6 @@ def insert_annotations(rows: list[dict[str, Any]]) -> int:
 
 
 
-def list_annotations(user_id: int, media_id: str | None = None) -> list[dict[str, Any]]:
-    sql = "SELECT a.*, u.username FROM annotations a LEFT JOIN users u ON u.id=a.user_id WHERE a.user_id=?"
-    params: list[Any] = [user_id]
-    if media_id:
-        sql += " AND a.media_id=?"
-        params.append(media_id)
-    sql += " ORDER BY a.id DESC"
-
 def list_annotations(user_id: int | None = None, media_id: str | None = None, source: str | None = None) -> list[dict[str, Any]]:
     sql = "SELECT a.*, u.username FROM annotations a LEFT JOIN users u ON u.id=a.user_id WHERE 1=1"
     params: list[Any] = []
@@ -137,10 +129,10 @@ def list_annotations(user_id: int | None = None, media_id: str | None = None, so
     if media_id:
         sql += " AND a.media_id=?"
         params.append(media_id)
-    if source:
+    if source is not None:
         sql += " AND a.source=?"
         params.append(source)
-    sql += " ORDER BY a.created_at DESC, a.id DESC"
+    sql += " ORDER BY a.id DESC"
 
     with connect() as conn:
         rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
@@ -148,12 +140,11 @@ def list_annotations(user_id: int | None = None, media_id: str | None = None, so
     # Historical versions inserted another row every time AI Tracking was
     # clicked.  Results represent the current logical annotation, not that
     # append-only history: keep only the newest row for the same file/frame/
-    # object/user/source.  media_name also collapses legacy frontend media IDs
-    # that referred to the same uploaded file.
+    # object/user/source. Same filenames are not evidence of the same media.
     unique: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()
     for row in rows:
-        media_identity = str(row.get("media_name") or row.get("media_id") or "").strip().casefold()
+        media_identity = str(row.get("media_id") or "")
         key = (
             int(row.get("user_id") or 0),
             media_identity,

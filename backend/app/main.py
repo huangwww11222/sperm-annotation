@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from .auth import current_user, hash_password, sign_jwt, verify_password
 from .config import (
     DATASET_EXPORT_DIR, DB_FILE, DEVICE, DTYPE, HOST, JWT_SECRET, LEGACY_TRACK_DATA_DIR, MAX_VIDEO_BYTES, MODEL_ID, PORT,
-    TRACK_DATA_DIR, TRACK_FRAMES,
+    TRACK_DATA_DIR, TRACK_FRAMES, SAM3_ENABLED,
 )
 from .db import create_user, delete_annotation, get_user, get_user_by_id, init_db, insert_annotations, list_annotations
 from .schemas import (
@@ -56,6 +56,10 @@ register_review_routers(app)
 TRACK_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sam3-track")
 TASKS: dict[str, dict[str, Any]] = {}
 TASK_LOCK = threading.Lock()
+
+def require_tracking_enabled() -> None:
+    if not SAM3_ENABLED:
+        raise HTTPException(503, "此服务器未启用 AI Tracking。请联系部署人员配置 SAM3 模型并启用 GPU 部署；人工标注、审查和导出仍可使用。")
 
 def tracking_is_busy() -> bool:
     with TASK_LOCK:
@@ -107,8 +111,8 @@ def shutdown() -> None:
 @app.get("/api/health", response_model=HealthResponse)
 def health() -> dict[str, Any]:
     try:
-        engine = get_tracker_engine()
-        model_loaded = engine.model is not None and engine.processor is not None
+        engine = get_tracker_engine() if SAM3_ENABLED else None
+        model_loaded = bool(engine and engine.model is not None and engine.processor is not None)
     except Exception:
         model_loaded = False
     with TASK_LOCK:
@@ -118,7 +122,7 @@ def health() -> dict[str, Any]:
         "ok": True,
         "service": "sam3-annotation-backend",
         "storage": "sqlite",
-        "sam3": {"ok": True, "modelLoaded": model_loaded, "queued": queued, "running": running, "trackingBusy": (queued + running) > 0, "trackFrames": TRACK_FRAMES},
+        "sam3": {"ok": SAM3_ENABLED, "enabled": SAM3_ENABLED, "modelLoaded": model_loaded, "queued": queued, "running": running, "trackingBusy": (queued + running) > 0, "trackFrames": TRACK_FRAMES},
     }
 
 
@@ -653,6 +657,9 @@ def rewind_tracking(req: dict[str, Any], user: dict[str, Any] = Depends(current_
     from /track/annotations so that only an explicit AI Tracking click rewinds the
     previous future branch.
     """
+    # The frontend rewinds before starting inference. Reject disabled AI here
+    # as well, so switching to CPU mode cannot truncate prior tracking results.
+    require_tracking_enabled()
     if tracking_is_busy():
         raise HTTPException(409, "已有 SAM3 Tracking 任务正在运行，请等待完成")
     media_id = str(req.get("mediaId") or "").strip()
@@ -688,6 +695,7 @@ def rewind_tracking(req: dict[str, Any], user: dict[str, Any] = Depends(current_
 @app.post("/api/track", status_code=202)
 @source_write
 def start_tracking(req: TrackRequest, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+    require_tracking_enabled()
     if tracking_is_busy():
         raise HTTPException(409, "已有 SAM3 Tracking 任务正在运行，请等待完成")
     if not req.annotations:

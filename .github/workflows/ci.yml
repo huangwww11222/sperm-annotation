@@ -1,0 +1,74 @@
+name: Validate and smoke-test
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: python3 scripts/check_repository.py
+      - run: bash -n deploy.sh
+      - run: npm ci --prefix frontend
+      - run: npm run test:annotation --prefix frontend
+      - run: npm run test:review --prefix frontend
+      - run: npm run test:confirmation --prefix frontend
+      - run: npm run build --prefix frontend
+      - name: Build exact deployment images
+        run: |
+          docker build -f backend/Dockerfile -t annotation-ci-backend:cpu .
+          docker build -f frontend/Dockerfile -t annotation-ci-frontend:local .
+      - name: Backend regression in Python 3.12 image
+        run: |
+          docker run --rm --entrypoint sh \
+            -e APP_DATA_DIR=/tmp/test-data -e APP_DB_FILE=/tmp/test-data/app.db \
+            -e APP_STORAGE_DIR=/tmp/test-storage -e PYTHONPATH=/app/backend \
+            -v "$PWD:/workspace:ro" annotation-ci-backend:cpu -c \
+            'pip install -r /workspace/backend/requirements-dev.txt && cd /workspace && pytest backend/tests -q -o cache_dir=/tmp/pytest-cache'
+      - name: Isolated configuration
+        run: |
+          mkdir -p work
+          echo "JWT_SECRET=$(python3 -c 'import secrets; print(secrets.token_hex(32))')" >> "$GITHUB_ENV"
+          echo "APP_DATA_ROOT=$PWD/work/docker-smoke-data" >> "$GITHUB_ENV"
+          echo "BACKEND_IMAGE=annotation-ci-backend:cpu" >> "$GITHUB_ENV"
+          echo "FRONTEND_IMAGE=annotation-ci-frontend:local" >> "$GITHUB_ENV"
+          echo "COMPOSE_PROJECT_NAME=annotation-ci" >> "$GITHUB_ENV"
+          echo "WEB_PORT=18080" >> "$GITHUB_ENV"
+          echo "WEB_BIND_ADDRESS=127.0.0.1" >> "$GITHUB_ENV"
+          echo "COMPOSE_FILE=compose.yaml" >> "$GITHUB_ENV"
+      - name: Validate CPU and GPU composition
+        run: |
+          docker compose -f compose.yaml config --quiet
+          docker compose -f compose.yaml -f compose.gpu.yaml config --quiet
+      - name: Clean install and complete annotation workflow
+        run: |
+          docker compose up -d --no-build --wait --wait-timeout 180
+          python3 scripts/docker_smoke.py --fresh
+          docker compose down
+          docker compose up -d --no-build --wait --wait-timeout 180
+          python3 scripts/docker_smoke.py --verify-restart
+      - name: Container diagnostics
+        if: always()
+        run: docker compose logs --no-color --tail=150
+      - name: Stop disposable containers
+        if: always()
+        run: docker compose down
+
+  windows-installer:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: PowerShell installer configuration contract (mock Docker)
+        shell: powershell
+        run: .\scripts\test_deploy.ps1

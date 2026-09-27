@@ -9,6 +9,8 @@
 | `APP_STORAGE_DIR` | `backend/storage` | `media/`、`datasets/` |
 | `SAM3_MODEL_ID` | `backend/track_modul/facebook--sam3/snapshots/master` | 模型配置与权重 |
 
+Docker 显式设定 `APP_DATA_DIR=/data/database`，业务日志位于宿主机 `APP_DATA_ROOT/database/logs`，与数据库一同持久化。源码默认路径不变。
+
 修改 DB 路径不自动修改日志路径；修改变量不自动搬迁已有数据。不要将测试目录与业务目录混用。
 
 ## 文件与工作区

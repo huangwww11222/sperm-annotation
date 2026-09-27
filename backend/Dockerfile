@@ -1,4 +1,4 @@
-FROM python:3.11-slim-bookworm
+FROM python:3.12-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -15,7 +15,7 @@ WORKDIR /app/backend
 
 COPY backend/requirements.txt ./requirements.txt
 
-ARG PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cu132
+ARG PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
 RUN python -m pip install --upgrade pip \
     && python -m pip install \
        torch==2.14.0 torchvision==0.29.0 \
@@ -24,11 +24,15 @@ RUN python -m pip install --upgrade pip \
 
 COPY backend/app ./app
 COPY backend/__init__.py ./__init__.py
+COPY backend/docker-entrypoint.sh /usr/local/bin/annotation-entrypoint
+RUN chmod +x /usr/local/bin/annotation-entrypoint
+ENTRYPOINT ["annotation-entrypoint"]
 
 RUN mkdir -p /data/storage /data/database
 
 ENV BACKEND_HOST=0.0.0.0 \
     BACKEND_PORT=3000 \
+    APP_DATA_DIR=/data/database \
     APP_STORAGE_DIR=/data/storage \
     APP_DB_FILE=/data/database/app.db \
     SAM3_MODEL_ID=/models/sam3

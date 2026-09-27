@@ -1,0 +1,26 @@
+# Merge with compose.yaml; do not run as a standalone file.
+services:
+  backend:
+    image: ${BACKEND_IMAGE:-rare-sperm-annotation-backend:local-gpu}
+    build:
+      args:
+        PYTORCH_INDEX_URL: ${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu132}
+    environment:
+      SAM3_ENABLED: "true"
+      SAM3_DEVICE: cuda
+      SAM3_DTYPE: ${SAM3_DTYPE:-bfloat16}
+    volumes:
+      - type: bind
+        source: ${SAM3_MODEL_HOST_PATH:-./models/sam3}
+        target: /models/sam3
+        read_only: true
+        bind:
+          create_host_path: false
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: "2gb"

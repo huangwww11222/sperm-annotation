@@ -27,6 +27,8 @@ DATA_DIR = Path(os.getenv("APP_DATA_DIR") or (BACKEND_DIR / "data"))
 DB_FILE = Path(os.getenv("APP_DB_FILE") or (DATA_DIR / "app.db"))
 
 HOST = os.getenv("BACKEND_HOST", "127.0.0.1")
+APP_ENV = os.getenv("APP_ENV", "development")
+SAM3_ENABLED = os.getenv("SAM3_ENABLED", "true").lower() in {"1", "true", "yes"}
 PORT = int(os.getenv("BACKEND_PORT", "3000"))
 JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me")
 TOKEN_EXPIRES_IN_SEC = 7 * 24 * 60 * 60
