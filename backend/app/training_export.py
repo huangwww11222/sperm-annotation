@@ -404,12 +404,18 @@ def build_package(eid, body, versions, summary, work):
                 rel = f"images/{split}/{stem}.jpg"
                 image_path = work / rel
                 image_path.parent.mkdir(parents=True, exist_ok=True)
-                if not cv2.imwrite(
-                    str(image_path), image, [cv2.IMWRITE_JPEG_QUALITY, 95]
-                ):
+                # OpenCV imwrite cannot handle some Windows Unicode paths.
+                try:
+                    encoded_ok, encoded = cv2.imencode(
+                        ".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 95]
+                    )
+                    if not encoded_ok:
+                        raise ValueError("JPEG encoding failed")
+                    image_path.write_bytes(encoded.tobytes())
+                except (OSError, ValueError, cv2.error) as exc:
                     raise ReviewError(
                         "IMAGE_WRITE_FAILED", f"第 {fi + 1} 帧图片写入失败", 503
-                    )
+                    ) from exc
                 done += 1
                 manifest["counts"][split] += 1
                 sample = {
