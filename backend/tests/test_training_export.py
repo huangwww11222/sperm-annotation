@@ -159,7 +159,7 @@ def test_zip_contains_real_frames_and_final_labels(frozen, fmt):
             assert co["annotations"][2]["bbox"] == pytest.approx([13.333, 20, 20, 20])
             for item in co["images"]:
                 assert (
-                    str(Path("annotations") / item["file_name"]).replace(
+                    (Path("annotations") / item["file_name"]).as_posix().replace(
                         "annotations/../", ""
                     )
                     in names
@@ -274,9 +274,9 @@ def test_export_fails_without_publishing_partial_training_zip(
 
         monkeypatch.setattr(cv2, "VideoCapture", BrokenCapture)
     if failure == "image_write":
-        monkeypatch.setattr(cv2, "imwrite", lambda *a, **kw: False)
+        monkeypatch.setattr(cv2, "imencode", lambda *a, **kw: (False, None))
     if failure == "reopen":
-        original = cv2.imwrite
+        original = cv2.imencode
         called = False
 
         def save(*args, **kwargs):
@@ -286,7 +286,7 @@ def test_export_fails_without_publishing_partial_training_zip(
                 write(frozen["cid"], "reopen")
             return original(*args, **kwargs)
 
-        monkeypatch.setattr(cv2, "imwrite", save)
+        monkeypatch.setattr(cv2, "imencode", save)
     if failure == "publish":
         with db.connect() as c:
             c.execute(
