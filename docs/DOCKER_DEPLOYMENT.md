@@ -11,14 +11,14 @@
 
 服务器安装 Docker + Compose 2.20+。Windows 使用 Docker Desktop 的 WSL2 Linux containers；Linux GPU 服务器还需 NVIDIA 驱动及 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)。[Docker 的 GPU 支持说明](https://docs.docker.com/compose/how-tos/gpu-support/)列出了设备挂载条件。
 
-客户端只需浏览器。首次部署脚本不传参数、或按模板配置 `.env` 时，默认选择 GPU 并启用 AI；先按第 3 节准备模型及驱动。仅需人工标注时显式执行 `bash deploy.sh cpu` / `.\deploy.ps1 -Mode cpu`，此模式不需要模型。缺少 GPU 或模型时会报错，不自动关闭 AI。一键脚本完成应用配置、镜像构建和启动，不代替操作系统、GPU 驱动或模型授权。
+客户端只需浏览器。首次部署脚本不传参数、或按模板配置 `.env` 时，默认选择 GPU 并启用 AI；模型由脚本自动准备，先按第 3 节准备驱动。仅需人工标注时显式执行 `bash deploy.sh cpu` / `.\deploy.ps1 -Mode cpu`，此模式不需要模型。缺少 GPU 或模型时会报错，不自动关闭 AI。一键脚本完成模型下载与校验、应用配置、镜像构建和启动；GPU 驱动由部署方准备。
 
 ## 2. 首次启动
 
 ```bash
 git clone https://github.com/huangwww11222/sperm-annotation.git
 cd sperm-annotation
-# 先把完整 SAM3 模型放入 models/sam3/，再启动
+# 首次自动下载本仓库 SAM3 模型
 bash deploy.sh
 ```
 
@@ -40,25 +40,21 @@ PowerShell 如果阻止运行下载脚本，先检查脚本内容，再根据组
 
 GPU 当前发布目标为 Linux amd64 / Windows x64 WSL2，不提供 Apple Silicon 的 CUDA。驱动须支持选择的 CUDA PyTorch wheel；当前 GPU 默认 cu132。配置 GPU 前先验证宿主机 `nvidia-smi` 和 Docker GPU 访问。
 
-从 [SAM3 官方模型页面](https://huggingface.co/facebook/sam3)申请访问、按其条款下载完整快照，放在：
+SAM3 模型由[本仓库的模型 Release](https://github.com/huangwww11222/sperm-annotation/releases/tag/sam3-model-6d06f0a5)提供，默认部署自动准备，无需部署方另行到模型站申请下载。模型来自 [facebook/sam3](https://huggingface.co/facebook/sam3)，固定来源快照和每个文件的 SHA256 见 `model-distribution/manifest.json`，许可见 `model-distribution/LICENSE-SAM.txt` 和模型包内 `LICENSE`。SAM License 允许在其条款下附带完整许可再分发；模型使用仍遵循该许可。[官方许可](https://github.com/facebookresearch/sam3/blob/main/LICENSE)
 
-```text
-models/sam3/
-  config.json
-  preprocessor_config.json 或 processor_config.json
-  model.safetensors 或全部权重分片与索引
-  其他模型文件
-```
+权重约 3.44 GB，加上配置约 3.45 GB。GitHub 普通 Git 不允许超过 100 MiB 的文件，Release 单附件须小于 2 GiB，所以权重拆为四个 Release 附件，源码只保存清单和安装工具；不是 Git LFS 占位文件。[GitHub 大文件说明](https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-large-files-on-github)、[Release 限制](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases)
 
-也可从已能运行项目的机器复制完整快照；若原快照包含指向缓存目录的符号链接，需要连同实际文件复制，不能留下指向容器外的断链。不要只复制某个权重文件。
-
-全新配置执行：
+默认 `bash deploy.sh` / `.\deploy.ps1` 会在启动后端前执行独立 `model-setup` 容器：下载 → 校验每个分块 → 组装并验证完整权重 → 写入安装完成标记，然后启动 AI 服务。首次需约 6.5 GiB 可用空间；已下载分块可复用，网络中断保留 `.sam3-download/` 缓存，重试可续传。模型准备失败会停止部署，并在控制台及模型目录的 `.sam3-setup.log`（2 MiB × 3 轮转）记录 `model.prepare_failed`，不会启动只具备一半能力的服务。可显式运行：
 
 ```bash
-bash deploy.sh gpu
+docker compose --profile model-setup run --rm --no-deps model-setup
 ```
 
-Windows 使用 `.\deploy.ps1 -Mode gpu`。模型不在默认目录时，先修改 `.env` 中的 `SAM3_MODEL_HOST_PATH` 后重新运行。配置可使用 Linux 绝对路径或 Windows 正斜杠路径，如 `D:/sperm-models/sam3`。
+默认目录为 `models/sam3/`，包含 `model.safetensors`、`config.json`、处理器/分词器文件、模型 README 与 LICENSE；不重复下载当前 Transformers 实现未使用的 `sam3.pt`。模型版本由源码清单固定；重复部署校验后复用，不自动升级到上游最新版本。
+
+可修改 `.env` 中的 `SAM3_MODEL_HOST_PATH` 使用其他目录，如 `D:/sperm-models/sam3`。已有完整自定义模型会复用，启动前检查仍验证配置、分片和 CUDA；不完整或不同文件不会被自动覆盖。自行准备或离线复制模型时，设置 `SAM3_AUTO_DOWNLOAD=false` 禁止下载。复制符号链接快照时需带上实际文件，不能留下断链。
+
+只执行 `docker compose up` 会跳过模型准备；首次请使用部署脚本，或先手动执行上方 model-setup 命令。已有旧 `.env` 没有 SAM3_AUTO_DOWNLOAD 时仍默认自动下载；GPU 模式和路径设置沿用原值。
 
 **已有 CPU 配置或旧版本配置升级**：保留 `.env` 的 JWT_SECRET 和 APP_DATA_ROOT，在 `.env` 设置：
 
@@ -87,7 +83,8 @@ docker compose exec backend python -c "import torch; print(torch.__version__, to
 | WEB_PORT / WEB_BIND_ADDRESS | 8080 / 0.0.0.0；反向代理同机时可只绑定 127.0.0.1 |
 | JWT_SECRET | 首次生成的随机密钥；长期保留，修改会使旧登录令牌失效 |
 | APP_DATA_ROOT | ./runtime；可改为本机数据盘，不能把 SQLite 放在 SMB/NFS |
-| SAM3_MODEL_HOST_PATH | ./models/sam3；只读挂载，GPU 必须存在 |
+| SAM3_MODEL_HOST_PATH | ./models/sam3；安装容器写入，后端只读挂载 |
+| SAM3_AUTO_DOWNLOAD | true；缺少模型时自动准备本仓库固定 Release，false 使用自备模型 |
 | SAM3_DTYPE / SAM3_TRACK_FRAMES | bfloat16 / 120；仅 GPU 启用推理 |
 | PYTORCH_INDEX_URL | GPU wheel 源，默认 cu132；CPU 构建固定使用 CPU wheel |
 | BACKEND_IMAGE / FRONTEND_IMAGE | 源码构建可留空；拉取预构建镜像时必须写实际发布的同版本名称 |
@@ -120,6 +117,7 @@ docker compose start
 | Cannot install numpy / Python version | 后端基础镜像须 Python 3.12；不要改回 3.11 |
 | 无法获取镜像令牌、连接重置、下载超时 | 镜像仓库/软件源网络，尚未运行到业务代码 |
 | nvidia device driver / CUDA 不可用 | 驱动、Container Toolkit、GPU Compose 文件、CPU/GPU 镜像是否选对 |
+| model.prepare_failed | 网络/下载空间/校验日志；缓存保留可重试，已有自定义模型不自动覆盖 |
 | preflight_failed | 日志中具体缺失的密钥、挂载目录、模型配置或权重；不要只重启循环 |
 | 502，尤其后端重建后 | backend 是否健康；执行 docker compose restart frontend 刷新 Nginx 上游 |
 | 上传 413 | 默认 2 GiB；更大文件须同时调整 Nginx 和后端 MAX_VIDEO_BYTES |
@@ -156,7 +154,7 @@ bash deploy.sh gpu --pull
 
 Windows：`.\deploy.ps1 -Mode gpu -Pull`。等价命令是 `docker compose pull` 后 `docker compose up -d --no-build --wait`。ARM64 机器目前从源码构建 CPU 版；发布工作流不承诺 ARM64 预构建镜像。
 
-离线环境在联网机器 `docker save` 导出对应前后端镜像，到目标服务器 `docker load`；复制 compose.yaml、compose.gpu.yaml（需要 GPU 时）、实际 `.env` 和模型，执行 `docker compose up -d --no-build --wait`。不运行会联网拉取的 `--pull` 模式。CPU/GPU 镜像、平台和 `.env` 名称必须匹配。
+离线环境在联网机器 `docker save` 导出对应前后端镜像，到目标服务器 `docker load`；复制源码中的 scripts/、model-distribution/、compose.yaml、compose.gpu.yaml（需要 GPU 时）、实际 `.env` 和已准备好的完整模型，并设置 SAM3_AUTO_DOWNLOAD=false，执行 `docker compose up -d --no-build --wait`。不运行会联网拉取的 `--pull` 模式。CPU/GPU 镜像、平台和 `.env` 名称必须匹配。
 
 ## 7. 迁移现有数据库和 Storage
 

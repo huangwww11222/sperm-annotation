@@ -88,7 +88,9 @@ def test_deploy_script_initializes_once_and_preserves_existing_secret(tmp_path, 
         shutil.copy(root/name, tmp_path/name)
     binary = tmp_path/'bin'; binary.mkdir()
     docker = binary/'docker'
-    docker.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$DOCKER_CALL_LOG"\n')
+    docker.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$DOCKER_CALL_LOG"\nif [ "$*" = "compose --profile model-setup config --services" ]; then\n  printf "backend\\nfrontend\\n"\n  if sed -n "s/^COMPOSE_FILE=//p" .env | grep -q compose.gpu; then printf "model-setup\\n"; fi\nfi\n')
+    with docker.open('a') as stream:
+        stream.write('if [ "$*" = "compose --profile model-setup run --rm --no-deps model-setup" ] && [ "$MODEL_SETUP_FAIL" = 1 ]; then exit 42; fi\n')
     docker.chmod(0o755)
     env = {**os.environ, 'PATH':str(binary)+os.pathsep+os.environ['PATH'], 'DOCKER_CALL_LOG':str(tmp_path/'calls')}
     selected = mode or 'gpu'
@@ -103,4 +105,16 @@ def test_deploy_script_initializes_once_and_preserves_existing_secret(tmp_path, 
     mismatch = subprocess.run(['bash',str(tmp_path/'deploy.sh'),other],env=env,capture_output=True,text=True)
     assert mismatch.returncode == 2
     assert (tmp_path/'.env').read_text() == settings
-    assert '--no-build --wait' in (tmp_path/'calls').read_text()
+    calls = (tmp_path/'calls').read_text()
+    assert '--no-build --wait' in calls
+    assert ('run --rm --no-deps model-setup' in calls) == (selected == 'gpu')
+    if selected == 'gpu':
+        assert calls.index('run --rm --no-deps model-setup') < calls.index('compose build')
+
+    if selected == 'gpu':
+        (tmp_path/'calls').write_text('')
+        failed = subprocess.run(['bash', str(tmp_path/'deploy.sh')], env={**env, 'MODEL_SETUP_FAIL': '1'}, capture_output=True, text=True)
+        assert failed.returncode == 42
+        assert (tmp_path/'.env').read_text() == settings
+        calls = (tmp_path/'calls').read_text()
+        assert 'compose build' not in calls and 'compose up' not in calls

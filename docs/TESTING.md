@@ -33,7 +33,7 @@ npm run build --prefix frontend
 | C 选择/恢复/最终版本 | `test_confirmation_workflow.py`、`test:confirmation` | `confirmation-browser.mjs`（39）、`confirmation-failure-browser.mjs`（30） |
 | 训练导出/门禁/版本 | `test_training_export.py` | `training-export-browser.mjs`（29） |
 | 全窗口专注、视频进度 | 上述对应页面回归、构建 | `workspace-layout-browser.mjs`（49） |
-| 数据库查询/升级、Docker 发布 | `test_annotation_result_dedupe.py`、`test_deployment_preflight.py`、`test_docker_deployment_contract.py` | 下方容器验收；不是只运行前端构建 |
+| 数据库查询/升级、Docker 发布 | `test_annotation_result_dedupe.py`、`test_deployment_preflight.py`、`test_docker_deployment_contract.py`、`test_model_distribution.py` | 下方容器验收；不是只运行前端构建 |
 | 核心操作优先级、用户说明 | 上述 B/C/导出回归、构建 | `workspace-priority-browser.mjs`（35） |
 
 括号为当前脚本检查数量，**不是每次修改自动通过的结果**。测试源位于 `backend/tests/` 与 `frontend/tests/`。
@@ -153,6 +153,8 @@ docker compose down
 日志不记录 JWT/密码；不要记录每个鼠标移动。浏览器 route 注入的 503 不会出现在服务端日志；数据库触发器故障测试验证真实事务回滚与日志。
 
 ## 最近验证记录
+
+2026-09-28 模型随仓库交付：固定官方 facebook/sam3 快照，权重 SHA256 `6d06f0a5f84e435071fe6603e61d0b4cc7b40e0d39d487cfd4d67d8cc11cc14a`，所有随包配置/许可与官方 Git blob 一致。模型以仓库 Release 附件提供，Git 仅记录清单、完整许可和安装工具。部署相关 **18 项 pytest 通过**，覆盖分块续传、SHA256 失败不发布模型、完整安装与缓存复用、自备模型不覆盖、关闭下载、路径防护及模型失败停止部署；PowerShell 7.4 模拟 Docker 默认/GPU/CPU 三组通过。真实 3.44 GB 权重经本机 HTTP 分块下载/组装、完整 SHA256 和再次零下载复用验证；实际 model-setup Compose 容器通过缓存校验。生产 CPU 镜像能从该包加载 Sam3TrackerVideoProcessor，safetensors 1797 个张量头可读取。日志 `work/model-distribution-*.log`、`work/model-full-restore.log`、`work/model-setup-container.log`、`work/model-processor-check.log`。15 个公开模型 Release 附件的远端大小和 SHA256 与本地包一致；匿名下载已核对清单、许可、处理器配置及四个权重块开头，确认无需模型站凭据。未运行真实 GPU 推理。
 
 2026-09-27 默认 AI 部署调整：首次无参数 Bash/PowerShell 安装及 `.env.docker.example` 默认选择 GPU + AI；显式 CPU 及已有配置保持原行为。部署相关 pytest **14 通过**，含真实 Compose 解析默认模板/GPU/CPU 三种配置；PowerShell 7.4 容器中默认/GPU/CPU 三组模拟 Docker 安装测试通过，验证重复执行保留密钥与模式冲突保护。日志 `work/ai-default-tests.log`、`work/ai-default-powershell.log`。本轮未运行真实 GPU 推理。
 

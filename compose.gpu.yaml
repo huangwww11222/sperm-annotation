@@ -24,3 +24,22 @@ services:
               count: 1
               capabilities: [gpu]
     shm_size: "2gb"
+
+  model-setup:
+    image: python:3.12-slim-bookworm
+    profiles: [model-setup]
+    entrypoint: [python, /setup/scripts/prepare_model.py]
+    environment:
+      SAM3_AUTO_DOWNLOAD: ${SAM3_AUTO_DOWNLOAD:-true}
+    volumes:
+      - type: bind
+        source: ${SAM3_MODEL_HOST_PATH:-./models/sam3}
+        target: /models/sam3
+      - type: bind
+        source: ./scripts
+        target: /setup/scripts
+        read_only: true
+      - type: bind
+        source: ./model-distribution
+        target: /setup/model-distribution
+        read_only: true

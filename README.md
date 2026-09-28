@@ -6,12 +6,12 @@
 
 ## 快速开始：默认启用 AI 的 Docker 部署
 
-默认部署启用 SAM3 AI Tracking，面向半自动视频标注。服务器先准备 NVIDIA GPU、驱动、容器 GPU 支持、Docker + Compose（2.20+），以及完整 SAM3 模型（见下方及[部署说明](docs/DOCKER_DEPLOYMENT.md)）。使用者的电脑只需要浏览器，无需 Python、Node.js 或模型环境。
+默认部署启用 SAM3 AI Tracking，面向半自动视频标注。服务器先准备 NVIDIA GPU、驱动、容器 GPU 支持、Docker + Compose（2.20+），模型由本仓库 Release 提供，部署脚本会自动下载并校验（见[部署说明](docs/DOCKER_DEPLOYMENT.md)）。使用者的电脑只需要浏览器，无需 Python、Node.js 或模型环境。
 
 ```bash
 git clone https://github.com/huangwww11222/sperm-annotation.git
 cd sperm-annotation
-# 先把完整 SAM3 模型放入 models/sam3/，再启动
+# 首次自动获取本仓库提供的 SAM3 模型并启用 AI
 bash deploy.sh
 ```
 
@@ -20,7 +20,7 @@ Windows PowerShell：
 ```powershell
 git clone https://github.com/huangwww11222/sperm-annotation.git
 cd sperm-annotation
-# 先把完整 SAM3 模型放入 models/sam3/，再启动
+# 首次自动获取本仓库提供的 SAM3 模型并启用 AI
 .\deploy.ps1
 ```
 
@@ -29,9 +29,9 @@ cd sperm-annotation
 | 模式 | 功能 | 额外条件 |
 | --- | --- | --- |
 | `cpu` | 人工标注 → 审查 → 确认 → 训练集导出 | 不需要 GPU 或模型；AI Tracking 显示未启用提示 |
-| `gpu`（默认） | 上述功能 + SAM3 AI Tracking | NVIDIA GPU、驱动、Container Toolkit / WSL2 GPU 支持和完整 SAM3 模型 |
+| `gpu`（默认） | 上述功能 + SAM3 AI Tracking | NVIDIA GPU、驱动、Container Toolkit / WSL2 GPU 支持；脚本自动准备模型 |
 
-首次不传模式即选择 GPU + AI，也可显式运行 `bash deploy.sh gpu`（Windows：`.\deploy.ps1 -Mode gpu`）。仅需人工标注时才显式选择 `bash deploy.sh cpu` / `.\deploy.ps1 -Mode cpu`。缺少 GPU 或模型时会报错，不自动降级。已有 `.env` 的模式切换、模型准备及驱动要求见 [Docker 部署说明](docs/DOCKER_DEPLOYMENT.md)。模型不随源码或镜像提供，需要部署方取得访问权限。
+首次不传模式即选择 GPU + AI，也可显式运行 `bash deploy.sh gpu`（Windows：`.\deploy.ps1 -Mode gpu`）。仅需人工标注时才显式选择 `bash deploy.sh cpu` / `.\deploy.ps1 -Mode cpu`。缺少 GPU 或模型时会报错，不自动降级。已有 `.env` 的模式切换及驱动要求见 [Docker 部署说明](docs/DOCKER_DEPLOYMENT.md)。SAM3 模型作为[本仓库 Release 附件](https://github.com/huangwww11222/sperm-annotation/releases/tag/sam3-model-6d06f0a5)随项目提供；首次部署自动下载至 `models/sam3/`、校验 SHA256 后启用，无需另行申请模型下载权限。约 3.45 GB 下载量，下载与组装需约 6.5 GiB 可用空间。重复部署复用已验证模型，失败保留下载缓存供重试。模型附带原始 SAM License；源码 Git 和应用镜像不重复存储大权重。
 
 默认数据保存在 `runtime/database/` 与 `runtime/storage/`，日志在 `runtime/database/logs/`。`.env` 和这些目录需要保留、备份，不能提交到 Git 或随代码清理。
 
@@ -53,7 +53,8 @@ compose.yaml / compose.gpu.yaml        基础服务与默认启用的 GPU 覆盖
 .env.docker.example                   可提交的配置模板
 backend/                              API、数据库、追踪、测试、Dockerfile
 frontend/                             界面、用户手册、测试、Dockerfile、Nginx
-scripts/                              仓库检查和隔离容器验收
+scripts/                              模型自动安装、仓库检查和隔离容器验收
+model-distribution/                   固定模型清单、来源与 SAM 许可
 .github/workflows/                    PR 验证与版本镜像发布
 AGENTS.md / docs/                     AI 开发入口和当前技术文档
 docs/archive/                         历史资料，仅供追溯
@@ -62,4 +63,4 @@ runtime/ / models/ / work/ / output/   本机数据、模型与测试产物，�
 
 开发者先读 [AGENTS.md](AGENTS.md) 和 [当前文档索引](docs/README.md)。Python 基线为 **3.12**，Node 为 **22**；测试方法见 [TESTING.md](docs/TESTING.md)。合并前运行 `python3 scripts/check_repository.py`，避免重复定义、冲突标记及业务数据再次进入仓库。
 
-维护者推送 `vX.Y.Z` 标签后，镜像发布工作流会先验证再构建 Linux amd64 的 CPU/GPU 后端和前端镜像。**工作流文件不代表镜像已经发布**；以 GitHub Actions / Packages 的实际结果为准。首次发布后确认 Packages 可见性，第三方才可免构建拉取；具体流程见部署文档。发布前还需由代码所有者明确项目 LICENSE；本次不擅自选择授权协议，SAM3 模型按其独立条款获取。
+维护者推送 `vX.Y.Z` 标签后，镜像发布工作流会先验证再构建 Linux amd64 的 CPU/GPU 后端和前端镜像。**工作流文件不代表镜像已经发布**；以 GitHub Actions / Packages 的实际结果为准。首次发布后确认 Packages 可见性，第三方才可免构建拉取；具体流程见部署文档。发布前还需由代码所有者明确项目 LICENSE；本次不擅自选择授权协议，随项目提供的 SAM3 模型遵循其独立 SAM License。

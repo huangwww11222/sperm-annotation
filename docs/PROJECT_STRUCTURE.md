@@ -8,6 +8,7 @@
 | --- | --- |
 | Docker 部署入口 | 根目录 `deploy.sh` / `deploy.ps1`、`compose.yaml` / `compose.gpu.yaml`、`.env.docker.example` |
 | 容器启动前检查 | `backend/app/deployment_check.py`、`backend/docker-entrypoint.sh` |
+| 模型随仓库交付 | `model-distribution/manifest.json` 与 `LICENSE-SAM.txt`、`scripts/prepare_model.py` / `build_model_bundle.py` |
 | 仓库与容器验收 | `scripts/check_repository.py`、`scripts/docker_smoke.py`、`.github/workflows/` |
 | 路由/认证/布局/主题 | `frontend/src/router/index.ts`、`stores/auth.ts`、`layouts/AppLayout.vue`、`stores/appearance.ts`、`style.css` |
 | 人工标注 UI / 状态 | `pages/AnnotatePage.vue`、`stores/workspace.ts`、`annotation/annotation.css` |
@@ -58,7 +59,7 @@ npm run build --prefix frontend
 
 - 后端配置集中在 `backend/app/config.py`，读取 `backend/.env`；模板 `backend/.env.example`。
 - `APP_DATA_DIR`：数据库默认目录及日志；`APP_DB_FILE`：数据库文件；`APP_STORAGE_DIR`：媒体和训练 ZIP。覆盖其中一个不自动迁移其他路径。
-- `SAM3_MODEL_ID`：默认 `backend/track_modul/facebook--sam3/snapshots/master`；模型不随源码提交。
+- `SAM3_MODEL_ID`：默认 `backend/track_modul/facebook--sam3/snapshots/master`；模型随仓库 Release 提供，默认部署先用 `scripts/prepare_model.py` 自动准备；Git 仅保存 `model-distribution/` 中的清单和许可。
 - `SAM3_DEVICE` / `SAM3_DTYPE` 默认 `cuda` / `bfloat16`；真实 GPU 可用性需单独验收。
 - `SAM3_TRACK_FRAMES` 当前代码默认 **120**，包含 seed 帧；环境变量可覆盖。异常参数见 `services/anomaly_detector.py`，不要在 UI 写死单轮帧数。
 - `JWT_SECRET` 生产环境应配置；不把密钥/token 写入文档或日志。

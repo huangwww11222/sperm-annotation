@@ -25,7 +25,7 @@ if (-not (Test-Path .env)) {
     $stream = [IO.File]::Open((Join-Path $PSScriptRoot '.env'), [IO.FileMode]::CreateNew)
     try { $encoded = [Text.Encoding]::UTF8.GetBytes($text); $stream.Write($encoded, 0, $encoded.Length) } finally { $stream.Dispose() }
     $key = $null; $text = $null
-    if ($Mode -eq 'gpu') { Write-Host '默认启用 SAM3 AI：请准备 NVIDIA GPU、容器 GPU 支持和 models/sam3 完整模型；自定义路径在 .env 设置 SAM3_MODEL_HOST_PATH。缺少条件时部署会报错，不自动关闭 AI。' }
+    if ($Mode -eq 'gpu') { Write-Host '默认启用 SAM3 AI：请准备 NVIDIA GPU、容器 GPU 支持；模型将从本仓库 Release 自动下载并校验，自定义路径在 .env 设置 SAM3_MODEL_HOST_PATH。缺少条件时部署会报错，不自动关闭 AI。' }
     Write-Host "已生成 .env（$Mode 模式）；请长期保留，不要提交到仓库。"
 } elseif ($Mode) {
     $expected = if ($Mode -eq 'gpu') { 'compose.yaml,compose.gpu.yaml' } else { 'compose.yaml' }
@@ -33,6 +33,9 @@ if (-not (Test-Path .env)) {
     if ($actual -ne $expected) { throw "已有 .env 未被覆盖。请设置 COMPOSE_PATH_SEPARATOR=, 和 COMPOSE_FILE=$expected 后重试。" }
 }
 Invoke-Docker -DockerArgs @('compose', 'config', '--quiet')
+$services = & docker compose --profile model-setup config --services
+if ($LASTEXITCODE -ne 0) { throw 'Compose 服务解析失败，模型和业务数据均保留。' }
+if ($services -contains 'model-setup') { Invoke-Docker -DockerArgs @('compose', '--profile', 'model-setup', 'run', '--rm', '--no-deps', 'model-setup') }
 if ($Pull) { Invoke-Docker -DockerArgs @('compose', 'pull') } else { Invoke-Docker -DockerArgs @('compose', 'build', '--pull') }
 Invoke-Docker -DockerArgs @('compose', 'up', '-d', '--no-build', '--wait', '--wait-timeout', '180')
 Invoke-Docker -DockerArgs @('compose', 'ps')

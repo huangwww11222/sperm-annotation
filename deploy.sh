@@ -27,7 +27,7 @@ if [[ ! -f .env ]]; then
   ' .env.docker.example > .env)
   unset secret
   if [[ "$mode" == gpu ]]; then
-    echo "默认启用 SAM3 AI：请准备 NVIDIA GPU、容器 GPU 支持和 models/sam3 完整模型；自定义路径在 .env 设置 SAM3_MODEL_HOST_PATH。缺少条件时部署会报错，不自动关闭 AI。"
+    echo "默认启用 SAM3 AI：请准备 NVIDIA GPU、容器 GPU 支持；模型将从本仓库 Release 自动下载并校验，自定义路径在 .env 设置 SAM3_MODEL_HOST_PATH。缺少条件时部署会报错，不自动关闭 AI。"
   fi
   echo "已生成 .env（$mode 模式）；请长期保留，不要提交到仓库。"
 elif [[ -n "$mode" ]]; then
@@ -42,6 +42,10 @@ fi
 # Explicit project directory keeps bind mounts stable even when invoked elsewhere.
 trap 'echo "部署未完成。请查看上方错误；启动失败时运行 docker compose logs --tail=100 backend frontend。数据目录与 .env 均保留。" >&2' ERR
 docker compose --project-directory "$PWD" config --quiet
+services=$(docker compose --profile model-setup config --services)
+if printf '%s\n' "$services" | grep -qx model-setup; then
+  docker compose --profile model-setup run --rm --no-deps model-setup
+fi
 if [[ "$method" == --pull ]]; then
   docker compose pull
   docker compose up -d --no-build --wait --wait-timeout 180
