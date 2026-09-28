@@ -51,4 +51,7 @@ try {
     Set-Location $originalLocation
     Remove-Item Function:\docker
     if (Test-Path $testRoot) { Remove-Item $testRoot -Recurse -Force }
+    # The final simulated failure leaves 42 in LASTEXITCODE. GitHub's Windows
+    # runner inspects this variable even after the exception was asserted.
+    $global:LASTEXITCODE = 0
 }
