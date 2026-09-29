@@ -5,7 +5,9 @@ import { hitHandle, moveBox, resizeBox, type Box } from '../annotation/geometry'
 import type { AnnotationObject, AnnotationTool, EffectResult, MediaAsset, SavedAnnotationFile } from '../types/annotation'
 // 登录、人工标注、视频目录、SAM3 Tracking 均走真实后端
 import { httpAnnotationApi } from '../api/httpAnnotationApi'
-import { trackApi } from '../api/trackApi'
+import { trackApi, type ObjectDeletionSummary, type NormalMotionSample, type TrackingWarningSummary, type TrackingFeedbackResponse, type TrackingFeedbackInput } from '../api/trackApi'
+import { WorkspaceWrites, type WorkspaceDraft } from '../annotation/workspaceWrites'
+import { useAuth } from './auth'
 import type { TrackingFrameObject, TrackingFrameResult } from '../types/annotation'
 
 const createWorkspace = () => {
@@ -84,12 +86,15 @@ const createWorkspace = () => {
   const saveQueues = new Map<string, Promise<unknown>>()
   const workspaceViews = new Map<string, Record<string, unknown>>()
   const saveTickets = new Map<string, number>()
+  const workspaceWrites = new WorkspaceWrites()
+  const workspaceReadError = ref('')
   const zoom = ref(1)
   const isInteracting = () => !!tempBbox.value || !!draggingObjectId || !!bboxStart
   const zoomIn = (step = 0.1) => { if (isInteracting()) return; zoom.value = Math.min(5, +(zoom.value + step).toFixed(2)) }
   const zoomOut = (step = 0.1) => { if (isInteracting()) return; zoom.value = Math.max(0.25, +(zoom.value - step).toFixed(2)) }
   const zoomReset = () => { if (!isInteracting()) zoom.value = 1 }
   const closeMedia = async (mediaId: string) => {
+    if (objectDeletionBusy.value || trackingFeedbackBusy.value || pendingDeletion.value || pendingFeedback.value) return
     const media = mediaAssets.value.find((m) => m.id === mediaId)
     if (!media) return
 
@@ -166,7 +171,9 @@ const createWorkspace = () => {
   }, { deep: true })
 
   // ── 撤销/重做栈 ──
-  type HistoryState = { objects: AnnotationObject[]; deleted: string[] }
+  type FrameDeletion = { objectId: number; frameIndex: number }
+  let historySequence = 0
+  type HistoryState = { objects: AnnotationObject[]; deleted: string[]; frameDeleted: FrameDeletion[]; sequence: number; pause?: { items: typeof pausedAnomalies.value; context: typeof lastPausedContext.value } }
   const histories = new Map<string, { undo: HistoryState[]; redo: HistoryState[] }>()
   const historyRevision = ref(0)
   const history = () => {
@@ -177,33 +184,45 @@ const createWorkspace = () => {
   const captureHistory = (): HistoryState => ({
     objects: JSON.parse(JSON.stringify(currentObjects.value)),
     deleted: [...(deletedTrackingIds.value[currentMediaId.value] ?? [])],
+    frameDeleted: clone(deletedFrameObjects.value[currentMediaId.value] ?? []),
+    sequence: ++historySequence,
+    pause: lastPausedContext.value?.mediaId === currentMediaId.value && lastPausedContext.value.frameIndex === currentFrame.value ? { items: clone(pausedAnomalies.value), context: clone(lastPausedContext.value) } : undefined,
   })
   const snapshotUndo = () => {
+    if (videoDeletionHistory.value[currentMediaId.value]?.undone) { delete videoDeletionHistory.value[currentMediaId.value]; rememberControls(currentMediaId.value) }
     const h = history(); h.undo.push(captureHistory()); h.redo.length = 0
     if (h.undo.length > 50) h.undo.shift()
     historyRevision.value++
   }
-  const canUndo = computed(() => { void historyRevision.value; return history().undo.length > 0 })
-  const canRedo = computed(() => { void historyRevision.value; return history().redo.length > 0 })
+  const canUndo = computed(() => { void historyRevision.value; return history().undo.length > 0 || canUndoVideoDeletion.value })
+  const canRedo = computed(() => { void historyRevision.value; return history().redo.length > 0 || !!videoDeletionHistory.value[currentMediaId.value]?.undone })
   const restoreHistory = (state: HistoryState) => {
     const mid = currentMediaId.value, fi = currentFrame.value
     const affected = new Set([...currentObjects.value, ...state.objects].map(o => o.id))
     const rest = (annotationsByMedia.value[mid] ?? []).filter(o => (o.frameIndex ?? 0) !== fi)
-    annotationsByMedia.value = { ...annotationsByMedia.value, [mid]: [...rest, ...state.objects] }
+    annotationsByMedia.value = { ...annotationsByMedia.value, [mid]: [...rest, ...state.objects.filter(o => !deletedObjectIds.value[mid]?.includes(o.objectId!))] }
     // Undo is frame-local: never restore deletion flags for unrelated frames.
     const otherDeleted = [...(deletedTrackingIds.value[mid] ?? [])].filter(id => !affected.has(id))
     deletedTrackingIds.value[mid] = new Set([...otherDeleted, ...state.deleted.filter(id => affected.has(id))])
+    deletedFrameObjects.value[mid] = [...(deletedFrameObjects.value[mid] ?? []).filter(d => d.frameIndex !== fi), ...state.frameDeleted.filter(d => d.frameIndex === fi)]
+    if (state.pause) { pausedAnomalies.value = clone(state.pause.items).filter(item => !deletedObjectIds.value[mid]?.includes(item.objectId)); lastPausedContext.value = pausedAnomalies.value.length ? clone(state.pause.context) : null }
     if (!state.objects.some(o => o.id === selectedObjectId.value)) selectedObjectId.value = null
     historyRevision.value++; scheduleWorkspaceStateSave(mid)
   }
   const undo = () => {
     if (editingBlocked.value || isInteracting()) return
-    const h = history(); if (!h.undo.length) return
+    const h = history()
+    const deletion = videoDeletionHistory.value[currentMediaId.value]
+    if (deletion && !deletion.undone && deletion.sequence >= (h.undo[h.undo.length - 1]?.sequence ?? 0)) { void undoVideoObjectDeletion(); return }
+    if (!h.undo.length) return
     h.redo.push(captureHistory()); restoreHistory(h.undo.pop()!); statusMessage.value = '已撤销本帧操作'
   }
   const redo = () => {
     if (editingBlocked.value || isInteracting()) return
-    const h = history(); if (!h.redo.length) return
+    const h = history()
+    const deletion = videoDeletionHistory.value[currentMediaId.value]
+    if (deletion?.undone && deletion.sequence >= (h.redo[h.redo.length - 1]?.sequence ?? 0)) { void applyVideoDeletion('redo', deletion); return }
+    if (!h.redo.length) return
     h.undo.push(captureHistory()); restoreHistory(h.redo.pop()!); statusMessage.value = '已重做本帧操作'
   }
 
@@ -211,6 +230,35 @@ const createWorkspace = () => {
   const trackingFramesByMedia = ref<Record<string, TrackingFrameResult[]>>({})
   /** 记录前端删除的 AI tracking 对象 id，避免重新加载后又出现 */
   const deletedTrackingIds = ref<Record<string, Set<string>>>({})
+  const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value))
+  const deletedObjectIds = ref<Record<string, number[]>>({})
+  const deletedFrameObjects = ref<Record<string, FrameDeletion[]>>({})
+  const normalMotionSamples = ref<Record<string, NormalMotionSample[]>>({})
+  const trackingWarningSummary = ref<TrackingWarningSummary[]>([])
+  const objectDeletionBusy = ref(false)
+  const objectDeletionError = ref('')
+  const trackingFeedbackBusy = ref(false)
+  const trackingFeedbackError = ref('')
+  type VideoDeletion = { objectId: number; name: string; frameCount: number; objects: AnnotationObject[]; sequence: number; undone: boolean; pause?: { item: typeof pausedAnomalies.value[number]; context: NonNullable<typeof lastPausedContext.value> } }
+  const videoDeletionHistory = ref<Record<string, VideoDeletion>>({})
+  type DeletionIntent = { mediaId: string; serverMediaId: string; key: string; action: 'delete' | 'undo' | 'redo'; record: VideoDeletion; state: WorkspaceDraft }
+  const pendingDeletion = ref<DeletionIntent | null>(null)
+  type FeedbackIntent = { mediaId: string; serverMediaId: string; key: string; body: TrackingFeedbackInput }
+  const pendingFeedback = ref<FeedbackIntent | null>(null)
+  const objectDeletionPendingAction = computed(() => pendingDeletion.value ? { objectId: pendingDeletion.value.record.objectId, action: pendingDeletion.value.action } : null)
+  const trackingFeedbackPendingAction = computed(() => pendingFeedback.value ? { objectId: pendingFeedback.value.body.objectId, decision: pendingFeedback.value.body.decision, learn: pendingFeedback.value.body.calibrate } : null)
+  const trackingFeedbackPending = computed(() => !!pendingFeedback.value)
+  const canUndoVideoDeletion = computed(() => !!videoDeletionHistory.value[currentMediaId.value] && !videoDeletionHistory.value[currentMediaId.value].undone)
+  const lastVideoObjectDeletion = computed(() => canUndoVideoDeletion.value ? videoDeletionHistory.value[currentMediaId.value] : null)
+  const trackingCalibrationSummary = computed(() => {
+    const counts = new Map<number, number>()
+    for (const sample of normalMotionSamples.value[currentMediaId.value] ?? []) counts.set(sample.objectId, (counts.get(sample.objectId) || 0) + 1)
+    return [...counts].map(([objectId, sampleCount]) => ({ objectId, sampleCount }))
+  })
+  const isObjectDeleted = (mediaId: string, objectId: number | undefined, frameIndex: number) => objectId != null && (
+    deletedObjectIds.value[mediaId]?.includes(objectId) || deletedFrameObjects.value[mediaId]?.some(d => d.objectId === objectId && d.frameIndex === frameIndex)
+  )
+
   // 异常物体 ID 列表（面积突变等），用于高亮
   const anomalyObjectIds = ref<number[]>([])
   // 异常帧列表（给时间轴标记用）
@@ -226,6 +274,9 @@ const createWorkspace = () => {
     reviewRange?: string
     reviewNotice?: string
     suggestion: string
+    canLearn: boolean
+    rawReasons: string[]
+    resolved?: boolean
   }>>([])
   const anomalyPanelVisible = ref(false)
   const closeAnomalyPanel = () => { anomalyPanelVisible.value = false }
@@ -277,6 +328,8 @@ const createWorkspace = () => {
         if (typeof o.objectId === 'number' && o.objectId > maxId) maxId = o.objectId
       }
     }
+    for (const [mid, ids] of Object.entries(deletedObjectIds.value)) if (!mediaId || mid === mediaId) for (const id of ids) maxId = Math.max(maxId, id)
+    for (const [mid, items] of Object.entries(deletedFrameObjects.value)) if (!mediaId || mid === mediaId) for (const item of items) maxId = Math.max(maxId, item.objectId)
     return maxId + 1
   }
   // Index membership only when annotations change; ordinary frame navigation does not scan the whole video.
@@ -284,6 +337,7 @@ const createWorkspace = () => {
     const index = new Map<number, AnnotationObject[]>()
     for (const obj of annotationsByMedia.value[currentMediaId.value] ?? []) {
       const fi = obj.frameIndex ?? 0
+      if (isObjectDeleted(currentMediaId.value, obj.objectId, fi)) continue
       if (!index.has(fi)) index.set(fi, [])
       index.get(fi)!.push(obj)
     }
@@ -296,7 +350,7 @@ const createWorkspace = () => {
   const displayObjects = computed(() => dragPreview.value
     ? currentObjects.value.map(o => o.id === dragPreview.value!.id ? { ...o, bbox: dragPreview.value!.bbox } : o)
     : currentObjects.value)
-  const editingBlocked = computed(() => isAiBusy.value || !!deletingMediaId.value || exactFrameLoading.value || isPlaying.value || workspaceRestoring.value || !!frameError.value)
+  const editingBlocked = computed(() => objectDeletionBusy.value || trackingFeedbackBusy.value || !!pendingDeletion.value || !!pendingFeedback.value || !!workspaceReadError.value || isAiBusy.value || !!deletingMediaId.value || exactFrameLoading.value || isPlaying.value || workspaceRestoring.value || !!frameError.value)
   const workspaceRestoring = ref(false)
   const selectedObject = computed(() => currentObjects.value.find((item) => item.id === selectedObjectId.value) ?? null)
   const selectedEffect = computed(() => effectResults.value.find((item) => item.id === selectedEffectId.value) ?? effectResults.value[0] ?? null)
@@ -558,25 +612,24 @@ const createWorkspace = () => {
 
   const removeObject = (objectId: string) => {
     if (editingBlocked.value || isInteracting()) return
+    const target = currentObjects.value.find(o => o.id === objectId)
+    if (!target) return
     snapshotUndo()
-    const mediaId = currentMediaId.value
-
-    // 只删除当前帧的该标注，不影响其他帧
-    const list = annotationsByMedia.value[mediaId] ?? []
-    const filtered = list.filter((obj) => !(obj.id === objectId && (obj.frameIndex ?? 0) === currentFrame.value))
-    if (filtered.length !== list.length) {
-      annotationsByMedia.value = { ...annotationsByMedia.value, [mediaId]: filtered }
-      statusMessage.value = `已删除第 ${currentFrame.value + 1} 帧的标注`
+    const mediaId = currentMediaId.value, frameIndex = currentFrame.value
+    annotationsByMedia.value = { ...annotationsByMedia.value, [mediaId]: (annotationsByMedia.value[mediaId] ?? []).filter(o => !((o.frameIndex ?? 0) === frameIndex && (target.objectId != null ? o.objectId === target.objectId : o.id === objectId))) }
+    if (target.objectId != null) {
+      deletedFrameObjects.value[mediaId] = [...(deletedFrameObjects.value[mediaId] ?? []).filter(d => !(d.objectId === target.objectId && d.frameIndex === frameIndex)), { objectId: target.objectId, frameIndex }]
     } else {
-      statusMessage.value = '未找到要删除的标注'
+      if (!deletedTrackingIds.value[mediaId]) deletedTrackingIds.value[mediaId] = new Set()
+      deletedTrackingIds.value[mediaId].add(objectId)
     }
-
-    // 记录到已删除集合，防止 loadTrackingResult 重新加载后又出现
-    if (!deletedTrackingIds.value[mediaId]) deletedTrackingIds.value[mediaId] = new Set()
-    deletedTrackingIds.value[mediaId].add(objectId)
+    if (lastPausedContext.value?.mediaId === mediaId && lastPausedContext.value.frameIndex === frameIndex) {
+      pausedAnomalies.value = pausedAnomalies.value.filter(item => item.objectId !== target.objectId)
+      if (!pausedAnomalies.value.length) lastPausedContext.value = null
+    }
+    statusMessage.value = `已删除第 ${frameIndex + 1} 帧的 ${target.name}，可撤销`
     scheduleWorkspaceStateSave(mediaId)
-
-    if (selectedObjectId.value === objectId) selectedObjectId.value = null
+    selectedObjectId.value = null
   }
 
   const renameObject = () => {
@@ -612,6 +665,8 @@ const createWorkspace = () => {
       timestampMs: Math.round(currentTime.value * 1000),
       source: 'manual' as const,
     }))
+    const copiedIds = new Set(newObjs.map(o => o.objectId))
+    deletedFrameObjects.value[mediaId] = (deletedFrameObjects.value[mediaId] ?? []).filter(d => d.frameIndex !== currentFrame.value || !copiedIds.has(d.objectId))
     annotationsByMedia.value = { ...annotationsByMedia.value, [mediaId]: [...allObjs, ...newObjs] }
     statusMessage.value = `已从上一帧补充 ${newObjs.length} 个标注`
   }
@@ -646,10 +701,9 @@ const createWorkspace = () => {
     }))
   }
 
-  persistWorkspaceState = async (mediaId: string, useCurrentUiState = false) => {
-    if (deletingMediaId.value === mediaId) return
+  const buildWorkspaceState = (mediaId: string, useCurrentUiState = false): WorkspaceDraft => {
     const media = mediaAssets.value.find((item) => item.id === mediaId)
-    if (!media?.serverMediaId || workspaceRestoreInProgress || (workspaceRestoring.value && mediaId === currentMediaId.value)) return
+    if (!media) throw new Error('素材不存在')
     const includeUiState = useCurrentUiState || mediaId === currentMediaId.value
     const manualAnnotations = dedupeAnnotationObjects(
       (annotationsByMedia.value[mediaId] ?? []).filter((obj) => obj.source === 'manual'),
@@ -662,6 +716,8 @@ const createWorkspace = () => {
       manualAnnotations: JSON.parse(JSON.stringify(manualAnnotations)),
       manualBaselines: latestManualBaselines(media, manualAnnotations),
       deletedTrackingIds: [...(deletedTrackingIds.value[mediaId] ?? new Set<string>())],
+      deletedObjectIds: [...(deletedObjectIds.value[mediaId] ?? [])],
+      deletedFrameObjects: clone(deletedFrameObjects.value[mediaId] ?? []),
       anomalyFrames: includeUiState ? JSON.parse(JSON.stringify(anomalyFrames.value)) : [],
       pausedAnomalies: includeUiState ? JSON.parse(JSON.stringify(pausedAnomalies.value)) : [],
       lastPausedContext: includeUiState && lastPausedContext.value?.mediaId === mediaId
@@ -680,16 +736,26 @@ const createWorkspace = () => {
     }
     if (!includeUiState) Object.assign(state, workspaceViews.get(mediaId) || {})
     else workspaceViews.set(mediaId, { currentFrame: state.currentFrame, display: state.display, editor: state.editor, anomalyFrames: state.anomalyFrames, pausedAnomalies: state.pausedAnomalies, lastPausedContext: state.lastPausedContext })
+    return state
+  }
+
+  persistWorkspaceState = async (mediaId: string, useCurrentUiState = false) => {
+    if (deletingMediaId.value === mediaId || pendingDeletion.value || pendingFeedback.value) return
+    const media = mediaAssets.value.find(item => item.id === mediaId)
+    if (!media?.serverMediaId || workspaceRestoreInProgress || (workspaceRestoring.value && mediaId === currentMediaId.value)) return
+    if (workspaceReadError.value) throw new Error(workspaceReadError.value)
+    const state = buildWorkspaceState(mediaId, useCurrentUiState)
     const ticket = (saveTickets.get(mediaId) || 0) + 1
     saveTickets.set(mediaId, ticket)
     if (mediaId === currentMediaId.value) { saveState.value = 'saving'; saveError.value = '' }
     const prior = saveQueues.get(mediaId) || Promise.resolve()
-    const task = prior.catch(() => {}).then(() => trackApi.saveWorkspaceState(media.serverMediaId!, state))
+    const task = prior.catch(() => {}).then(() => workspaceWrites.write(media.serverMediaId!, 'workspace', state))
     saveQueues.set(mediaId, task)
     try {
       await task
       if (mediaId === currentMediaId.value && ticket === saveTickets.get(mediaId)) saveState.value = 'saved'
     } catch (error) {
+      markVersionConflict(error)
       console.error('[annotation.workspace_save_failed]', { mediaId, ticket, error })
       if (mediaId === currentMediaId.value && ticket === saveTickets.get(mediaId)) {
         saveState.value = 'error'; saveError.value = error instanceof Error ? error.message : '保存失败，请重试'
@@ -699,7 +765,7 @@ const createWorkspace = () => {
   }
 
   scheduleWorkspaceStateSave = (mediaId: string) => {
-    if (deletingMediaId.value === mediaId) return
+    if (deletingMediaId.value === mediaId || pendingDeletion.value || pendingFeedback.value || objectDeletionBusy.value || trackingFeedbackBusy.value || workspaceReadError.value) return
     if (!mediaId || workspaceRestoreInProgress || workspaceRestoring.value || !mediaAssets.value.find(m => m.id === mediaId)?.serverMediaId) return
     if (mediaId === currentMediaId.value) saveState.value = 'saving'
     const previous = workspaceSaveTimers.get(mediaId)
@@ -709,6 +775,180 @@ const createWorkspace = () => {
       void persistWorkspaceState(mediaId).catch((error) => console.warn('工作区状态保存失败：', error))
     }, 800))
   }
+
+  const cancelScheduledSave = (mediaId: string) => {
+    const timer = workspaceSaveTimers.get(mediaId)
+    if (timer) clearTimeout(timer)
+    workspaceSaveTimers.delete(mediaId)
+  }
+  const controlsCacheKey = (serverMediaId: string) => {
+    let actor = 'unknown'
+    try { actor = String(JSON.parse(localStorage.getItem('rare-sperm-auth') || '{}').id || actor) } catch {}
+    return `annotation-controls:${actor}:${serverMediaId}`
+  }
+  const rememberControls = (mediaId: string) => {
+    const media = mediaAssets.value.find(m => m.id === mediaId)
+    if (!media?.serverMediaId) return
+    try {
+      sessionStorage.setItem(controlsCacheKey(media.serverMediaId), JSON.stringify({
+        deletion: pendingDeletion.value?.mediaId === mediaId ? pendingDeletion.value : null,
+        feedback: pendingFeedback.value?.mediaId === mediaId ? pendingFeedback.value : null,
+        history: videoDeletionHistory.value[mediaId] ?? null,
+      }))
+    } catch (error) { console.warn('[annotation.controls_cache_failed]', { mediaId, error }) }
+  }
+  const definiteRejection = (error: unknown) => {
+    const status = Number((error as { status?: number })?.status)
+    return status >= 400 && status < 500 && status !== 408 && status !== 429
+  }
+  const markVersionConflict = (error: unknown) => {
+    if (error instanceof Error && /工作区版本|重试标识/.test(error.message)) {
+      workspaceReadError.value = `${error.message}；请重新加载素材`
+      saveState.value = 'error'; saveError.value = workspaceReadError.value
+    }
+  }
+  const getObjectDeletionSummary = async (objectId: number): Promise<ObjectDeletionSummary> => {
+    const media = selectedMedia.value
+    if (!media?.serverMediaId || objectDeletionBusy.value || trackingFeedbackPending.value) throw new Error('当前无法读取删除范围')
+    if (pendingDeletion.value) throw new Error('请先重试上次删除操作')
+    objectDeletionBusy.value = true
+    try {
+      cancelScheduledSave(media.id)
+      await persistWorkspaceState(media.id)
+      return await trackApi.getObjectDeletionSummary(media.serverMediaId, objectId)
+    } finally { objectDeletionBusy.value = false }
+  }
+  const retryObjectDeletion = async (): Promise<boolean> => {
+    const intent = pendingDeletion.value
+    if (!intent || objectDeletionBusy.value) return false
+    objectDeletionBusy.value = true; objectDeletionError.value = ''
+    try {
+      await workspaceWrites.write(intent.serverMediaId, 'workspace', intent.state, intent.key)
+      const mid = intent.mediaId, record = intent.record
+      deletedObjectIds.value[mid] = [...(intent.state.deletedObjectIds ?? [])]
+      deletedFrameObjects.value[mid] = clone(intent.state.deletedFrameObjects ?? [])
+      const others = (annotationsByMedia.value[mid] ?? []).filter(o => o.objectId !== record.objectId)
+      annotationsByMedia.value = { ...annotationsByMedia.value, [mid]: intent.action === 'undo' ? dedupeAnnotationObjects([...others, ...record.objects]) : others }
+      videoDeletionHistory.value[mid] = { ...record, sequence: ++historySequence, undone: intent.action === 'undo' }
+      if (mid === currentMediaId.value) {
+        pausedAnomalies.value = (intent.state.pausedAnomalies ?? []) as typeof pausedAnomalies.value
+        lastPausedContext.value = intent.state.lastPausedContext ?? null
+        selectedObjectId.value = null
+        saveState.value = 'saved'; saveError.value = ''; workspaceReadError.value = ''
+      }
+      pendingDeletion.value = null; rememberControls(mid); historyRevision.value++
+      console.info('[annotation.object_deletion_saved]', { mediaId: intent.serverMediaId, objectId: record.objectId, action: intent.action, key: intent.key })
+      statusMessage.value = intent.action === 'undo' ? `已恢复 ${record.name} 在全视频中的标注` : `已删除 ${record.name} 在全视频中的标注，可撤销`
+      showToast(statusMessage.value)
+      if (intent.action === 'undo' && mid === currentMediaId.value) await loadTrackingResult(mid, true)
+      return true
+    } catch (error) {
+      objectDeletionError.value = error instanceof Error ? error.message : '删除保存失败，请重试'
+      if (definiteRejection(error)) { pendingDeletion.value = null; rememberControls(intent.mediaId) }
+      markVersionConflict(error)
+      console.error('[annotation.object_deletion_failed]', { mediaId: intent.serverMediaId, objectId: intent.record.objectId, key: intent.key, error })
+      return false
+    } finally { objectDeletionBusy.value = false }
+  }
+  const applyVideoDeletion = async (action: 'delete' | 'undo' | 'redo', record: VideoDeletion): Promise<boolean> => {
+    const media = selectedMedia.value
+    if (!media?.serverMediaId || editingBlocked.value || isInteracting()) return false
+    objectDeletionBusy.value = true; objectDeletionError.value = ''
+    try {
+      pausePlayback(); cancelScheduledSave(media.id)
+      await persistWorkspaceState(media.id)
+      const state = buildWorkspaceState(media.id)
+      const deleted = new Set(state.deletedObjectIds ?? [])
+      if (action === 'undo') deleted.delete(record.objectId); else deleted.add(record.objectId)
+      state.deletedObjectIds = [...deleted]
+      const otherManual = (state.manualAnnotations as AnnotationObject[]).filter(o => o.objectId !== record.objectId)
+      state.manualAnnotations = action === 'undo' ? dedupeAnnotationObjects([...otherManual, ...record.objects.filter(o => o.source === 'manual')]) : otherManual
+      state.manualBaselines = latestManualBaselines(media, state.manualAnnotations as AnnotationObject[])
+      if (action === 'undo' && record.pause) {
+        state.pausedAnomalies = [...(state.pausedAnomalies as typeof pausedAnomalies.value).filter(item => item.objectId !== record.objectId), clone(record.pause.item)]
+        state.lastPausedContext = clone(record.pause.context)
+      }
+      if (action !== 'undo') {
+        state.pausedAnomalies = (state.pausedAnomalies as typeof pausedAnomalies.value).filter(item => item.objectId !== record.objectId)
+        if (!state.pausedAnomalies.length) state.lastPausedContext = null
+      }
+      pendingDeletion.value = { mediaId: media.id, serverMediaId: media.serverMediaId, key: createRequestId(), action, record: clone(record), state }
+      rememberControls(media.id)
+    } catch (error) {
+      objectDeletionError.value = error instanceof Error ? error.message : '删除准备失败，请重试'
+      markVersionConflict(error)
+      return false
+    } finally { objectDeletionBusy.value = false }
+    return retryObjectDeletion()
+  }
+  const removeObjectAcrossVideo = async (objectId: number): Promise<boolean> => {
+    const objects = (annotationsByMedia.value[currentMediaId.value] ?? []).filter(o => o.objectId === objectId)
+    if (!objects.length) { objectDeletionError.value = '当前对象不存在，请重新选择'; return false }
+    const item = pausedAnomalies.value.find(item => item.objectId === objectId)
+    const pause = item && lastPausedContext.value?.mediaId === currentMediaId.value ? { item: clone(item), context: clone(lastPausedContext.value) } : undefined
+    return applyVideoDeletion('delete', { pause, objectId, name: objects[0].name, objects: clone(objects), frameCount: new Set(objects.map(o => o.frameIndex ?? 0)).size, sequence: ++historySequence, undone: false })
+  }
+  const undoVideoObjectDeletion = async (): Promise<boolean> => {
+    const record = videoDeletionHistory.value[currentMediaId.value]
+    if (!record || record.undone) return false
+    return applyVideoDeletion('undo', record)
+  }
+  const retryTrackingAnomalyFeedback = async (): Promise<boolean> => {
+    const intent = pendingFeedback.value
+    if (!intent || trackingFeedbackBusy.value) return false
+    trackingFeedbackBusy.value = true; trackingFeedbackError.value = ''
+    let resume = false
+    try {
+      const response = await workspaceWrites.write(intent.serverMediaId, 'feedback', intent.body, intent.key) as unknown as TrackingFeedbackResponse
+      normalMotionSamples.value[intent.mediaId] = response.normalMotionSamples
+      if (intent.mediaId === currentMediaId.value) {
+        pausedAnomalies.value = response.pausedAnomalies as typeof pausedAnomalies.value
+        lastPausedContext.value = response.lastPausedContext ? { mediaId: intent.mediaId, frameIndex: response.lastPausedContext.frameIndex } : null
+        anomalyObjectIds.value = pausedAnomalies.value.map(item => item.objectId)
+        anomalyPanelVisible.value = pausedAnomalies.value.length > 0
+        resume = intent.body.decision !== 'reset' && !pausedAnomalies.value.length
+      }
+      pendingFeedback.value = null; rememberControls(intent.mediaId)
+      showToast(intent.body.decision === 'reset' ? `已恢复对象 #${intent.body.objectId} 的默认判断` : resume ? '人工确认已保存，继续追踪' : '已确认此对象，请继续检查其他暂停对象')
+      console.info('[annotation.feedback_saved]', { mediaId: intent.serverMediaId, objectId: intent.body.objectId, decision: intent.body.decision, calibrate: intent.body.calibrate, key: intent.key })
+    } catch (error) {
+      trackingFeedbackError.value = error instanceof Error ? error.message : '确认保存失败，请重试'
+      if (definiteRejection(error)) { pendingFeedback.value = null; rememberControls(intent.mediaId) }
+      markVersionConflict(error)
+      console.error('[annotation.feedback_failed]', { mediaId: intent.serverMediaId, key: intent.key, error })
+      return false
+    } finally { trackingFeedbackBusy.value = false }
+    if (resume) {
+      // Confirmation applies to the paused frame even if the view moved during
+      // a slow request. Resume only from that exact saved frame.
+      if (currentFrame.value !== intent.body.frameIndex) await seekVideo(frameToTime(intent.body.frameIndex))
+      if (currentMediaId.value === intent.mediaId && currentFrame.value === intent.body.frameIndex && !frameError.value && !workspaceRestoring.value && !exactFrameLoading.value) await runAiTrack()
+      else showToast('确认已保存；暂停帧读取未完成，请返回该帧后手动继续追踪')
+    }
+    return true
+  }
+  const prepareTrackingFeedback = async (objectId: number, decision: 'normal' | 'corrected' | 'reset', learn: boolean): Promise<boolean> => {
+    const media = selectedMedia.value
+    if (!media?.serverMediaId || editingBlocked.value || isInteracting()) return false
+    const context = lastPausedContext.value
+    if (decision !== 'reset' && (context?.mediaId !== media.id || context.frameIndex !== currentFrame.value || !pausedAnomalies.value.some(item => item.objectId === objectId))) {
+      trackingFeedbackError.value = '请返回暂停帧并选择待确认对象'; return false
+    }
+    trackingFeedbackBusy.value = true; trackingFeedbackError.value = ''
+    try {
+      cancelScheduledSave(media.id)
+      await persistWorkspaceState(media.id)
+      pendingFeedback.value = { mediaId: media.id, serverMediaId: media.serverMediaId, key: createRequestId(), body: { expectedRevision: 0, objectId, frameIndex: context?.frameIndex ?? currentFrame.value, decision, calibrate: decision === 'normal' && learn } }
+      rememberControls(media.id)
+    } catch (error) {
+      trackingFeedbackError.value = error instanceof Error ? error.message : '请先重试工作区保存'
+      markVersionConflict(error)
+      return false
+    } finally { trackingFeedbackBusy.value = false }
+    return retryTrackingAnomalyFeedback()
+  }
+  const confirmTrackingAnomaly = (objectId: number, decision: 'normal' | 'corrected', learn: boolean) => prepareTrackingFeedback(objectId, decision, learn)
+  const resetTrackingCalibration = (objectId: number) => prepareTrackingFeedback(objectId, 'reset', false)
 
   const deleteMedia = async (mediaId: string) => {
     const media = mediaAssets.value.find(item => item.id === mediaId)
@@ -777,8 +1017,28 @@ const createWorkspace = () => {
     const media = mediaAssets.value.find((item) => item.id === mediaId)
     if (!media?.serverMediaId) return null
     try {
+      try {
+        const controls = JSON.parse(sessionStorage.getItem(controlsCacheKey(media.serverMediaId)) || 'null')
+        if (controls?.history) { videoDeletionHistory.value[mediaId] = controls.history; historySequence = Math.max(historySequence, controls.history.sequence) }
+        if (controls?.deletion) pendingDeletion.value = { ...controls.deletion, mediaId }
+        if (controls?.feedback) pendingFeedback.value = { ...controls.feedback, mediaId }
+      } catch (error) { console.warn('[annotation.controls_restore_failed]', { mediaId, error }) }
       await saveQueues.get(mediaId)?.catch(() => {})
+      await workspaceWrites.replay(media.serverMediaId)
       const state = await trackApi.getWorkspaceState(media.serverMediaId)
+      workspaceWrites.setRevision(media.serverMediaId, state.revision || 0)
+      workspaceReadError.value = ''
+      deletedObjectIds.value[mediaId] = state.deletedObjectIds ?? []
+      deletedFrameObjects.value[mediaId] = state.deletedFrameObjects ?? []
+      normalMotionSamples.value[mediaId] = state.normalMotionSamples ?? []
+      if (pendingDeletion.value?.mediaId === mediaId) {
+        const intent = pendingDeletion.value
+        const deleted = state.deletedObjectIds?.includes(intent.record.objectId)
+        if ((intent.action === 'undo') === !deleted) videoDeletionHistory.value[mediaId] = { ...intent.record, undone: intent.action === 'undo', sequence: ++historySequence }
+        pendingDeletion.value = null
+      }
+      if (pendingFeedback.value?.mediaId === mediaId) pendingFeedback.value = null
+      rememberControls(mediaId)
       if (!state.exists || mediaId !== currentMediaId.value) return null
       workspaceRestoreInProgress = true
       const restoredManual = (state.manualAnnotations ?? [])
@@ -787,12 +1047,12 @@ const createWorkspace = () => {
       const retainedAi = (annotationsByMedia.value[mediaId] ?? []).filter((obj) => obj.source === 'ai')
       annotationsByMedia.value = {
         ...annotationsByMedia.value,
-        [mediaId]: dedupeAnnotationObjects([...retainedAi, ...restoredManual]),
+        [mediaId]: dedupeAnnotationObjects([...retainedAi, ...restoredManual]).filter(o => !isObjectDeleted(mediaId, o.objectId, o.frameIndex ?? 0)),
       }
       deletedTrackingIds.value[mediaId] = new Set((state.deletedTrackingIds ?? []).map(String))
       anomalyFrames.value = Array.isArray(state.anomalyFrames) ? state.anomalyFrames : []
       pausedAnomalies.value = Array.isArray(state.pausedAnomalies)
-        ? state.pausedAnomalies as typeof pausedAnomalies.value
+        ? (state.pausedAnomalies as typeof pausedAnomalies.value).map(item => ({ ...item, canLearn: !!item.canLearn, rawReasons: item.rawReasons ?? [] }))
         : []
       lastPausedContext.value = state.lastPausedContext
         ? { mediaId, frameIndex: Number(state.lastPausedContext.frameIndex) }
@@ -811,7 +1071,9 @@ const createWorkspace = () => {
       const frame = Math.max(0, Math.min(maxFrameIndex.value, Number(state.currentFrame) || 0))
       return frame
     } catch (error) {
-      console.warn('工作区状态加载失败，将使用 Tracking/本地缓存恢复：', error)
+      workspaceReadError.value = '工作区读取失败，请重新加载素材后再编辑，避免覆盖服务器状态'
+      saveState.value = 'error'; saveError.value = workspaceReadError.value
+      console.error('[annotation.workspace_load_failed]', { mediaId, error })
       return null
     } finally {
       workspaceRestoreInProgress = false
@@ -1128,7 +1390,9 @@ const createWorkspace = () => {
       videoDuration.value = media.frameCount / media.fps
       videoFps.value = media.fps
     }
-    await loadExactFrame(currentFrame.value, media.id)
+    // A native error can arrive while the saved frame is still decoding.
+    // Do not replace that request with the temporary frame-zero view.
+    if (!workspaceRestoring.value && !exactFrameLoading.value) await loadExactFrame(currentFrame.value, media.id)
     statusMessage.value = `当前浏览器不能直接播放 ${media.name}，已切换为原始视频逐帧预览（源文件未转换）`
   }
 
@@ -1159,16 +1423,14 @@ const createWorkspace = () => {
       const frames = 'frames' in result ? result.frames : [result]
       // 过滤掉前端已删除的 AI tracking 对象
       const deleted = deletedTrackingIds.value[mediaId]
-      const filtered = deleted && deleted.size
-        ? (frames || []).map((f: any) => ({ ...f, annotations: f.annotations.filter((a: any) => !deleted.has(a.id) && !deleted.has(String(a.objectId))) }))
-        : (frames || [])
+      const filtered = (frames || []).map((f: any) => ({ ...f, annotations: f.annotations.filter((a: any) => !isObjectDeleted(mediaId, a.objectId, f.frameIndex) && !deleted?.has(a.id) && !deleted?.has(String(a.objectId))) }))
       trackingFramesByMedia.value[mediaId] = filtered
 
       // 将 AI tracking 结果合并到 annotationsByMedia（统一管理）
       // 策略：同帧同 objectId 的新结果覆盖旧结果，手动标注永不被覆盖
       const width = media.width || 1
       const height = media.height || 1
-      const existing = annotationsByMedia.value[mediaId] ?? []
+      const existing = (annotationsByMedia.value[mediaId] ?? []).filter(o => !isObjectDeleted(mediaId, o.objectId, o.frameIndex ?? 0))
       // 被手动修改过的 (frameIndex, objectId) 集合 — 精准保护, 只跳过用户改过的那一个
       const manualKeys = new Set(existing
         .filter((o) => o.source === 'manual' && o.objectId != null)
@@ -1708,25 +1970,13 @@ const createWorkspace = () => {
 
     const startFrame = currentFrame.value
     let seed: Record<string, unknown>[]
-    const confirmedPausedIds = new Set(
-      lastPausedContext.value?.mediaId === mediaId && lastPausedContext.value.frameIndex === startFrame
-        ? pausedAnomalies.value.map((item) => item.objectId)
-        : [],
-    )
-    if (confirmedPausedIds.size > 0) {
-      const existing = annotationsByMedia.value[mediaId] ?? []
-      annotationsByMedia.value = {
-        ...annotationsByMedia.value,
-        [mediaId]: existing.map((obj) =>
-          (obj.frameIndex ?? 0) === startFrame && obj.objectId != null && confirmedPausedIds.has(obj.objectId) && obj.bbox
-            ? { ...obj, source: 'manual' as const }
-            : obj,
-        ),
-      }
-      // A direct retry is the user's confirmation that the paused boxes are
-      // valid. saveFrameAnnotations will persist them as the newest baseline.
-      lastPausedContext.value = null
+    if (pendingDeletion.value || pendingFeedback.value || workspaceReadError.value || isAiBusy.value) return
+    if (lastPausedContext.value?.mediaId === mediaId && pausedAnomalies.value.some(item => !isObjectDeleted(mediaId, item.objectId, lastPausedContext.value!.frameIndex))) {
+      anomalyPanelVisible.value = true
+      showToast('请先逐项确认暂停对象，或修正框后确认，再继续追踪')
+      return
     }
+    if (!currentObjects.value.some(object => object.bbox)) { showToast('当前帧没有可追踪的框，请先绘制或选择有框的帧'); return }
     anomalyObjectIds.value = []
     pausedAnomalies.value = []
     anomalyPanelVisible.value = false
@@ -1740,9 +1990,7 @@ const createWorkspace = () => {
       // 然后才写 seed JSON / 启动 SAM3。任何一步失败都不会“假保存”。
       statusMessage.value = `① 正在将第 ${startFrame + 1} 帧人工标注写入数据库……`
       const persisted = await persistCurrentFrameManualAnnotations(media, mediaId)
-      if (confirmedPausedIds.size > 0) {
-        showToast(`已将 ${confirmedPausedIds.size} 个异常框确认为新的人工基准`)
-      } else if (persisted.count) {
+      if (persisted.count) {
         showToast(`第 ${startFrame + 1} 帧 ${persisted.count} 个人工标注已写入数据库`)
       }
 
@@ -1754,6 +2002,11 @@ const createWorkspace = () => {
         mediaId: media.serverMediaId,
         startFrame,
       })
+      // The future branch is now replaced. Old AI snapshots can no longer be
+      // durably restored by an editor-only undo, so invalidate that history.
+      delete videoDeletionHistory.value[mediaId]
+      for (const key of histories.keys()) if (key.startsWith(`${mediaId}:`)) histories.delete(key)
+      historyRevision.value++; rememberControls(mediaId)
       const existingAfterRewind = annotationsByMedia.value[mediaId] ?? []
       // 当前帧 N 是新的分支锚点：保留此前所有结果以及 N 帧现有 AI/人工框。
       // 只有 N 之后的旧未来轨迹被清掉；随后 buildCurrentFrameSam3Objects() 会
@@ -1808,6 +2061,7 @@ const createWorkspace = () => {
       for (;;) {
         const status = await trackApi.getStatus(task.taskId)
 
+        trackingWarningSummary.value = status.warningSummary ?? []
         if (status.status === 'success') break
         if (status.status === 'failed') {
           throw new Error(status.message || 'SAM3 Tracking 失败')
@@ -1823,7 +2077,7 @@ const createWorkspace = () => {
               .filter(([, v]) => v !== 'normal')
               .map(([k]) => Number(k))
             const pausedObjs = status.pausedObjects || []
-            pausedAnomalies.value = pausedObjs.map(explainPausedObject)
+            pausedAnomalies.value = pausedObjs.map(item => ({ ...explainPausedObject(item), rawReasons: item.reasons ?? [], canLearn: (item.reasons ?? []).some(reason => reason.startsWith('adjacent_center_shift=')) && !(item.reasons ?? []).some(reason => !reason.startsWith('adjacent_center_shift=') && !reason.startsWith('motion_')) }))
             lastPausedContext.value = { mediaId, frameIndex: pauseFrame }
             anomalyPanelVisible.value = true
             const reasons = pausedAnomalies.value.map((item) => `${item.displayName}：${item.title}`)
@@ -1844,6 +2098,7 @@ const createWorkspace = () => {
 
       if (mediaId === currentMediaId.value) {
         const finalStatus = await trackApi.getStatus(task.taskId)
+        trackingWarningSummary.value = finalStatus.warningSummary ?? []
         const lastProcessedFrame = finalStatus.lastProcessedFrame ?? startFrame
         await seekVideo(frameToTime(lastProcessedFrame))
         if (finalStatus.reachedVideoEnd || lastProcessedFrame >= maxFrameIndex.value) {
@@ -1861,6 +2116,7 @@ const createWorkspace = () => {
       }
     } finally {
       isAiBusy.value = false
+      scheduleWorkspaceStateSave(mediaId)
     }
   }
 
@@ -2091,6 +2347,8 @@ const createWorkspace = () => {
     exactFrameLoading.value = false; isSeekingVideo = false; requestedFrame.value = null; frameError.value = ''
     workspaceRestoring.value = true
     saveState.value = 'idle'; saveError.value = ''
+    trackingWarningSummary.value = []
+    objectDeletionError.value = ''; trackingFeedbackError.value = ''
     revokeExactFrameUrl()
     selectedObjectId.value = null
     currentFrame.value = 0
@@ -2115,6 +2373,7 @@ const createWorkspace = () => {
       const restoredFrame = await restoreWorkspaceState(mediaId)
       if (serial !== restoreSerial || mediaId !== currentMediaId.value) return
       const targetFrame = restoredFrame ?? 0
+      if (workspaceReadError.value) { workspaceRestoring.value = false; return }
       await nextTick()
       revokeExactFrameUrl()
       const video = videoRef.value
@@ -2196,7 +2455,18 @@ const createWorkspace = () => {
     }
   }
 
+  watch(() => useAuth().user.value?.id, (next, previous) => {
+    if (next === previous) return
+    for (const timer of workspaceSaveTimers.values()) clearTimeout(timer)
+    workspaceSaveTimers.clear()
+    pendingDeletion.value = null; pendingFeedback.value = null
+    videoDeletionHistory.value = {}; histories.clear(); historyRevision.value++
+    objectDeletionError.value = ''; trackingFeedbackError.value = ''
+    workspaceReadError.value = '账号已切换，请重新加载素材'
+  })
+
   return {
+    getObjectDeletionSummary, removeObjectAcrossVideo, undoVideoObjectDeletion, retryObjectDeletion, canUndoVideoDeletion, lastVideoObjectDeletion, objectDeletionBusy, objectDeletionError, objectDeletionPendingAction, confirmTrackingAnomaly, retryTrackingAnomalyFeedback, trackingFeedbackBusy, trackingFeedbackError, trackingFeedbackPending, trackingFeedbackPendingAction, trackingCalibrationSummary, resetTrackingCalibration, trackingWarningSummary,
     deleteMedia, deletingMediaId, mediaDeleteError, persistWorkspaceState, retryExactFrame, saveState, saveError, playbackRate, pausePlayback, displayObjects, editingBlocked, workspaceRestoring, frameError, loadExactFrame, nudgeSelected, cancelAnnotationGesture, canUndo, canRedo,
     api, mediaAssets, selectedMediaId, activeTool, objectNameInput, selectedObjectId, currentFrame, currentTime, videoDuration, videoFps, frameInput, isPlaying, isAiBusy, trackingFrameCount, statusMessage, toastMessage, showToast, zoom, zoomIn, zoomOut, zoomReset, closeMedia, savedResults, loadedRemoteResultKeys, effectResults, selectedEffectId, effectTime, effectPlaying, effectVideoRef, imageRef, videoRef, exactFrameImageRef, exactFrameUrl, exactFrameLoading, videoPlaybackFallback, annotationHitRef, fileInputRef, videoInputRef, annotationFolderInputRef, effectFolderInputRef, annotationsByMedia, trackingFramesByMedia, anomalyObjectIds, anomalyFrames, pausedAnomalies, anomalyPanelVisible, trackingPausedFrame, closeAnomalyPanel, selectedMedia, isVideo, maxFrameIndex, currentMediaId, currentObjects, selectedObject, selectedEffect, formatTime, timeToFrame, frameToTime, getStagePoint, addObject, resetVideoViewToFirstFrame, ensureVideoFirstFrame, selectTool, onStageClick, tempBbox, onBboxDown, onBboxMove, onBboxUp, onObjectDropdownChange, selectObject, removeObject, renameObject, undo, redo, copyPreviousFrame, brightness, contrast, mediaFilterStyle, resetMediaFilter, annotatedFrameCount, clearSelection, openFilePicker, handleFiles, openAnnotationFolderPicker, handleAnnotationFolderFiles, onImageLoaded, onVideoLoaded, onVideoTimeUpdate, onVideoError, loadTrackingResult, seekVideo, seekToInputFrame, seekByFrame, togglePlayback, onVideoEnded, onTimelineClick, runAiSegment, runAiTrack, getMediaPixelSize, buildSam3AnnotationsJson, generateAnnotationsJson, loadSavedResults, openEffectFolderPicker, handleEffectFolder, loadEffects, onEffectTimeUpdate, toggleEffectPlayback, selectEffect, effectOverlayObjects, resetAnnotationViewForMedia, loadServerMedia
   }

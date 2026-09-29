@@ -1,4 +1,8 @@
-"""Regression tests for fixed manual-baseline anomaly detection."""
+"""Human feedback, motion continuity, and independent safety regressions."""
+
+import math
+
+import pytest
 
 from app.services.anomaly_detector import AnomalyConfig, AnomalyDetector, AnomalyLevel
 
@@ -149,3 +153,154 @@ def test_config_defaults_are_tunable_and_bidirectional() -> None:
     assert config.MANUAL_HEIGHT_RATIO_MIN_HARD < 1 < config.MANUAL_HEIGHT_RATIO_MAX_HARD
     assert config.SIDE_EXIT_MARGIN_PX == 10
     assert config.REVIEW_LOOKBACK_FRAMES == 5
+
+
+def _sample(value: float = 1.1, object_id: int = 1, **changes) -> dict:
+    return {"objectId": object_id, "frameIndex": 3, "reason": "motion", "decision": "normal", "calibrate": True, "features": {"motionNormalized": value}, **changes}
+
+
+def test_one_large_movement_warns_before_persistent_movement_pauses() -> None:
+    detector = _detector()
+    reports = [detector.push(frame, {1: _box(x=100 + frame * 45)}) for frame in range(1, 4)]
+    assert [report.should_pause for report in reports] == [False, False, True]
+    assert reports[0].object_levels[1] == AnomalyLevel.WARNING
+    assert reports[-1].frames[0].details["motion_streak"] == 3
+
+
+def test_returning_jitter_does_not_build_a_drift_streak() -> None:
+    detector = _detector()
+    for frame in range(1, 20):
+        report = detector.push(frame, {1: _box(x=145 if frame % 2 else 100)})
+        assert not report.should_pause
+    assert report.frames[0].details["motion_oscillation"] is True
+
+
+def test_confirmed_similar_motion_continues_without_repeated_pauses() -> None:
+    detector = _detector()
+    detector.prime_normal_feedback([_sample()])
+    for frame in range(1, 9):
+        report = detector.push(frame, {1: _box(x=100 + frame * 45)})
+        assert not report.should_pause
+        assert report.frames[0].details["normal_sample_matched"] is True
+    assert report.frames[0].details["motion_pause_threshold"] == pytest.approx(1.32)
+
+
+def test_new_motion_outside_confirmed_sample_still_pauses() -> None:
+    detector = _detector()
+    detector.prime_normal_feedback([_sample()])
+    reports = [detector.push(frame, {1: _box(x=100 + frame * 70)}) for frame in range(1, 4)]
+    assert [report.should_pause for report in reports] == [False, False, True]
+    assert reports[-1].frames[0].details["normal_sample_matched"] is False
+
+
+def test_human_can_add_larger_sample_without_fixed_pixel_cap() -> None:
+    detector = _detector()
+    detector.prime_normal_feedback([_sample(), _sample(2.1)])
+    for frame in range(1, 4):
+        assert not detector.push(frame, {1: _box(x=100 + frame * 85)}).should_pause
+    assert detector.normal_motion_samples[1] == [1.1, 2.1]
+
+
+def test_extreme_jump_remains_immediate_after_feedback() -> None:
+    detector = _detector()
+    detector.prime_normal_feedback([_sample()])
+    report = detector.push(1, {1: _box(x=300)})
+    assert report.should_pause
+    assert report.frames[0].details["motion_reason"] == "extreme_jump"
+
+
+@pytest.mark.parametrize("fps,gap,scale", [(15, 1, 1), (30, 1, 1), (60, 1, 1), (30, 3, 1), (30, 1, 2)])
+def test_motion_decision_is_normalized_for_fps_gaps_and_resolution(fps, gap, scale) -> None:
+    detector = AnomalyDetector(frame_width=4000, frame_height=2000, fps=fps, all_object_ids=[1])
+    initial = _box(width=40 * scale, height=12 * scale, x=100 * scale, y=100 * scale)
+    detector.set_manual_baseline(1, initial, 0)
+    detector.initialize_seed(0, {1: initial})
+    shift = 45 * scale * gap * 30 / fps
+    reports = []
+    for step in range(1, 4):
+        reports.append(detector.push(step * gap, {1: _box(width=40 * scale, height=12 * scale, x=100 * scale + step * shift, y=100 * scale)}))
+    assert [report.should_pause for report in reports] == [False, False, True]
+    assert reports[-1].frames[0].details["motion_normalized"] == pytest.approx(45 / math.hypot(40, 12))
+
+
+@pytest.mark.parametrize("sample", [_sample(object_id=2), _sample(reason="shape"), _sample(decision="corrected"), _sample(calibrate=False), _sample(float("nan")), _sample(float("inf")), _sample(-2), {"objectId": 1, "reason": "motion"}])
+def test_unrelated_invalid_or_once_only_feedback_never_relaxes_motion(sample) -> None:
+    detector = _detector()
+    detector.prime_normal_feedback([sample])
+    for frame in range(1, 4):
+        report = detector.push(frame, {1: _box(x=100 + frame * 45)})
+    assert report.should_pause
+    assert report.frames[0].details["feedback_sample_count"] == 0
+
+
+def test_normal_sample_does_not_disable_size_or_missing_checks() -> None:
+    detector = _detector()
+    detector.prime_normal_feedback([_sample(3)])
+    assert detector.push(1, {1: _box(width=70)}).should_pause
+    other = _detector()
+    other.prime_normal_feedback([_sample(3)])
+    assert other.push(1, {}).should_pause
+
+
+def test_normal_sample_does_not_disable_identity_overlap_check() -> None:
+    detector = _detector()
+    detector.set_manual_baseline(2, _box(x=200), 0)
+    detector.initialize_seed(0, {1: _box(), 2: _box(x=200)})
+    detector.prime_normal_feedback([_sample(3), _sample(3, object_id=2)])
+    report = detector.push(1, {1: _box(x=150), 2: _box(x=151)})
+    assert report.should_pause
+    assert all(level == AnomalyLevel.ANOMALY for level in report.object_levels.values())
+
+
+def test_reset_feedback_restores_initial_range_and_ai_history_cannot_expand_it() -> None:
+    detector = _detector()
+    detector.prime_normal_feedback([_sample(2)])
+    for frame in range(1, 4):
+        assert not detector.push(frame, {1: _box(x=100 + frame * 45)}).should_pause
+    detector.prime_normal_feedback([])
+    for frame in range(4, 7):
+        report = detector.push(frame, {1: _box(x=100 + frame * 45)})
+    assert report.should_pause
+    assert report.frames[0].details["motion_pause_threshold"] == 1
+
+
+def test_clean_frame_resets_suspected_drift_streak_and_history_is_bounded() -> None:
+    detector = _detector()
+    for frame in range(1, 30):
+        report = detector.push(frame, {1: _box(x=100 + frame * 3)})
+        assert not report.should_pause
+    assert len(detector.states[1].motion_history) == detector.config.MOTION_HISTORY_FRAMES
+    assert len(detector.states[1].motion_frame_indices) == detector.config.MOTION_HISTORY_FRAMES
+    assert detector.push(30, {1: _box(x=232)}).frames[0].details["motion_streak"] == 1
+    assert detector.push(31, {1: _box(x=235)}).frames[0].details["motion_streak"] == 0
+
+
+def test_pause_log_explains_threshold_and_human_sample_count(caplog) -> None:
+    import logging
+
+    detector = _detector()
+    detector.prime_normal_feedback([_sample()])
+    with caplog.at_level(logging.INFO, logger="review.tracking"):
+        assert detector.push(1, {1: _box(x=300)}).should_pause
+    assert "tracking.anomaly_pause frame=1" in caplog.text
+    assert "'samples': 1" in caplog.text
+    assert "'threshold': 1.32" in caplog.text
+
+
+def test_soft_overlap_cannot_downgrade_independent_hard_size_anomaly() -> None:
+    detector = _detector()
+    second = _box(width=60, height=16, x=200)
+    detector.set_manual_baseline(2, second, 0)
+    detector.initialize_seed(0, {1: _box(), 2: second})
+    report = detector.push(1, {1: _box(width=64, height=16), 2: _box(width=60, height=16, x=110)})
+    assert report.should_pause
+    assert report.object_levels[1] == AnomalyLevel.ANOMALY
+    assert detector.states[1].level == AnomalyLevel.ANOMALY
+
+
+def test_missing_manual_baseline_still_uses_fixed_seed_motion_scale() -> None:
+    detector = AnomalyDetector(all_object_ids=[1])
+    detector.initialize_seed(0, {1: _box()})
+    first = detector.push(1, {1: _box(width=45, height=15, x=105)})
+    second = detector.push(2, {1: _box(width=50, height=20, x=110)})
+    assert first.frames[0].details["object_scale"] == second.frames[0].details["object_scale"] == pytest.approx(math.hypot(40, 12))

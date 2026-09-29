@@ -5,7 +5,7 @@ const {chromium}=await import(process.env.PLAYWRIGHT_MODULE||'playwright')
 const f=JSON.parse(fs.readFileSync('work/confirmation-browser-fixture.json'))
 const b=await chromium.launch({channel:'chrome',headless:true}),p=await b.newPage({viewport:{width:1440,height:900}})
 const origin=process.env.CONFIRMATION_ORIGIN||'http://127.0.0.1:5373'
-const errors=[];p.on('pageerror',e=>errors.push(String(e)));let n=0,mode='success',release,started,seeds=[]
+const errors=[],logs=[];p.on('pageerror',e=>errors.push(String(e)));p.on('console',m=>logs.push({type:m.type(),text:m.text()}));let n=0,mode='success',release,started,seeds=[]
 const check=(ok,msg)=>{assert(ok,msg);console.log('PASS',++n,msg)}
 try{
  await p.addInitScript(f=>{localStorage.setItem('rare-sperm-token',f.token);localStorage.setItem('rare-sperm-auth',JSON.stringify({id:'3',name:'UX tester'}))},f)
@@ -16,7 +16,7 @@ try{
  await p.route('**/api/track',r=>r.fulfill({json:{taskId:'ux-simulated-job',status:'queued',maxFrames:5}}))
  await p.route('**/api/track/status/ux-simulated-job',async r=>{
    if(release===undefined){await new Promise(resolve=>{release=resolve;started?.()})}
-   await r.fulfill({json:mode==='success'?{status:'success',lastProcessedFrame:4,reachedVideoEnd:false}:{status:'paused',paused:true,pausedFrame:6,anomalyLevels:{1:'warning'},pausedObjects:[{object_id:1,name:'sperm',display_name:'sperm 1',type:'area_change',reasons:['area_growth'],manualBaselineFrame:4,reviewStartFrame:3,reviewEndFrame:6,metrics:{areaRatio:1.8}}]}})
+   await r.fulfill({json:mode==='success'?{status:'success',lastProcessedFrame:4,reachedVideoEnd:false}:{status:'paused',paused:true,pausedFrame:6,anomalyLevels:{1:'anomaly'},pausedObjects:[{object_id:1,name:'sperm',display_name:'sperm 1',type:'size_growth',reasons:['manual_area_ratio=1.800 HARD'],manualBaselineFrame:4,reviewStartFrame:3,reviewEndFrame:6,metrics:{areaRatio:1.8}}]}})
  })
  await p.goto(origin+'/annotate');await p.evaluate(async()=>{window.ws=(await import(performance.getEntriesByType('resource').find(r=>r.name.includes('/src/stores/workspace.ts')).name)).useWorkspace()})
  await p.locator('.asset-card').filter({hasText:'ux-video.avi'}).click();await p.waitForFunction(()=>!window.ws.editingBlocked.value&&window.ws.currentObjects.value.length===2)
@@ -30,13 +30,19 @@ try{
  check(seeds[0].frameIndex===0&&seeds[0].mediaWidth===800&&seeds[0].annotations.length===2,'tracking seed retains original frame, dimensions and object count')
  mode='paused';await p.getByRole('button',{name:'AI Tracking',exact:true}).click();await p.waitForFunction(()=>!window.ws.isAiBusy.value&&window.ws.currentFrame.value===6)
  check(await p.locator('.tracking-anomaly').isVisible(),'anomaly pause navigates to its exact frame and displays the existing warning')
- const pauseTitle=await p.locator('.tracking-anomaly strong').innerText()
- check(pauseTitle.includes('第 7 帧')&&pauseTitle.includes('请注意查看前几帧是否已经出现框偏移'),'anomaly banner shows the paused frame and previous-frame inspection reminder')
+ const pauseTitle=await p.locator('.tracking-feedback-title strong').innerText()
+ check(pauseTitle.includes('第 7 帧')&&(await p.locator('.tracking-target').innerText()).includes('查看前几帧是否已经偏移'),'anomaly banner shows the paused frame and previous-frame inspection reminder')
+ check(await p.getByRole('button',{name:'AI Tracking',exact:true}).isDisabled(),'plain AI start cannot implicitly accept the paused anomaly')
  await p.getByRole('button',{name:'上一帧',exact:true}).click();await p.waitForFunction(()=>window.ws.currentFrame.value===5)
- check((await p.locator('.tracking-anomaly strong').innerText()).includes('第 7 帧'),'browsing another frame does not rewrite the paused-frame banner')
+ check((await p.locator('.tracking-feedback-title strong').innerText()).includes('第 7 帧'),'browsing another frame does not rewrite the paused-frame banner')
+ check(await p.getByTestId('confirm-tracking-normal').isDisabled()&&await p.getByTestId('confirm-tracking-corrected').isDisabled(),'explicit feedback cannot be submitted while browsing a different frame')
  await p.locator('.tracking-anomaly summary').click();const text=await p.locator('.tracking-anomaly').innerText()
- check(text.includes('最近人工基准：第 5 帧')&&text.includes('第 4～7 帧')&&text.includes('本帧异常框会被确认为新的人工基准'),'expanded anomaly details preserve baseline, review range and retry meaning with one-based display')
- await p.getByRole('button',{name:'收起',exact:true}).click();check(await p.locator('.timeline-anomaly').count()===1,'hiding anomaly details retains the timeline marker')
+ check(text.includes('最近人工基准：第 5 帧')&&text.includes('第 4～7 帧')&&text.includes('确认保存成功后才继续追踪'),'expanded anomaly details preserve baseline, review range and explicit save-before-resume meaning')
+ await p.locator('.tracking-anomaly summary').click();check(await p.locator('.timeline-anomaly').count()===1,'collapsing diagnostic details retains the timeline marker')
+ await p.getByRole('button',{name:'返回第 7 帧',exact:true}).click();await p.waitForFunction(()=>window.ws.currentFrame.value===6&&!window.ws.exactFrameLoading.value)
+ check(await p.getByTestId('confirm-tracking-normal').isEnabled()&&await p.getByTestId('confirm-tracking-corrected').isEnabled(),'returning to the real paused frame enables both explicit confirmation choices')
+ check(await p.locator('.tracking-learn').count()===0&&(await p.locator('.tracking-learning-limit').innerText()).includes('不扩大正常运动范围'),'size anomalies cannot broaden normal-motion calibration')
+ await p.screenshot({path:'output/playwright/ux-tracking-explicit-feedback.png',animations:'disabled'})
  check(errors.length===0,'simulated tracking UI has no uncaught errors')
  console.log('SUCCESS',n,'checks')
-}finally{await b.close()}
+}finally{fs.writeFileSync('output/playwright/ux-tracking-browser-console.json',JSON.stringify({errors,logs},null,2));await b.close()}

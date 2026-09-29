@@ -23,6 +23,8 @@
 | `DELETE /api/track/media/{mediaId}` | 删除未送审视频目录；需要登录。成功返回 `deleted: true, mediaId`；AI 运行、基准引用、新旧存储同名目录返回 409；文件系统失败返回 500 并记录日志，不能伪报成功 |
 | `GET /api/track/video/{mediaId}`、`/api/track/frame/{mediaId}/{fi}` | 原视频、真实指定帧 |
 | `GET / PUT /api/track/workspace/{mediaId}` | 可恢复工作区 |
+| `GET /api/track/deletion-preview/{mediaId}/{objectId}` | 整视频删除预览，按稳定 ID 合并人工和 AI 同帧框，返回真实有效数量 |
+| `POST /api/track/feedback/{mediaId}` | 显式正常/已修正/重置判断；版本校验和原键重试 |
 | `POST /api/annotation/annotations/manual` | 保存人工对象记录 |
 | `GET /api/annotation/projects/{projectId}/results` | 人工标注记录查询 |
 | `POST /api/track/annotations`、`/api/track/rewind`、`/api/track` | seed、回退、发起追踪 |
@@ -30,6 +32,16 @@
 | `GET /api/track/result-file/{mediaId}`、`/api/track/overlay/{mediaId}` | JSONL 与带框视频 |
 
 `AnnotationObject` 定义在 [annotation.ts](../frontend/src/types/annotation.ts)：界面 `id` 与稳定 `objectId` 不等价，`frameIndex` 为实际 0 起帧号；工作区 bbox 为百分比 `{x,y,width,height}`。seed / Tracking / B/C 使用原图像素 xyxy，转换不能重复进行。追踪结果文件虽后缀 `.json`，实际逐行 JSONL。
+
+工作区 GET 返回 `revision`（旧工作区首次为 0）；新版 PUT 携带 `expectedRevision` 和 `Idempotency-Key`，返回新的 `revision`。未知保存结果必须沿用原键和原正文，成功回执重放先于版本校验。无版本的旧客户端仍可保存普通编辑，但不能变更新删除规则，也不能覆盖服务端反馈、样本和回执。新前端始终使用版本和幂等键。
+
+删除规则是 `deletedObjectIds:number[]`（整视频）和 `deletedFrameObjects:[{objectId,frameIndex}]`（单帧）；`deletedTrackingIds` 仅保留历史兼容。规则同时作用于人工/AI、seed、追踪读取、人工记录查询与送审。单帧删除不关闭后续该对象的追踪；整视频删除不允许该对象进入后续 seed。原追踪文件不物理抹除，撤销通过恢复工作区及移除对应删除标记实现。A/B/F 不随删除或撤销改变。
+
+删除预览前必须保存当前工作区。响应为 `{mediaId,objectId,name,revision,totalCount,frameCount,manualCount,aiCount,firstFrame,lastFrame}`；同对象同帧人工覆盖 AI 只算一框；帧号 0 起，无框时首末帧为 null。确认删除时仍用当前工作区版本，不能把预览数量当无需校验的删除许可。
+
+反馈请求为 `{expectedRevision,objectId,frameIndex,decision:'normal'|'corrected'|'reset',calibrate:boolean}`，使用 `Idempotency-Key`，与工作区共享版本。`reset` 不要求帧号，清该对象活动样本并保留审计。`normal` 只在明确勾选校准且持久化追踪结果包含位移依据时生成 `normalMotionSamples`；每条为 `{objectId,frameIndex,reason:'motion',decision:'normal',calibrate:true,features:{motionNormalized}}`。数值取自服务端追踪数据，不接受客户提供阈值。`corrected` 要求当前帧已保存的人工框实际不同于异常原框，且不生成正常样本。
+
+反馈响应包含 `{ok,mediaId,revision,normalMotionSamples,trackingFeedbackEvents,pausedAnomalies,lastPausedContext}`。正常/已修正请求必须匹配当前持久化暂停帧及未解决对象，并核验真实追踪行；新键不能再次确认已解决的历史异常。每次只移除选定对象及已被删除的暂停项；仍有待处理对象时保留暂停上下文。样本按媒体、对象和位移原因隔离，不豁免尺寸、重叠或丢失检测。普通工作区 PUT 不能注入校准样本。Tracking 状态另返回 `warningSummary`，用于合并轻提示，不把每次轻微抖动升级为阻塞弹窗。
 
 ## A 完成与 B
 

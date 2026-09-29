@@ -14,30 +14,31 @@ def test_frontend_no_longer_calls_frame_difference_plan() -> None:
 
 def test_anomaly_panel_contract_keeps_markers_and_uses_real_names() -> None:
     page = (ROOT / "frontend/src/pages/AnnotatePage.vue").read_text(encoding="utf-8")
+    panel = (ROOT / "frontend/src/components/AnnotationTrackingFeedback.vue").read_text(encoding="utf-8")
     store = (ROOT / "frontend/src/stores/workspace.ts").read_text(encoding="utf-8")
-    assert "closeAnomalyPanel" in page
-    assert "item.displayName" in page
-    assert "最近人工基准" in page
+    assert "AnnotationTrackingFeedback" in page
+    assert "item.displayName" in panel and "最近人工基准" in panel
     assert "该错误可能在触发暂停前已经逐渐出现" in store
-    assert "anomalyPanelVisible.value = false" in store
     close_panel_block = store[store.index("const closeAnomalyPanel"):store.index("const lastPausedContext")]
     assert "anomalyFrames.value = []" not in close_panel_block
-    assert "anomalyPanelVisible.value = true" in store
     assert "const trackingPausedFrame = computed" in store
-    assert "trackingPausedFrame+1" in page
-    assert "请注意查看前几帧是否已经出现框偏移" in page
-    anomaly_panel = page[page.index('class="tracking-anomaly"'):page.index('class="annotation-timeline"')]
-    assert "currentFrame+1" not in anomaly_panel
+    assert "pausedFrame + 1" in panel
+    assert "查看前几帧是否已经偏移" in panel
+    assert "返回暂停帧再确认" in panel
 
 
-def test_direct_retry_promotes_only_paused_objects_to_manual_baselines() -> None:
+def test_tracking_requires_explicit_per_object_feedback_before_resume() -> None:
     store = (ROOT / "frontend/src/stores/workspace.ts").read_text(encoding="utf-8")
-    page = (ROOT / "frontend/src/pages/AnnotatePage.vue").read_text(encoding="utf-8")
-    assert "lastPausedContext.value?.mediaId === mediaId" in store
-    assert "pausedAnomalies.value.map((item) => item.objectId)" in store
-    assert "confirmedPausedIds.has(obj.objectId)" in store
-    assert "source: 'manual' as const" in store
-    assert "本帧异常框会被确认为新的人工基准" in page
+    panel = (ROOT / "frontend/src/components/AnnotationTrackingFeedback.vue").read_text(encoding="utf-8")
+    api = (ROOT / "frontend/src/api/trackApi.ts").read_text(encoding="utf-8")
+    run = store[store.index("const runAiTrack"):store.index("const buildSam3AnnotationsJson")]
+    assert "confirmedPausedIds" not in run
+    assert "请先逐项确认暂停对象" in run
+    assert "const prepareTrackingFeedback" in store
+    assert "const retryTrackingAnomalyFeedback" in store
+    assert "submitFeedback" in api and "Idempotency-Key" in api
+    assert "所有对象确认后才继续追踪" in panel
+    assert "取消勾选只确认本次" in panel
 
 
 def test_track_api_401_expires_session_and_login_route_is_available() -> None:
@@ -100,7 +101,9 @@ def test_workspace_state_is_restored_before_tracking_results_and_uses_canonical_
     assert "getWorkspaceState" in api and "saveWorkspaceState" in api
     assert 'WORKSPACE_STATE_FILE_NAME = "workspace_state.json"' in tracker
     assert '@app.put("/api/track/workspace/{media_id}")' in backend
-    assert "temporary.replace(path)" in backend
+    state_writer = (ROOT / "backend/app/annotation_state.py").read_text(encoding="utf-8")
+    assert "annotation_state.write_state" in backend
+    assert "temporary.replace(directory / FILE_NAME)" in state_writer
 
 
 def test_results_page_groups_same_file_frame_and_user_instead_of_batches() -> None:

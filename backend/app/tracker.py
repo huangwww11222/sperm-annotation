@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,7 @@ import cv2
 from PIL import Image
 
 from .config import DEVICE, DTYPE, MODEL_ID
+from .annotation_state import is_deleted, read_state
 from .services.anomaly_detector import (
     AnomalyConfig,
     AnomalyDetector,
@@ -313,6 +315,7 @@ def track_video(
     max_frames: int,
     bbox_mode: str = "pixel",
     start_frame: int | None = None,
+    normal_feedback: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Run SAM3 on the exact original source-frame sequence.
 
@@ -338,6 +341,10 @@ def track_video(
         height,
         source_frame_count,
     )
+    workspace = read_state(Path(annotation_json).parent)
+    objects = [obj for obj in objects if not is_deleted(workspace, seed_source_frame, int(obj["object_id"]))]
+    if not objects:
+        raise ValueError("当前帧没有可追踪对象；已删除对象不会重新进入追踪")
     requested_source_start = seed_source_frame if start_frame is None else int(start_frame)
     if requested_source_start != seed_source_frame:
         raise ValueError("startFrame must match the annotation frameIndex")
@@ -368,8 +375,8 @@ def track_video(
     session = engine.make_tracker_session(frames)
     engine.add_manual_boxes(session, seed_frame, objects)
 
-    # 每次 SAM3 推理请求都有新 detector，但先灌入当前分支在 seed 前的
-    # 已验证历史框。这样续追时也能和整个对象历史尺寸比较，而不是只看本轮。
+    # Restore explicit human decisions for this media. AI history supplies
+    # motion context only; it cannot expand accepted size or motion ranges.
     active_object_ids = {int(o["object_id"]) for o in objects}
     manual_baselines = {
         object_id: baseline
@@ -383,6 +390,7 @@ def track_video(
         frame_height=height,
         all_object_ids=active_object_ids,
         manual_baselines=manual_baselines,
+        normal_feedback=normal_feedback if normal_feedback is not None else workspace.get("normalMotionSamples", []),
     )
     detector.prime_history(_clean_history_before_seed(Path(output_json), seed_source_frame))
 
@@ -414,6 +422,7 @@ def track_video(
     )
 
     result_anomaly_paused = None
+    warning_summary: dict[tuple[int, str], dict[str, Any]] = {}
     last_processed_frame = seed_source_idx
     end_frame_exclusive = seed_frame + requested
     for output in engine.propagate_manual(
@@ -434,6 +443,8 @@ def track_video(
         for detection in detections:
             bbox = _json_bbox(detection.bbox)
             oid = int(detection.object_id)
+            if oid not in active_object_ids:
+                continue
             obj_row = {
                 "object_id": oid,
                 "name": object_names.get(oid, f"object-{oid}"),
@@ -456,7 +467,27 @@ def track_video(
         for obj_row in object_rows:
             oid = int(obj_row["object_id"])
             frame_objs_for_detector[oid] = list(obj_row["bbox"])
-        anomaly_report = detector.push(frame_idx, frame_objs_for_detector)
+        hidden_ids = {oid for oid in active_object_ids if is_deleted(workspace, source_idx, oid)}
+        anomaly_report = detector.push(frame_idx, frame_objs_for_detector, ignored_object_ids=hidden_ids)
+
+        # A single-frame omission must not end this object's model history.
+        # Retain raw predictions for deletion undo. API/workflow readers apply
+        # the durable tombstones; only decisions are omitted here. Subsequent
+        # frames retain the model identity and independent anomaly checks.
+        visible_anomalies = [af for af in anomaly_report.frames if af.object_id not in hidden_ids]
+        should_pause = anomaly_report.should_pause and any(af.level in (AnomalyLevel.ANOMALY, AnomalyLevel.DISAPPEARED) for af in visible_anomalies)
+        for af in visible_anomalies:
+            if af.level != AnomalyLevel.WARNING:
+                continue
+            groups = set()
+            for reason in af.reasons:
+                groups.add("motion" if reason.startswith("adjacent_center_shift=") else "overlap" if reason.startswith("bbox_overlap_with=") else "size")
+            for reason in groups:
+                key = (af.object_id, reason)
+                summary = warning_summary.setdefault(key, {"objectId": af.object_id, "name": object_names.get(af.object_id), "reason": reason, "count": 0, "firstFrame": source_idx, "lastFrame": source_idx, "calibrated": False})
+                summary["count"] += 1
+                summary["lastFrame"] = source_idx
+                summary["calibrated"] = summary["calibrated"] or (reason == "motion" and bool(af.details.get("normal_sample_matched")))
 
         # ── 把 anomaly level + reasons 写入每个 object row ──
         for af in anomaly_report.frames:
@@ -478,7 +509,7 @@ def track_video(
                     "reasons": af.reasons,
                     "details": af.details,
                 }
-                for af in anomaly_report.frames
+                for af in visible_anomalies
                 if af.level in (AnomalyLevel.ANOMALY, AnomalyLevel.DISAPPEARED)
             ],
         }
@@ -490,9 +521,9 @@ def track_video(
         )
 
         # HARD 异常 → 在当前异常帧保存结果后立即暂停。
-        if anomaly_report.should_pause:
+        if should_pause:
             pause_objects = []
-            for af in anomaly_report.frames:
+            for af in visible_anomalies:
                 if af.level in (AnomalyLevel.ANOMALY, AnomalyLevel.DISAPPEARED):
                     details = af.details or {}
                     area_ratio = details.get("area_ratio")
@@ -531,6 +562,11 @@ def track_video(
                             "heightRatio": height_ratio,
                             "aspectRatio": details.get("aspect_ratio_ratio"),
                             "overlapCoverage": details.get("overlap_coverage"),
+                            "centerShift": details.get("center_shift"),
+                            "motionNormalized": details.get("motion_normalized"),
+                            "motionPauseThreshold": details.get("motion_pause_threshold"),
+                            "motionStreak": details.get("motion_streak"),
+                            "feedbackSampleCount": details.get("feedback_sample_count", 0),
                         },
                         "reviewStartFrame": details.get("review_start_frame"),
                         "reviewEndFrame": details.get("review_end_frame"),
@@ -554,7 +590,7 @@ def track_video(
     _render_overlay_video(video_file, overlay_path, meta, merged_rows)
 
     result = {
-        "frames": merged_rows,
+        "frames": [{**row, "objects": [obj for obj in row.get("objects", []) if not is_deleted(workspace, int(row["source_frame_index"]), int(obj["object_id"]))]} for row in merged_rows],
         "resultFile": str(Path(output_json).resolve()),
         "overlayVideo": str(overlay_path.resolve()),
         "startFrame": requested_source_start,
@@ -577,7 +613,13 @@ def track_video(
             "frameCount": source_frame_count,
         },
         "anomaly_paused": result_anomaly_paused,
+        "warningSummary": list(warning_summary.values()),
     }
+    logging.getLogger("review.tracking").info(
+        "tracking.completed media=%s start=%s last=%s paused=%s feedback_objects=%s warnings=%s",
+        video_file.parent.name, seed_source_frame, last_processed_frame, result_anomaly_paused is not None,
+        sorted(detector.normal_motion_samples), list(warning_summary.values()),
+    )
     print(f"[sam3] result jsonl: {output_json}")
     print(f"[sam3] overlay mp4: {overlay_path}")
     return result
@@ -628,6 +670,7 @@ def _render_overlay_video(
     rendered with boxes; other frames are copied unchanged. This keeps the
     overlay video on exactly the same frame/time axis as the browser source.
     """
+    workspace = read_state(source_video.parent)
     frame_map = {
         int(row.get("source_frame_index", row.get("frame_index", -1))): row
         for row in rows
@@ -658,6 +701,8 @@ def _render_overlay_video(
             objects = []
             if row:
                 for obj in row.get("objects", []):
+                    if is_deleted(workspace, frame_idx, int(obj.get("object_id", 0))):
+                        continue
                     objects.append({
                         "track_id": obj.get("object_id", 0),
                         "object_id": obj.get("object_id", 0),

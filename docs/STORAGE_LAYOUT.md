@@ -33,6 +33,12 @@ storage/
 
 `workspace_state.json` 临时文件写入后原子替换。AI 逐帧结果不复制进去，加载时与 `tracker_results.json` 合并，人工修正优先，删除标记不能因重新加载复活。
 
+工作区当前还保存 `revision`、稳定 ID 的 `deletedObjectIds/deletedFrameObjects`、服务端生成的 `normalMotionSamples` 和 `trackingFeedbackEvents`。内部 `_writeReceipts` 与状态同一次原子替换，GET 不暴露回执；响应丢失后原键重放不会重复递增版本或新增反馈。文件替换失败保留原状态和版本，日志记录 `annotation.workspace_save_failed`。这些状态受单进程来源锁保护，不属于 SQLite 跨资源事务。
+
+删除是持久化过滤规则，原始 Tracking JSONL 和旧 seed 保留以便撤销；所有活动读入、续追 seed 和送审均应用规则。仅删除某帧不删除模型在后续帧的身份，重新追踪也不能让该帧复活。整视频删除同时排除人工记录、AI 框与人工基准。服务端 `deletedAnnotationFrames` 记录原先有人工框、后因删除变空的帧，使送审仍能区分已知空帧和未知帧。此字段与校准样本一样由服务端维护。
+
+正常反馈样本取自真实追踪行的位移测量，按视频、对象、原因保存；原有 AI 预测不会自行成为正常样本。重置清活动样本但保留反馈事件，已修正决定独立记录。旧客户端遗漏新字段时，服务端保留删除规则与反馈，避免旧缓存覆盖新控制状态。
+
 旧媒体没有工作区文件时，只从 seed 的 `source=manual` 恢复人工记录/基准；AI、warning、anomaly 不当人工基准。首次编辑/追踪可写回恢复状态。文件原子替换与 SQLite 事务不是同一跨资源事务；不要假设一个能回滚另一个。
 
 ## SQLite 数据关系

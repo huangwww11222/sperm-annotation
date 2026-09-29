@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 import mimetypes
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.responses import Response
@@ -42,6 +42,7 @@ from .tracker import (
 )
 from .review_routes import register_review_routers
 from .review_source_lock import source_write
+from . import annotation_state
 
 app = FastAPI(title="SAM3 Annotation Backend", version="3.0.0")
 app.add_middleware(
@@ -182,6 +183,7 @@ def _px(obj: dict[str, Any], width: float | None, height: float | None) -> dict[
 
 
 @app.post("/api/annotation/annotations/manual", status_code=201)
+@source_write
 def save_manual(req: ManualAnnotationRequest, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     if tracking_is_busy():
         raise HTTPException(409, "SAM3 Tracking 正在运行，暂时禁止人工标注")
@@ -193,6 +195,7 @@ def save_manual(req: ManualAnnotationRequest, user: dict[str, Any] = Depends(cur
     raw = req.model_dump_json()
     batch_id = f"batch-{user['uid']}-{uuid.uuid4().hex[:10]}"
     rows = []
+    workspace = annotation_state.read_state(media_dir(req.mediaId))
     for obj in req.objects:
         # 数据库只记录人工新增/人工修改后的对象；AI Tracking 结果不进入人工结果库。
         if obj.get("source") != "manual":
@@ -202,6 +205,8 @@ def save_manual(req: ManualAnnotationRequest, user: dict[str, Any] = Depends(cur
         point = obj.get("point") if isinstance(obj.get("point"), dict) else None
         # 逐对象取 frameIndex/timestampMs：一次保存可能包含多个视频帧，不能把请求当前帧覆盖所有对象。
         obj_frame_index = int(obj.get("frameIndex", req.frameIndex) or 0)
+        if annotation_state.is_deleted(workspace, obj_frame_index, int(obj.get("objectId") or 0)):
+            continue
         obj_timestamp_ms = int(round(float(obj.get("timestampMs", req.timestampMs) or 0)))
         rows.append({
             "user_id": user["uid"], "batch_id": batch_id,
@@ -225,14 +230,30 @@ def save_manual(req: ManualAnnotationRequest, user: dict[str, Any] = Depends(cur
 def results(project_id: str, mediaId: str | None = Query(default=None), user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     # 标注结果页查看的是整张人工标注记录表，因此这里不按当前用户限制；
     # 结果仍然只允许已登录用户访问，并且严格只返回 source=manual。
-    rows = list_annotations(None, mediaId, source="manual")
+    rows = _visible_manual_records(list_annotations(None, mediaId, source="manual"))
     return {"items": rows, "total": len(rows)}
 
 
 @app.get("/api/annotation/media/{media_id}")
 def results_by_media(media_id: str, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
-    rows = list_annotations(None, media_id, source="manual")
+    rows = _visible_manual_records(list_annotations(None, media_id, source="manual"))
     return {"items": rows, "total": len(rows)}
+
+
+def _visible_manual_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    workspaces: dict[str, dict[str, Any]] = {}
+    result = []
+    for row in rows:
+        media_id = str(row.get("media_id") or "")
+        if media_id not in workspaces:
+            workspaces[media_id] = annotation_state.read_state(media_dir(media_id)) if media_id else {}
+        try:
+            object_id = int(row.get("object_id") or 0)
+        except (ValueError, TypeError):
+            object_id = 0
+        if not annotation_state.is_deleted(workspaces[media_id], int(row.get("frame_index") or 0), object_id):
+            result.append(row)
+    return result
 
 
 @app.delete("/api/annotation/{annotation_id}")
@@ -455,6 +476,9 @@ def save_frame_annotations(req: dict[str, Any], user: dict[str, Any] = Depends(c
             raise HTTPException(400, f"annotations[{idx}] frameIndex 与当前 seed frame 不一致")
         normalized_annotations.append(ann)
     directory = media_dir(str(req["mediaId"]))
+    workspace = annotation_state.read_state(directory)
+    if any(annotation_state.is_deleted(workspace, frame, ann["object_id"]) for ann in normalized_annotations):
+        raise HTTPException(409, "当前 seed 包含已删除的对象，请重新读取工作区")
     directory.mkdir(parents=True, exist_ok=True)
     payload = {
         "media": {"id": str(req["mediaId"]), "name": req.get("mediaName") or f"{req['mediaId']}.mp4", "type": "video", "width": req.get("mediaWidth"), "height": req.get("mediaHeight")},
@@ -551,19 +575,14 @@ def get_workspace_state(media_id: str, user: dict[str, Any] = Depends(current_us
         raise HTTPException(404, "素材不存在")
     path = directory / WORKSPACE_STATE_FILE_NAME
     if not path.is_file():
-        return _legacy_workspace_state(directory, media_id) or {"exists": False, "mediaId": media_id}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise HTTPException(500, f"{WORKSPACE_STATE_FILE_NAME} 无法读取") from exc
-    if not isinstance(payload, dict):
-        raise HTTPException(500, f"{WORKSPACE_STATE_FILE_NAME} 格式无效")
-    return {**payload, "exists": True, "mediaId": media_id}
+        return {**(_legacy_workspace_state(directory, media_id) or {"exists": False, "mediaId": media_id}), "revision": 0}
+    payload = annotation_state.read_state(directory)
+    return {**annotation_state.public_state(payload), "exists": True, "mediaId": media_id, "revision": int(payload.get("revision", 0))}
 
 
 @app.put("/api/track/workspace/{media_id}")
 @source_write
-def save_workspace_state(media_id: str, payload: dict[str, Any], user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+def save_workspace_state(media_id: str, payload: dict[str, Any], user: dict[str, Any] = Depends(current_user), idempotency_key: str = Header(default="")) -> dict[str, Any]:
     """Atomically persist editor-only state beside the source video."""
     directory = media_dir(media_id)
     if not directory.is_dir() or not find_video(directory):
@@ -575,30 +594,52 @@ def save_workspace_state(media_id: str, payload: dict[str, Any], user: dict[str,
     if len(manual_annotations) > 1_000_000 or len(manual_baselines) > 100_000:
         raise HTTPException(413, "工作区状态过大")
 
-    clean = {
-        **payload,
-        "format": "annotation-workspace-v1",
-        "mediaId": media_id,
-        "updatedBy": int(user["uid"]),
-    }
-    encoded = json.dumps(clean, ensure_ascii=False, indent=2)
-    if len(encoded.encode("utf-8")) > 64 * 1024 * 1024:
-        raise HTTPException(413, "工作区状态超过 64 MiB")
+    def build(previous: dict[str, Any]) -> dict[str, Any]:
+        clean = {**previous, **{k: v for k, v in payload.items() if k not in annotation_state.SERVER_FIELDS and not k.startswith("_")}}
+        if tracking_is_busy() and any(clean.get(field, []) != previous.get(field, []) for field in ("deletedObjectIds", "deletedFrameObjects", "deletedTrackingIds")):
+            raise HTTPException(409, "AI Tracking 正在运行，暂时不能修改删除范围")
+        if payload.get("expectedRevision") is None:
+            for field in ("deletedObjectIds", "deletedFrameObjects"):
+                if field in payload and payload[field] != previous.get(field, []):
+                    raise HTTPException(428, "修改删除范围需要工作区版本，请刷新页面")
+                clean[field] = previous.get(field, [])
+            clean["deletedTrackingIds"] = list(set(previous.get("deletedTrackingIds", [])) | set(payload.get("deletedTrackingIds", [])))
+        known_deleted = set(previous.get("deletedAnnotationFrames", []))
+        for obj in [*previous.get("manualAnnotations", []), *manual_annotations]:
+            frame = int(obj.get("frameIndex", 0))
+            if annotation_state.is_deleted(clean, frame, int(obj.get("objectId") or 0)):
+                known_deleted.add(frame)
+        clean["deletedAnnotationFrames"] = sorted(known_deleted)
+        # An old client may resend boxes cached before a deletion; control fields
+        # remain authoritative and those boxes never become effective again.
+        clean["manualAnnotations"] = [obj for obj in manual_annotations if not annotation_state.is_deleted(clean, int(obj.get("frameIndex", 0)), int(obj.get("objectId") or 0))]
+        clean["manualBaselines"] = [obj for obj in manual_baselines if not annotation_state.is_deleted(clean, int(obj.get("frameIndex", 0)), int(obj.get("objectId") or 0))]
+        return clean
+    return annotation_state.write_state(directory, media_id, int(user["uid"]), idempotency_key if isinstance(idempotency_key, str) else "", payload, "workspace", build)
 
-    path = directory / WORKSPACE_STATE_FILE_NAME
-    temporary = directory / f".{WORKSPACE_STATE_FILE_NAME}.{uuid.uuid4().hex}.tmp"
-    try:
-        temporary.write_text(encoded, encoding="utf-8")
-        temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return {
-        "ok": True,
-        "mediaId": media_id,
-        "filename": WORKSPACE_STATE_FILE_NAME,
-        "manualAnnotationCount": len(manual_annotations),
-        "manualBaselineCount": len(manual_baselines),
-    }
+
+@app.get("/api/track/deletion-preview/{media_id}/{object_id}")
+@source_write
+def preview_annotation_deletion(media_id: str, object_id: int, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+    directory = media_dir(media_id)
+    if object_id <= 0:
+        raise HTTPException(422, "objectId 必须大于 0")
+    if not directory.is_dir() or not find_video(directory):
+        raise HTTPException(404, "素材不存在")
+    if tracking_is_busy():
+        raise HTTPException(409, "AI Tracking 正在运行，请等待完成再删除")
+    return annotation_state.deletion_preview(directory, object_id)
+
+
+@app.post("/api/track/feedback/{media_id}")
+@source_write
+def save_tracking_feedback(media_id: str, payload: dict[str, Any], user: dict[str, Any] = Depends(current_user), idempotency_key: str = Header(default="")) -> dict[str, Any]:
+    directory = media_dir(media_id)
+    if not directory.is_dir() or not find_video(directory):
+        raise HTTPException(404, "素材不存在")
+    if tracking_is_busy():
+        raise HTTPException(409, "AI Tracking 正在运行，请等待完成再确认")
+    return annotation_state.write_state(directory, media_id, int(user["uid"]), idempotency_key if isinstance(idempotency_key, str) else "", payload, "feedback", lambda previous: annotation_state.feedback_state(previous, directory, payload, int(user["uid"])))
 
 
 # ---------------------------- tracking ----------------------------
@@ -613,11 +654,19 @@ def _effective_track_frames(start_frame: int, total_frames: int, requested_frame
     return min(max(1, int(requested_frames)), TRACK_FRAMES, remaining) if remaining else 0
 
 
+def _require_pause_resolved(workspace: dict[str, Any], frame: int) -> None:
+    unresolved = [item for item in workspace.get("pausedAnomalies", []) if not annotation_state.is_deleted(workspace, frame, int(item.get("object_id", item.get("objectId", 0))))]
+    context = workspace.get("lastPausedContext") or {}
+    if unresolved and context.get("frameIndex") == frame:
+        raise HTTPException(409, "请逐个明确确认本帧异常或修正框后继续，AI Tracking 不会自动接受异常")
+
+
 @source_write
 def _run_tracking_task(task_id: str, req: TrackRequest, video: Path, seed_file: Path, output_file: Path) -> None:
     _set_task(task_id, status="running", message="SAM3 tracking running")
     try:
-        result = track_video(str(video), str(seed_file), str(output_file), max_frames=req.maxFrames, bbox_mode="pixel", start_frame=req.startFrame)
+        workspace = annotation_state.read_state(video.parent)
+        result = track_video(str(video), str(seed_file), str(output_file), max_frames=req.maxFrames, bbox_mode="pixel", start_frame=req.startFrame, normal_feedback=workspace.get("normalMotionSamples", []))
         anomaly_paused = result.get("anomaly_paused")
         if anomaly_paused:
             _set_task(
@@ -631,6 +680,7 @@ def _run_tracking_task(task_id: str, req: TrackRequest, video: Path, seed_file: 
                 processedFrames=result.get("processedFrames", 0),
                 lastProcessedFrame=result.get("lastProcessedFrame"),
                 reachedVideoEnd=result.get("reachedVideoEnd", False),
+                warningSummary=result.get("warningSummary", []),
             )
         else:
             _set_task(
@@ -640,6 +690,7 @@ def _run_tracking_task(task_id: str, req: TrackRequest, video: Path, seed_file: 
                 processedFrames=result.get("processedFrames", 0),
                 lastProcessedFrame=result.get("lastProcessedFrame"),
                 reachedVideoEnd=result.get("reachedVideoEnd", False),
+                warningSummary=result.get("warningSummary", []),
             )
     except Exception as exc:
         import traceback
@@ -672,6 +723,7 @@ def rewind_tracking(req: dict[str, Any], user: dict[str, Any] = Depends(current_
         raise HTTPException(400, "mediaId/startFrame 无效")
 
     directory = media_dir(media_id)
+    _require_pause_resolved(annotation_state.read_state(directory), start_frame)
     video = find_video(directory)
     if not video:
         raise HTTPException(404, "视频文件不存在，请重新上传")
@@ -728,6 +780,10 @@ def start_tracking(req: TrackRequest, user: dict[str, Any] = Depends(current_use
 
     req.annotations = normalized_request_annotations
     directory = media_dir(req.mediaId)
+    workspace = annotation_state.read_state(directory)
+    if any(annotation_state.is_deleted(workspace, req.startFrame, ann["object_id"]) for ann in req.annotations):
+        raise HTTPException(409, "当前 seed 包含已删除的对象，请重新读取工作区")
+    _require_pause_resolved(workspace, req.startFrame)
     video = find_video(directory)
     if not video:
         raise HTTPException(404, "视频文件不存在，请重新上传")
@@ -782,7 +838,8 @@ def scan_anomalies(req: AnomalyScanRequest, user: dict[str, Any] = Depends(curre
     fps = cap_meta["fps"]
 
     tracker_file = directory / RESULT_FILE_NAME
-    rows = _read_tracker_jsonl(tracker_file) if tracker_file.is_file() else []
+    rows = annotation_state.read_rows(directory)
+    workspace = annotation_state.read_state(directory)
 
     latest_frame = max(
         (int(row.get("source_frame_index", row.get("frame_index", 0))) for row in rows),
@@ -795,6 +852,7 @@ def scan_anomalies(req: AnomalyScanRequest, user: dict[str, Any] = Depends(curre
         frame_width=width,
         frame_height=height,
         manual_baselines=manual_baselines,
+        normal_feedback=workspace.get("normalMotionSamples", []),
     )
     all_frames: list[AnomalyFrameOut] = []
     summary: dict[str, int] = {"anomaly": 0, "warning": 0, "disappeared": 0}
@@ -805,7 +863,8 @@ def scan_anomalies(req: AnomalyScanRequest, user: dict[str, Any] = Depends(curre
         frame_objs: dict[int, list[float]] = {}
         for obj in row.get("objects", []):
             frame_objs[int(obj["object_id"])] = list(obj["bbox"])
-        report = detector.push(fi, frame_objs)
+        ignored_ids = {oid for oid in frame_objs if annotation_state.is_deleted(workspace, fi, oid)}
+        report = detector.push(fi, frame_objs, ignored_object_ids=ignored_ids)
 
         for af in report.frames:
             all_frames.append(AnomalyFrameOut(
@@ -893,7 +952,9 @@ def tracking_result(media_id: str, frameIndex: int | None = Query(default=None),
     file = directory / RESULT_FILE_NAME
     if not file.is_file():
         raise HTTPException(404, f"{RESULT_FILE_NAME} 尚未生成")
-    rows = _read_tracker_jsonl(file)
+    rows = annotation_state.read_rows(directory)
+    workspace = annotation_state.read_state(directory)
+    rows = [{**row, "objects": [obj for obj in row.get("objects", []) if not annotation_state.is_deleted(workspace, int(row.get("source_frame_index", row.get("frame_index", 0))), int(obj.get("object_id", obj.get("objectId", 0))))]} for row in rows]
     meta = {}
     meta_file = directory / "media.json"
     if meta_file.is_file():
@@ -912,11 +973,18 @@ def tracking_result(media_id: str, frameIndex: int | None = Query(default=None),
 
 
 @app.get("/api/track/result-file/{media_id}")
-def tracking_result_file(media_id: str, user: dict[str, Any] = Depends(current_user)) -> FileResponse:
-    file = media_dir(media_id) / RESULT_FILE_NAME
+def tracking_result_file(media_id: str, user: dict[str, Any] = Depends(current_user)) -> Response:
+    directory = media_dir(media_id)
+    file = directory / RESULT_FILE_NAME
     if not file.is_file():
         raise HTTPException(404, f"{RESULT_FILE_NAME} 尚未生成")
-    return FileResponse(file, media_type="application/x-ndjson", filename=RESULT_FILE_NAME, content_disposition_type="inline")
+    workspace = annotation_state.read_state(directory)
+    rows = annotation_state.read_rows(directory)
+    for row in rows:
+        fi = int(row.get("source_frame_index", row.get("frame_index", 0)))
+        row["objects"] = [obj for obj in row.get("objects", []) if not annotation_state.is_deleted(workspace, fi, int(obj.get("object_id", obj.get("objectId", 0))))]
+        row["anomalies"] = [obj for obj in row.get("anomalies", []) if not annotation_state.is_deleted(workspace, fi, int(obj.get("object_id", obj.get("objectId", 0))))]
+    return Response("\n".join(json.dumps(row, ensure_ascii=False) for row in rows), media_type="application/x-ndjson", headers={"Content-Disposition": f'inline; filename="{RESULT_FILE_NAME}"'})
 
 
 @app.get("/api/track/media")

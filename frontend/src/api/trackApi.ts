@@ -15,7 +15,10 @@ const jsonRequest = async <T>(path: string, init: RequestInit = {}): Promise<T> 
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {
     if (res.status === 401) notifyAuthExpired()
-    throw new Error((data as any)?.message || (data as any)?.detail || `请求失败 (${res.status})`)
+    const detail = (data as any)?.message || (data as any)?.detail
+    const error = new Error(typeof detail === 'string' ? detail : detail?.message || `请求失败 (${res.status})`) as Error & { status: number }
+    error.status = res.status
+    throw error
   }
   return data as T
 }, init.signal)
@@ -71,6 +74,53 @@ export interface TrackStatusResponse {
   processedFrames?: number
   lastProcessedFrame?: number
   reachedVideoEnd?: boolean
+  warningSummary?: TrackingWarningSummary[]
+}
+
+export interface TrackingWarningSummary {
+  objectId: number
+  reason: string
+  count: number
+  firstFrame: number
+  lastFrame: number
+  calibrated: boolean
+}
+
+export interface NormalMotionSample {
+  objectId: number
+  frameIndex: number
+  reason: 'motion'
+  decision: 'normal'
+  calibrate: boolean
+  features: { motionNormalized: number }
+}
+
+export interface ObjectDeletionSummary {
+  objectId: number
+  name: string
+  frameCount: number
+  manualCount: number
+  aiCount: number
+  firstFrame: number | null
+  lastFrame: number | null
+  totalCount: number
+}
+
+export interface TrackingFeedbackInput {
+  expectedRevision: number
+  objectId: number
+  frameIndex: number
+  decision: 'normal' | 'corrected' | 'reset'
+  calibrate: boolean
+}
+
+export interface TrackingFeedbackResponse {
+  ok: boolean
+  mediaId: string
+  revision: number
+  normalMotionSamples: NormalMotionSample[]
+  pausedAnomalies: unknown[]
+  lastPausedContext: { mediaId: string; frameIndex: number } | null
 }
 
 export interface TrackResultFile {
@@ -102,6 +152,8 @@ export interface TrackWorkspaceState {
   mediaId: string
   frontendMediaId?: string
   updatedAt?: string
+  revision?: number
+  expectedRevision?: number
   currentFrame?: number
   manualAnnotations?: unknown[]
   manualBaselines?: Array<{
@@ -112,6 +164,9 @@ export interface TrackWorkspaceState {
     bbox: [number, number, number, number]
   }>
   deletedTrackingIds?: string[]
+  deletedObjectIds?: number[]
+  deletedFrameObjects?: Array<{ objectId: number; frameIndex: number }>
+  normalMotionSamples?: NormalMotionSample[]
   anomalyFrames?: Array<{ frame_index: number; level: string; reasons: string[] }>
   pausedAnomalies?: unknown[]
   lastPausedContext?: { mediaId: string; frameIndex: number } | null
@@ -214,16 +269,28 @@ export const trackApi = {
     return jsonRequest<TrackWorkspaceState>(`/track/workspace/${encodeURIComponent(mediaId)}`)
   },
 
-  async saveWorkspaceState(mediaId: string, state: Omit<TrackWorkspaceState, 'exists' | 'mediaId'>) {
+  async saveWorkspaceState(mediaId: string, state: Omit<TrackWorkspaceState, 'exists' | 'mediaId'>, requestKey?: string) {
     return jsonRequest<{
       ok: boolean
       mediaId: string
       filename: string
       manualAnnotationCount: number
       manualBaselineCount: number
+      revision: number
     }>(`/track/workspace/${encodeURIComponent(mediaId)}`, {
       method: 'PUT',
+      headers: requestKey ? { 'Idempotency-Key': requestKey } : {},
       body: JSON.stringify(state),
+    })
+  },
+
+  async getObjectDeletionSummary(mediaId: string, objectId: number) {
+    return jsonRequest<ObjectDeletionSummary>(`/track/deletion-preview/${encodeURIComponent(mediaId)}/${objectId}`)
+  },
+
+  async submitFeedback(mediaId: string, input: TrackingFeedbackInput, requestKey: string) {
+    return jsonRequest<TrackingFeedbackResponse>(`/track/feedback/${encodeURIComponent(mediaId)}`, {
+      method: 'POST', headers: { 'Idempotency-Key': requestKey }, body: JSON.stringify(input),
     })
   },
 

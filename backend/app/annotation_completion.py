@@ -11,6 +11,7 @@ import uuid
 from contextlib import closing
 from . import review_workflow as w
 from .db import connect
+from .annotation_state import is_deleted
 
 
 def integer(value, label):
@@ -37,6 +38,9 @@ def source(directory, uid, info):
     manifest = {
         "manualAnnotations": workspace.get("manualAnnotations", []),
         "deletedTrackingIds": workspace.get("deletedTrackingIds", []),
+        "deletedObjectIds": workspace.get("deletedObjectIds", []),
+        "deletedFrameObjects": workspace.get("deletedFrameObjects", []),
+        "deletedAnnotationFrames": workspace.get("deletedAnnotationFrames", []),
         "updatedBy": uid,
         "trackingHash": hashlib.sha256(raw.encode()).hexdigest(),
         "media": info,
@@ -55,7 +59,6 @@ def source(directory, uid, info):
                 else data.get("frames", data.get("results", [data]))
             )
         frames = {}
-        deleted = set(map(str, manifest["deletedTrackingIds"]))
         for row in rows:
             fi = integer(
                 row.get(
@@ -74,7 +77,7 @@ def source(directory, uid, info):
                 )
                 if oid == 0 or oid in objects:
                     raise ValueError("Tracking 对象 ID 重复或无效")
-                if str(oid) in deleted or f"ai-{fi}-{oid}" in deleted:
+                if is_deleted(workspace, fi, oid):
                     continue
                 objects[oid] = make_object(obj, oid, obj.get("bbox"), info)
             frames[fi] = objects
@@ -87,6 +90,9 @@ def source(directory, uid, info):
             if fi >= info["frameCount"] or oid == 0 or (fi, oid) in seen:
                 raise ValueError("人工对象 ID 重复或帧号越界")
             seen.add((fi, oid))
+            if is_deleted(workspace, fi, oid):
+                frames.setdefault(fi, {})
+                continue
             box = obj.get("bbox")
             if not isinstance(box, dict):
                 raise ValueError("送审仅支持框，点标注请先转换为框")
@@ -98,6 +104,15 @@ def source(directory, uid, info):
                 y + box["height"] * info["height"] / 100,
             ]
             frames.setdefault(fi, {})[oid] = make_object(obj, oid, b, info)
+        for fi in workspace.get("deletedAnnotationFrames", []):
+            if integer(fi, "已删除标注帧号") >= info["frameCount"]:
+                raise ValueError("已删除标注帧号越界")
+            frames.setdefault(fi, {})
+        for deleted in workspace.get("deletedFrameObjects", []):
+            fi = integer(deleted.get("frameIndex"), "单帧删除帧号")
+            if fi >= info["frameCount"]:
+                raise ValueError("单帧删除帧号越界")
+            frames.setdefault(fi, {})
         return w.digest(manifest), frames
     except (ValueError, TypeError, KeyError, AttributeError) as e:
         raise w.ReviewError("INVALID_SOURCE", f"标注来源格式无效：{e}", 422) from e
