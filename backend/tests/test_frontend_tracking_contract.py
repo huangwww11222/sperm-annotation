@@ -69,24 +69,20 @@ def test_loading_backend_annotation_folder_reuses_media_id_and_switches_existing
     assert "sourceVideoName: string" in api
 
 
-def test_media_list_close_never_deletes_backend_storage() -> None:
+def test_media_deletion_requires_confirmation_and_retains_legacy_identity() -> None:
     store = (ROOT / "frontend/src/stores/workspace.ts").read_text(encoding="utf-8")
     page = (ROOT / "frontend/src/pages/AnnotatePage.vue").read_text(encoding="utf-8")
-    track_api = (ROOT / "frontend/src/api/trackApi.ts").read_text(encoding="utf-8")
-    close_block = store[store.index("const closeMedia"):store.index("const toastMessage")]
-
-    assert "trackApi.deleteMedia" not in close_block
-    # Closing still preserves data; deletion is a separate, confirmed action.
-    assert "async deleteMedia" in track_api
-    assert "deleteMedia(media.id)" in page
     delete_block = store[store.index("const deleteMedia"):store.index("// Switching assets")]
-    assert "window.confirm" in delete_block
-    assert "delete annotationsByMedia" not in close_block
-    assert "closedMediaFrontendIds[media.serverMediaId] = media.id" in close_block
+    assert "closeMedia" not in store
+    assert "asset-close" not in page
+    assert "deleteMedia(media.id)" in page
+    assert delete_block.index("window.confirm") < delete_block.index("trackApi.deleteMedia")
+    assert delete_block.index("!result.deleted") < delete_block.index("mediaAssets.value =")
+    assert "if (media.serverMediaId)" in delete_block
+    assert "电脑原文件和已保存到服务器的标注记录会保留" in delete_block
+    # Older clients may have closed a media item under a different frontend ID.
+    # Keep that mapping readable so its saved annotations still reconnect.
     assert "closedMediaFrontendIds[serverItem.mediaId] || `server-${serverItem.mediaId}`" in store
-    assert "后端文件和标注记录均已保留" in close_block
-    assert "closeMedia(media.id)" in page
-    assert "不会删除后端文件和标注" in page
 
 
 def test_workspace_state_is_restored_before_tracking_results_and_uses_canonical_media_id() -> None:

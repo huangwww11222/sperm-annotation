@@ -79,7 +79,7 @@ try{
  check((await progress.innerText()).includes('已提交 0 / 3 帧'),'review displays video frame totals independently of current frame')
  await p.getByTestId('submit-frame').click();await p.waitForFunction(()=>document.querySelector('[data-testid="video-progress"]').textContent.includes('已提交 1 / 3'))
  check((await progress.innerText()).includes('剩余 2 帧'),'explicit frame submission updates the prominent summary')
- await p.locator('.review-details-scroll').evaluate(e=>e.scrollTop=e.scrollHeight);await p.evaluate(()=>scrollTo(0,document.body.scrollHeight));await visibleProgress('视频审查进度')
+ await p.locator('.review-object-list').evaluate(e=>e.scrollTop=e.scrollHeight);await p.evaluate(()=>scrollTo(0,document.body.scrollHeight));await visibleProgress('视频审查进度')
  check(await progress.getByRole('button',{name:'完成视频审查',exact:true}).isDisabled(),'incomplete video cannot complete from the progress card')
  await p.screenshot({path:'output/playwright/layout-review-progress.png',animations:'disabled'})
  await p.evaluate(c=>{localStorage.setItem('rare-sperm-token',c.token);localStorage.setItem('rare-sperm-auth',JSON.stringify({id:'3',name:'confirm-C'}))},c)

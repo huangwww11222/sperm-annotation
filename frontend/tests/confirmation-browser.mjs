@@ -15,7 +15,7 @@ const idle=()=>page.waitForSelector('.confirmation-page[data-busy="false"]')
 const session=async(sid=fixture.main.sid)=>{const r=await page.request.get(`${origin}/api/confirmation/sessions/${sid}`,{headers:{Authorization:`Bearer ${fixture.token}`}});assert.equal(r.status(),200);return r.json()}
 const changes=async(sid=fixture.main.sid)=>{const r=await page.request.get(`${origin}/api/confirmation/sessions/${sid}/changes`,{headers:{Authorization:`Bearer ${fixture.token}`}});assert.equal(r.status(),200);return (await r.json()).items}
 const final=async(id)=>{const r=await page.request.get(`${origin}/api/final-versions/${id}`,{headers:{Authorization:`Bearer ${fixture.token}`}});assert.equal(r.status(),200);return r.json()}
-const blur=()=>page.locator('.confirmation-flow').click({position:{x:310,y:12}})
+const blur=()=>page.getByTestId('workbench-heading').click({position:{x:310,y:12}})
 const button=(name)=>page.getByRole('button',{name,exact:true})
 const choose=async(c)=>{await page.getByTestId('choose-'+c.toLowerCase()).click();await idle()}
 const go=async(n)=>{await page.getByRole('textbox',{name:'修改项序号'}).fill(String(n));await button('前往').click();await idle()}
@@ -30,12 +30,14 @@ try{
  check(await pair.count()===2,'A/B paired crops use actual frame image')
  const box1=await pair.nth(0).getAttribute('viewBox'),box2=await pair.nth(1).getAttribute('viewBox')
  check(box1===box2,'paired crops have identical source coordinates')
+ const clips=await pair.evaluateAll(svgs=>svgs.map(svg=>{const group=svg.querySelector('image')?.closest('[clip-path]'),id=group?.getAttribute('clip-path')?.match(/^url\(#(.+)\)$/)?.[1],clip=id?document.getElementById(id):null,rect=clip?.querySelector('rect');return {id,local:!!clip&&svg.contains(clip),bounds:rect?['x','y','width','height'].map(key=>Number(rect.getAttribute(key))):null,view:svg.getAttribute('viewBox').split(' ').map(Number)}}))
+ check(new Set(clips.map(c=>c.id)).size===2&&clips.every(c=>c.local&&JSON.stringify(c.bounds)===JSON.stringify(c.view)),'A/B images have independent crop clipping so letterbox margins cannot show outside objects')
  const full=await page.locator('[data-variant="full"]').getAttribute('viewBox')
  check(full==='0 0 800 450','full context uses original video dimensions')
  await button('叠加对比').click();check(await page.locator('.c-crops svg').getAttribute('viewBox')===box1,'overlay uses the same crop')
  await page.getByRole('slider',{name:'局部缩放'}).fill('8');check(await page.locator('.c-crops svg').getAttribute('viewBox')!==box1,'zoom changes detail crop')
  check(await page.locator('[data-variant="full"]').getAttribute('viewBox')===full,'zoom keeps full-frame context stable')
- await button('A / B 并排').click();await page.getByRole('slider').fill('5')
+ await button('A / B 对照').click();await page.getByRole('slider').fill('5')
  await page.evaluate(()=>scrollTo(0,0));await page.screenshot({path:'output/playwright/confirmation-initial.png',fullPage:true})
  await page.getByRole('textbox',{name:'搜索视频'}).fill('a');await page.keyboard.press('a')
  check((await session()).progress.decided===0,'typing A in input does not select')
@@ -54,10 +56,10 @@ try{
  check((await session()).progress.decided===0,'Cmd+Z restores pending choice')
  check((await page.getByTestId('current-item').innerText()).includes('对象 #1'),'undo returns to affected item')
  await page.getByRole('checkbox').uncheck();await choose('B')
- check((await page.getByTestId('current-item').innerText()).includes('修改项 1 / 3'),'auto-next off keeps selection')
+ check((await page.locator('.c-step-nav').innerText()).includes('修改项 1 / 3'),'auto-next off keeps selection')
  const rev=(await changes())[0].decisionRevision;await choose('B');check((await changes())[0].decisionRevision===rev,'same choice does not create extra decision')
  await page.reload();await idle();if(await button('留在上次位置').count())await button('留在上次位置').click()
- check((await page.getByTestId('current-item').innerText()).includes('修改项 1 / 3'),'resume restores server bookmark')
+ check((await page.locator('.c-step-nav').innerText()).includes('修改项 1 / 3'),'resume restores server bookmark')
  check(await page.getByRole('checkbox').isChecked()===false,'display preference persists')
  await page.getByRole('button',{name:/撤销上一次选择/}).click();await idle()
  check((await session()).progress.decided===0,'undo remains available after refresh')

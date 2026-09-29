@@ -5,12 +5,13 @@ const fixture=JSON.parse(fs.readFileSync('work/browser-fixture.json'))
 const origin=process.env.REVIEW_ORIGIN || 'http://127.0.0.1:5373'
 const browser=await chromium.launch({channel:'chrome',headless:true})
 const page=await browser.newPage({viewport:{width:1440,height:900}})
-const errors=[];page.on('pageerror',e=>errors.push(String(e)))
+const errors=[],logs=[];page.on('pageerror',e=>errors.push(String(e)));page.on('console',m=>logs.push({type:m.type(),text:m.text()}))
+const inView=loc=>loc.evaluate(e=>{const r=e.getBoundingClientRect();return r.top>=70&&r.bottom<=innerHeight&&e.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2))})
 const getFrame=async()=>{const r=await page.request.get(`${origin}/api/review/sessions/${fixture.sid}/frames/0`,{headers:{Authorization:'Bearer '+fixture.token}});return r.json()}
 let checks=0
 function check(v,m){assert(v,m);console.log('PASS',++checks,m)}
 const saved=()=>page.waitForFunction(()=>!document.querySelector('[data-testid="submit-frame"]')?.textContent.includes('处理中'))
-async function drag(dx){const r=await page.locator('[data-box="1"] rect').boundingBox();await page.mouse.move(r.x+r.width/2,r.y+r.height/2);await page.mouse.down();await page.mouse.move(r.x+r.width/2+dx,r.y+r.height/2,{steps:3});await page.mouse.up();await saved()}
+async function drag(dx){await page.locator('[data-box="1"] rect').hover();const r=await page.locator('[data-box="1"] rect').boundingBox();await page.mouse.move(r.x+r.width/2,r.y+r.height/2);await page.mouse.down();await page.mouse.move(r.x+r.width/2+dx,r.y+r.height/2,{steps:3});await page.mouse.up();await saved()}
 try {
  await page.addInitScript(({token})=>{localStorage.setItem('rare-sperm-token',token);localStorage.setItem('rare-sperm-auth',JSON.stringify({id:'2',name:'review-B'}))},fixture)
  await page.goto(origin+'/review');await page.locator(`[data-session-id="${fixture.sid}"]`).click();await page.locator('.review-drawing').waitFor();await saved()
@@ -29,9 +30,12 @@ try {
  await page.getByRole('button',{name:'快捷键 ⓘ'}).click();await page.getByRole('dialog').waitFor()
  await page.keyboard.press('Tab');check(await page.getByRole('dialog').evaluate(e=>e.contains(document.activeElement)),'help dialog traps keyboard focus')
  await page.keyboard.press('Escape');check(await page.getByRole('button',{name:'快捷键 ⓘ'}).evaluate(e=>e===document.activeElement),'dialog restores keyboard focus')
+ await page.setViewportSize({width:1180,height:760})
  await page.route('**/frames/*/draft',r=>r.abort('failed'))
  await drag(18);await page.getByRole('alert').waitFor()
  check(!(await getFrame()).hasDraft,'failed network write does not reach database')
+ check(await inView(page.getByTestId('submit-frame')),'review failed-save state keeps the primary action visible')
+ check(await inView(page.getByRole('alert').getByRole('button',{name:'重试',exact:true})),'review retry stays visible beside the affected operation')
  await page.getByRole('button',{name:'下一帧',exact:true}).click();await saved()
  check((await page.getByRole('textbox',{name:'跳转帧号'}).inputValue())==='1','save failure prevents changing frames')
  await page.getByRole('button',{name:'标注记录',exact:true}).click();await saved()
@@ -64,4 +68,4 @@ try {
  await page.waitForFunction(()=>!document.querySelector('.review-page > .review-notice'))
  check(cursorKeys.length===2&&cursorKeys[0]===cursorKeys[1],'cursor response loss retries the same key and clears warning')
  check(errors.length===0,'failure paths produce no runtime exceptions')
-} finally {await browser.close()}
+} catch(e) {await page.screenshot({path:'output/playwright/review-failure-debug.png',fullPage:true});throw e} finally {fs.writeFileSync('output/playwright/review-failure-console.json',JSON.stringify({checks,errors,logs},null,2));await browser.close()}

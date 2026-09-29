@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import SendToReview from '../components/SendToReview.vue'
+import WorkbenchHeader from '../components/WorkbenchHeader.vue'
+import WorkbenchLayout from '../components/WorkbenchLayout.vue'
 import AppIcon from '../components/AppIcon.vue'
 import AnnotationOverlay from '../components/AnnotationOverlay.vue'
 import AnnotationTrackingFeedback from '../components/AnnotationTrackingFeedback.vue'
@@ -16,7 +18,7 @@ const {
   anomalyFrames, pausedAnomalies, trackingPausedFrame, formatTime, selectTool, onStageClick, tempBbox, onBboxDown, onBboxMove, onBboxUp,
   selectObject, removeObject, renameObject, undo, redo, canUndo, canRedo, copyPreviousFrame, brightness, contrast, mediaFilterStyle, resetMediaFilter, annotatedFrameCount,
   clearSelection, openFilePicker, handleFiles, onImageLoaded, onVideoLoaded, onVideoTimeUpdate, onVideoError, seekToInputFrame, togglePlayback, onVideoEnded,
-  onTimelineClick, runAiTrack, resetAnnotationViewForMedia, seekByFrame, zoom, zoomIn, zoomOut, zoomReset, closeMedia, openAnnotationFolderPicker, handleAnnotationFolderFiles,
+  onTimelineClick, runAiTrack, resetAnnotationViewForMedia, seekByFrame, zoom, zoomIn, zoomOut, zoomReset, openAnnotationFolderPicker, handleAnnotationFolderFiles,
   deleteMedia, deletingMediaId, mediaDeleteError, nudgeSelected, cancelAnnotationGesture, frameError, retryExactFrame, saveState, saveError, persistWorkspaceState, playbackRate, pausePlayback,
   getObjectDeletionSummary, removeObjectAcrossVideo, undoVideoObjectDeletion, canUndoVideoDeletion, lastVideoObjectDeletion,
   objectDeletionBusy, objectDeletionError, objectDeletionPendingAction, retryObjectDeletion,
@@ -256,7 +258,7 @@ function keys(e:KeyboardEvent){
   if(e.key==='Escape'){e.preventDefault();if(pointerActive||pan){cancelPointer();return}if(focused.value){void toggleFocus();return}cancelPointer();hiddenBoxes.value=false;clearSelection();return}
   if(e.key.toLowerCase()==='f'&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.repeat){e.preventDefault();void toggleFocus();return}
   if(mediaBusy.value||workspaceRestoring.value)return
-  if(e.key===' '){e.preventDefault();spaceHeld.value=true;return}
+  if(e.key===' '){if((e.target as HTMLElement)?.closest('button,summary'))return;e.preventDefault();spaceHeld.value=true;return}
   if((e.ctrlKey||e.metaKey)&&!e.altKey){if(e.key.toLowerCase()==='z'){e.preventDefault();e.shiftKey?redo():undo()}else if(e.key.toLowerCase()==='y'){e.preventDefault();redo()}return}
   if(e.altKey){if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)){e.preventDefault();const step=e.shiftKey?10:1;nudgeSelected(e.key==='ArrowLeft'?-step:e.key==='ArrowRight'?step:0,e.key==='ArrowUp'?-step:e.key==='ArrowDown'?step:0)}return}
   if(e.repeat)return
@@ -294,24 +296,31 @@ onMounted(()=>{
 onUnmounted(()=>{if(deleteDialog.value?.open){deleteDialog.value.close();document.body.style.overflow=deletionPriorOverflow}if(focused.value)restorePage();observer?.disconnect();cancelPointer();pausePlayback();removeGuard?.();window.removeEventListener('keydown',keys);window.removeEventListener('keyup',keyup);window.removeEventListener('blur',blur);window.removeEventListener('beforeunload',beforeUnload)})
 </script>
 <template>
-  <section class="annotation-page" :class="{focused}" data-testid="annotation-page">
+  <section class="annotation-page workbench-page" :class="{focused}" data-testid="annotation-page">
     <input ref="fileInputRef" type="file" accept="image/*" multiple hidden @change="handleFiles(($event.target as HTMLInputElement).files,'image')" />
     <input ref="videoInputRef" type="file" accept="video/*" multiple hidden @change="handleFiles(($event.target as HTMLInputElement).files,'video')" />
     <input ref="annotationFolderInputRef" type="file" webkitdirectory directory multiple hidden @change="handleAnnotationFolderFiles(($event.target as HTMLInputElement).files)" />
-    <header v-if="!focused" class="annotation-heading"><div><span class="eyebrow">ANNOTATION STUDIO</span><h2>人工标注 <span>让每一帧都更准确</span></h2></div><div class="heading-actions"><span class="save-indicator" :class="saveState" role="status"><i />{{ saveLabel }}</span><button class="quiet-button" @click="help=true"><AppIcon name="help" :size="16" />快捷键</button><SendToReview /></div></header>
+    <WorkbenchHeader v-if="!focused" class="annotation-heading" title="人工标注" description="绘制与调整对象 · AI 辅助追踪">
+      <button class="quiet-button" @click="help=true"><AppIcon name="help" :size="16" />快捷键</button>
+    </WorkbenchHeader>
+    <section v-if="!focused" class="workbench-stage-status annotation-stage-status" aria-label="标注工作区状态" data-testid="annotation-stage-status">
+      <div class="annotation-stage-summary"><strong :title="selectedMedia?.name">{{ selectedMedia?.name || '选择素材开始标注' }}</strong><span v-if="isVideo">第 {{ currentFrame+1 }} / {{ maxFrameIndex+1 }} 帧 · {{ annotatedFrameCount }} 帧含标注</span><span v-else>本帧 {{ currentObjects.length }} 个对象</span></div>
+      <small v-if="isVideo" class="annotation-coverage-note">送审时校验全视频覆盖</small>
+      <span class="save-indicator" :class="saveState" role="status"><i />{{ saveLabel }}</span><SendToReview />
+    </section>
     <div v-if="saveError" class="error-banner" role="alert">{{ saveError }} <button class="quiet-button" @click="retrySave">重试保存</button></div>
     <div v-if="mediaDeleteError" class="error-banner" role="alert">{{ mediaDeleteError }}</div>
     <div v-if="objectDeletionError && !deletionDialogOpen" class="error-banner" role="alert">{{ objectDeletionError }} <button class="quiet-button" :disabled="objectDeletionBusy" @click="objectDeletionPendingAction?.action==='delete'?openVideoDeletion():retryObjectDeletion()">重试本次{{ objectDeletionPendingAction?.action==='undo'?'撤销':objectDeletionPendingAction?.action==='redo'?'重做':'删除' }}</button></div>
-    <div class="annotation-layout">
-      <aside class="panel asset-panel"><div class="panel-title"><span>素材库</span><span class="badge">{{ mediaAssets.length }}</span></div>
+    <WorkbenchLayout library-label="素材库" :immersive="focused">
+      <template #library><aside class="panel asset-panel"><div class="panel-title"><span>素材库</span><span class="badge">{{ mediaAssets.length }}</span></div>
         <div class="asset-actions"><button class="btn-primary" :disabled="mediaBusy" @click="openFilePicker('video')"><AppIcon name="upload" :size="15" />导入视频</button><button class="btn-secondary" :disabled="mediaBusy" @click="openFilePicker('image')">图片</button></div>
         <div class="asset-search"><input v-model="search" class="input" placeholder="查找素材…" aria-label="查找素材" /></div>
         <div class="asset-list"><div v-for="media in visibleMedia" :key="media.id" class="asset-card" :class="{selected:selectedMediaId===media.id}" role="button" :tabindex="mediaBusy?-1:0" :aria-disabled="mediaBusy" @click="!mediaBusy&&(selectedMediaId=media.id)" @keydown.enter="!mediaBusy&&(selectedMediaId=media.id)" @keydown.space.prevent.stop="!mediaBusy&&(selectedMediaId=media.id)">
-          <span class="asset-type">{{ media.type==='video'?'VID':'IMG' }}</span><div><strong :title="media.name">{{ media.name }}</strong><small>{{ media.type==='video'?`${media.frameCount || '—'} 帧 · ${media.fps?.toFixed(1) || 30} fps`:`${media.width || '—'} × ${media.height || '—'}` }}</small></div><button class="asset-close icon-button" :disabled="mediaBusy" title="关闭素材（不会删除后端文件和标注）" aria-label="关闭素材" @click.stop="closeMedia(media.id)"><AppIcon name="close" :size="13" /></button><button v-if="media.serverMediaId" class="asset-delete icon-button" :disabled="mediaBusy||workspaceRestoring" title="删除素材（从服务器删除，不能撤销）" :aria-label="`删除素材 ${media.name}`" @click.stop="deleteMedia(media.id)" @keydown.enter.stop @keydown.space.stop><AppIcon name="trash" :size="14" /></button>
+          <span class="asset-type">{{ media.type==='video'?'VID':'IMG' }}</span><div><strong :title="media.name">{{ media.name }}</strong><small>{{ media.type==='video'?`${media.frameCount || '—'} 帧 · ${media.fps?.toFixed(1) || 30} fps`:`${media.width || '—'} × ${media.height || '—'}` }}</small></div><button class="asset-delete icon-button" :disabled="mediaBusy||workspaceRestoring" :title="media.serverMediaId?'删除素材（从服务器删除，不能撤销）':'删除素材（清除本机工作区内容，保留电脑原文件）'" :aria-label="`删除素材 ${media.name}`" @click.stop="deleteMedia(media.id)" @keydown.enter.stop @keydown.space.stop><AppIcon name="trash" :size="14" /></button>
         </div><p v-if="!visibleMedia.length" class="sidebar-empty">{{ search?'没有匹配素材':'导入视频或图片开始标注' }}</p></div>
         <button class="asset-import quiet-button" :disabled="mediaBusy" @click="openAnnotationFolderPicker"><AppIcon name="folder" :size="16" />加载标注</button>
-      </aside>
-      <section class="panel annotation-workbench">
+      </aside></template>
+      <template #canvas><section class="panel annotation-workbench">
         <div class="workbench-title"><div><strong :title="selectedMedia?.name">{{ selectedMedia?.name || '开始一个新的标注' }}</strong><span>{{ selectedMedia?.width || '—' }} × {{ selectedMedia?.height || '—' }}<template v-if="isVideo"> · {{ videoFps.toFixed(1) }} fps</template></span></div><div class="workbench-actions"><template v-if="focused"><span class="save-indicator" :class="saveState" role="status"><i />{{ saveLabel }}</span><button class="quiet-button" :disabled="editingBlocked||hasPausedTracking||trackingFeedbackPending||!!objectDeletionPendingAction||!isVideo||!currentObjects.some(o=>o.bbox)" @click="runAiTrack">{{ isAiBusy?'正在追踪…':'AI Tracking' }}</button><UserGuide page="/annotate" /><button class="quiet-button" @click="help=true" aria-label="快捷键"><AppIcon name="help" :size="16" /></button><SendToReview /></template><button ref="focusButton" class="quiet-button" :aria-pressed="focused" :title="focused?'退出专注模式 (F / Esc)':'专注模式 (F)'" @click="toggleFocus"><AppIcon name="fit" :size="16" />{{ focused?'退出专注':'专注' }}<kbd v-if="focused">Esc</kbd></button></div></div>
         <div class="annotation-toolbar" aria-label="标注工具">
           <div class="tool-group"><button v-for="tool in ([['select','cursor','选择','V'],['bbox','box','画框','B'],['point','point','标点','P']] as const)" :key="tool[0]" class="tool-btn" :class="{active:activeTool===tool[0]}" :aria-pressed="activeTool===tool[0]" :disabled="editingBlocked" :title="`${tool[2]} (${tool[3]})`" @click="selectTool(tool[0])"><AppIcon :name="tool[1]" :size="16" />{{ tool[2] }}<kbd>{{ tool[3] }}</kbd></button></div>
@@ -345,8 +354,15 @@ onUnmounted(()=>{if(deleteDialog.value?.open){deleteDialog.value.close();documen
           <div class="timeline-track" role="slider" aria-label="视频时间轴" tabindex="0" :aria-valuenow="currentFrame+1" :aria-valuemin="1" :aria-valuemax="maxFrameIndex+1" @click="onTimelineClick"><i class="timeline-base" /><i class="timeline-progress" :style="{width:`${maxFrameIndex?currentFrame/maxFrameIndex*100:0}%`}"/><i v-for="f in markers" :key="f" class="timeline-marker" :style="{left:`${maxFrameIndex?f/maxFrameIndex*100:0}%`}"/><i v-for="a in anomalyFrames" :key="a.frame_index" class="timeline-anomaly" :title="`第 ${a.frame_index+1} 帧：${a.reasons.join(' · ')}`" :style="{left:`${maxFrameIndex?a.frame_index/maxFrameIndex*100:0}%`}"/><i class="timeline-cursor" :style="{left:`${maxFrameIndex?currentFrame/maxFrameIndex*100:0}%`}"/></div><div class="timeline-caption"><span>{{ formatTime(currentTime) }} / {{ formatTime(videoDuration) }}</span><span>{{ annotatedFrameCount }} 帧含标注 <i />绿色为已有标注</span></div>
         </div>
         <footer class="annotation-status"><span :title="statusMessage">{{ statusMessage }}</span><span v-if="mousePixel">X {{ mousePixel.x }} · Y {{ mousePixel.y }} px</span><span v-else>原图坐标 · 显示增强不影响标注</span></footer>
-      </section>
-      <aside class="annotation-inspector">
+      </section></template>
+      <template #inspector><aside class="annotation-inspector">
+        <section class="panel ai-panel">
+          <div class="ai-heading"><AppIcon name="spark" :size="18"/><strong>AI 辅助追踪</strong><span class="ai-state">{{ isAiBusy?'追踪中':hasPausedTracking?'待人工核对':'就绪' }}</span></div>
+          <p>{{ hasPausedTracking?'先核对画布下的暂停对象，明确确认后继续。':'以当前帧为起点，自动追踪已有目标。' }}</p>
+          <button class="btn-primary" :disabled="editingBlocked||hasPausedTracking||trackingFeedbackPending||!!objectDeletionPendingAction||!isVideo||!currentObjects.some(o=>o.bbox)" @click="runAiTrack">{{ isAiBusy?'正在追踪…':'AI Tracking' }}</button>
+          <div v-if="trackingCalibrationSummary.length" class="tracking-calibration"><strong>已记录的正常运动 · 异常检测持续开启</strong><div v-for="item in trackingCalibrationSummary" :key="item.objectId"><span>#{{ item.objectId }} · {{ item.sampleCount }} 次正常运动确认</span><button class="quiet-button" :disabled="feedbackBlocked||trackingFeedbackPending" @click="resetTrackingCalibration(item.objectId)">恢复默认判断</button></div></div>
+          <div v-if="trackingFeedbackError && trackingFeedbackPendingAction?.decision==='reset'" class="tracking-feedback-error" role="alert">{{ trackingFeedbackError }}<button class="quiet-button" :disabled="trackingFeedbackBusy" @click="retryTrackingAnomalyFeedback">重试恢复默认判断</button></div>
+        </section>
         <section class="panel object-panel" aria-label="当前帧对象">
           <div class="panel-title"><span>当前帧对象 <span class="badge">{{ currentObjects.length }}</span></span><label class="labels-toggle"><input v-model="labels" type="checkbox" />名称</label></div>
           <div v-if="currentObjects.length>8" class="object-search"><input v-model="objectSearch" class="input" placeholder="查找名称或对象 ID…" aria-label="查找对象" /></div>
@@ -359,7 +375,7 @@ onUnmounted(()=>{if(deleteDialog.value?.open){deleteDialog.value.close();documen
               <div class="selection-context"><strong>操作 #{{ selectedObject.objectId }}</strong><span>{{ selectedObject.source==='ai'?'AI 追踪':'人工标注' }}{{ selectedObject.confidence?` · ${Math.round(selectedObject.confidence*100)}%`:'' }}</span></div>
               <div v-if="isVideo" class="object-coverage">有标注 {{ selectedObjectCoverage }} / {{ maxFrameIndex+1 }} 帧 · ID 在各帧保持不变</div>
               <div class="object-name-edit"><input v-model="objectNameInput" class="input" aria-label="对象名称" placeholder="例如 rare sperm" :disabled="editingBlocked||trackingFeedbackPending||!!objectDeletionPendingAction" /><button class="btn-secondary" :disabled="editingBlocked||trackingFeedbackPending||!!objectDeletionPendingAction" @click="renameObject">改名</button></div>
-              <div v-if="selectedObject.bbox" class="object-measure"><span>位置 {{ Math.round(selectedObject.bbox.x*(selectedMedia?.width||0)/100) }}, {{ Math.round(selectedObject.bbox.y*(selectedMedia?.height||0)/100) }}</span><span>{{ (selectedObject.bbox.width*(selectedMedia?.width||0)/100).toFixed(1) }} × {{ (selectedObject.bbox.height*(selectedMedia?.height||0)/100).toFixed(1) }} px</span></div>
+              <details v-if="selectedObject.bbox" class="annotation-object-details" :key="selectedObject.id"><summary>位置与尺寸</summary><div class="object-measure"><span>位置 {{ Math.round(selectedObject.bbox.x*(selectedMedia?.width||0)/100) }}, {{ Math.round(selectedObject.bbox.y*(selectedMedia?.height||0)/100) }}</span><span>{{ (selectedObject.bbox.width*(selectedMedia?.width||0)/100).toFixed(1) }} × {{ (selectedObject.bbox.height*(selectedMedia?.height||0)/100).toFixed(1) }} px</span></div></details>
               <div class="object-delete-actions"><button class="btn-secondary" data-testid="delete-object-frame" title="仅删当前帧 (Delete / Backspace)" :disabled="editingBlocked||trackingFeedbackPending||!!objectDeletionPendingAction" @click="deleteSelectedFrame"><AppIcon name="trash" :size="13" />删除本帧</button><button class="btn-secondary delete-video-button" data-testid="delete-object-video" :disabled="editingBlocked||!isVideo||!selectedMedia?.serverMediaId||trackingFeedbackPending||!!objectDeletionPendingAction" @click="openVideoDeletion">删除全视频…</button></div>
             </template>
             <template v-else><p class="object-no-selection">点击列表或画面中的框选中对象。</p><label class="new-object-name">新对象名称<input v-model="objectNameInput" class="input" aria-label="对象名称" placeholder="例如 rare sperm" :disabled="editingBlocked||trackingFeedbackPending||!!objectDeletionPendingAction" /></label></template>
@@ -368,15 +384,9 @@ onUnmounted(()=>{if(deleteDialog.value?.open){deleteDialog.value.close();documen
           </div>
           <div class="object-legend"><span><i class="manual"/>人工</span><span><i class="ai"/>AI</span><span><i class="chosen"/>选中</span></div>
         </section>
-        <section class="panel ai-panel">
-          <div class="ai-heading"><AppIcon name="spark" :size="18"/><strong>AI 辅助追踪</strong><span class="ai-state">{{ isAiBusy?'追踪中':hasPausedTracking?'待人工核对':'就绪' }}</span></div>
-          <p>{{ hasPausedTracking?'先核对画布下的暂停对象，明确确认后继续。':'以当前帧为起点，自动追踪已有目标。' }}</p>
-          <button class="btn-primary" :disabled="editingBlocked||hasPausedTracking||trackingFeedbackPending||!!objectDeletionPendingAction||!isVideo||!currentObjects.some(o=>o.bbox)" @click="runAiTrack">{{ isAiBusy?'正在追踪…':'AI Tracking' }}</button>
-          <div class="tracking-calibration"><strong>异常检测持续开启</strong><p v-if="!trackingCalibrationSummary.length">确认正常运动后，可减少本视频同一对象的同类暂停。</p><div v-for="item in trackingCalibrationSummary" :key="item.objectId"><span>#{{ item.objectId }} · {{ item.sampleCount }} 次正常运动确认</span><button class="quiet-button" :disabled="feedbackBlocked||trackingFeedbackPending" @click="resetTrackingCalibration(item.objectId)">恢复默认判断</button></div><p>新的持续偏离、丢失、形状突变仍需核对。</p></div>
-          <div v-if="trackingFeedbackError && trackingFeedbackPendingAction?.decision==='reset'" class="tracking-feedback-error" role="alert">{{ trackingFeedbackError }}<button class="quiet-button" :disabled="trackingFeedbackBusy" @click="retryTrackingAnomalyFeedback">重试恢复默认判断</button></div>
-        </section>
-      </aside>
-    </div>
+
+      </aside></template>
+    </WorkbenchLayout>
     <Teleport to="body">
       <dialog ref="deleteDialog" class="app-dialog object-delete-dialog" data-object-delete-dialog aria-labelledby="object-delete-title" aria-describedby="object-delete-description" @cancel.prevent="closeDeleteDialog" @close="finishDeleteDialog" @keydown.stop="deletionDialogKeys">
         <header class="object-delete-heading"><div><h2 id="object-delete-title">删除整段视频中的此对象？</h2><p id="object-delete-description">只删除「{{ deletionTarget?.mediaName }}」中稳定 ID 为 #{{ deletionTarget?.objectId }} 的标注。</p></div><button class="icon-button" aria-label="关闭删除确认" :disabled="objectDeletionBusy" @click="closeDeleteDialog"><AppIcon name="close" /></button></header>

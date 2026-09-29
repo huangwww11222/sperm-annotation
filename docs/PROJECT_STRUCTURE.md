@@ -12,12 +12,13 @@ Vue 3 + TypeScript + Vite；FastAPI + SQLite；SAM3 在后端按需加载。前�
 | 模型随仓库交付 | `model-distribution/manifest.json` 与 `LICENSE-SAM.txt`、`scripts/prepare_model.py` / `build_model_bundle.py` |
 | 仓库与容器验收 | `scripts/check_repository.py`、`scripts/docker_smoke.py`、`.github/workflows/` |
 | 路由/认证/布局/主题 | `frontend/src/router/index.ts`、`stores/auth.ts`、`layouts/AppLayout.vue`、`stores/appearance.ts`、`style.css` |
+| 三页共享工作台 | `components/WorkbenchHeader.vue` / `WorkbenchLayout.vue`、`workbench/workbench.css`；`stores/workbench.ts` 保存跨页视频列表收起偏好，布局约束见 WORKFLOW |
 | 人工标注 UI / 状态 | `pages/AnnotatePage.vue`、`stores/workspace.ts`、`annotation/annotation.css` |
 | 框绘制/坐标/缓存 | `components/AnnotationOverlay.vue`、`annotation/geometry.ts`、`annotation/frameCache.ts` |
 | 送审 | `components/SendToReview.vue`、`api/reviewWorkflowApi.ts`、`backend/app/annotation_completion.py` |
 | B 审查 | `pages/ReviewPage.vue`、`review/geometry.ts`、`review/review.css`、`backend/app/review_workflow.py` 与 `_routes.py` |
 | C 对比确认 | `pages/ConfirmationPage.vue`、`confirmation/ConfirmationImage.vue`、`confirmation/geometry.ts`、`api/confirmationApi.ts`、`backend/app/confirmation_workflow.py` 与 `_routes.py` |
-| 视频进度 | `components/WorkflowProgress.vue`，B 使用右上固定卡片变体，C 使用顶部吸顶条 |
+| 视频进度 | `components/WorkflowProgress.vue`，B/C 均使用工作区顶部横条；人工标注顶部展示帧位置、含标注帧数、保存与送审 |
 | 用户使用说明 | `components/UserGuide.vue`；`help/user-guide.md` 为页面阅读和下载的唯一内容源，`AppLayout.vue` 提供入口 |
 | 训练集导出 | `components/TrainingDatasetExport.vue`、`api/trainingExportApi.ts`、`backend/app/training_export.py` 与 `_routes.py` |
 | 记录查询 | `pages/ResultsPage.vue`、`backend/app/db.py` |

@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { createRequestId } from '../utils/browserCompat'
 import WorkflowProgress from '../components/WorkflowProgress.vue'
+import WorkbenchHeader from '../components/WorkbenchHeader.vue'
+import WorkbenchLayout from '../components/WorkbenchLayout.vue'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { reviewWorkflowApi as api, type Frame, type Session, type Mutation, type Failure } from '../api/reviewWorkflowApi'
 import { clone, equal, patches, metrics, dragBox, crop, type ReviewObject, type Box } from '../review/geometry'
@@ -20,6 +22,8 @@ watch(modal,async(value,previous)=>{
 const historical=ref<number|null>(null), jump=ref('1'), overlay=ref(false), zoom=ref(1), playing=ref(false)
 const viewport=ref<HTMLElement|null>(null), drawing=ref<SVGSVGElement|null>(null), jumpInput=ref<HTMLInputElement|null>(null)
 const history=ref<ReviewObject[][]>([])
+const objectFilter=ref<'all'|'changed'>('all'), objectQuery=ref('')
+const objectList=ref<HTMLElement|null>(null)
 const handles=['tl','tr','bl','br']
 let resizeObserver:ResizeObserver|null=null, alive=true, playbackTimer:ReturnType<typeof setTimeout>|null=null
 let pointer:{id:number;index:number;startX:number;startY:number;box:Box;before:ReviewObject[];handle:string}|null=null
@@ -28,10 +32,9 @@ let pending:{kind:'draft'|'submit'|'discard'|'finish';key:string;body:any;sessio
 let removeGuard=()=>{}
 const filteredByText=computed(()=>sessions.value.filter(s=>`${s.media.name} ${s.mediaId}`.toLowerCase().includes(query.value.toLowerCase())))
 const visible=computed(()=>filteredByText.value.filter(s=>filter.value==='all'||s.state===filter.value))
-const rows=computed(()=>working.value.map((o,i)=>({...o,a:frame.value!.baselineObjects[i].bbox,m:metrics(frame.value!.baselineObjects[i].bbox,o.bbox)})))
+const rows=computed(()=>frame.value?working.value.map((o,i)=>({...o,a:frame.value!.baselineObjects[i].bbox,m:metrics(frame.value!.baselineObjects[i].bbox,o.bbox)})):[])
 const changed=computed(()=>rows.value.filter(r=>r.m))
-const average=computed(()=>changed.value.length?changed.value.reduce((n,r)=>n+r.m!.iou,0)/changed.value.length:null)
-const maximum=computed(()=>changed.value.length?Math.max(...changed.value.map(r=>r.m!.shift)):null)
+const visibleObjects=computed(()=>rows.value.filter(r=>(objectFilter.value==='all'||!!r.m)&&String(r.objectId).padStart(3,'0').includes(objectQuery.value.trim().replace(/^#/,''))))
 const selectedRow=computed(()=>rows.value.find(r=>r.objectId===selected.value))
 const patch=computed(()=>frame.value?patches(frame.value.baselineObjects,working.value):[])
 const dirty=computed(()=>!!frame.value&&!equal(patch.value,frame.value.patch))
@@ -190,9 +193,21 @@ function downloadLocal() {
 }
 function selectObject(id:number,locate=false) {
   selected.value=id
+  if(!visibleObjects.value.some(r=>r.objectId===id)){objectFilter.value='all';objectQuery.value=''}
   nextTick(()=>{
-    document.querySelector(`[data-row="${id}"]`)?.scrollIntoView({block:'nearest',inline:'nearest'})
-    if(locate)document.querySelector(`[data-box="${id}"]`)?.scrollIntoView({block:'nearest',inline:'nearest'})
+    // Scroll only the owning workbench panes. scrollIntoView also moves the page.
+    const list=objectList.value,row=list?.querySelector<HTMLElement>(`[data-row="${id}"]`)
+    if(list&&row){
+      const pane=list.getBoundingClientRect(),item=row.getBoundingClientRect()
+      if(item.top<pane.top)list.scrollTop+=item.top-pane.top
+      else if(item.bottom>pane.bottom)list.scrollTop+=item.bottom-pane.bottom
+    }
+    const pane=viewport.value,box=pane?.querySelector<SVGElement>(`[data-box="${id}"]`)
+    if(locate&&pane&&box){
+      const bounds=pane.getBoundingClientRect(),target=box.getBoundingClientRect()
+      if(target.left<bounds.left||target.right>bounds.right)pane.scrollLeft+=(target.left+target.right-bounds.left-bounds.right)/2
+      if(target.top<bounds.top||target.bottom>bounds.bottom)pane.scrollTop+=(target.top+target.bottom-bounds.top-bounds.bottom)/2
+    }
   })
 }
 function pointerDown(e:PointerEvent,index:number,handle='move') {
@@ -250,7 +265,7 @@ function keydown(e:KeyboardEvent) {
   const mod=e.ctrlKey||e.metaKey
   if(mod&&!e.altKey&&!e.shiftKey&&(e.key.toLowerCase()==='z'||e.key==='Enter')){e.preventDefault();void(e.key==='Enter'?submit():undo());return}
   if(e.ctrlKey||e.metaKey||e.altKey)return
-  if(e.key===' '&&target.closest('button'))return
+  if(e.key===' '&&target.closest('button,summary'))return
   switch(e.key){
     case 'ArrowLeft':e.preventDefault();void navigate(fi.value-1);break
     case 'ArrowRight':e.preventDefault();void navigate(fi.value+1);break
@@ -272,12 +287,16 @@ onUnmounted(()=>{alive=false;stopPlayback();cancelGesture();removeGuard();resize
 </script>
 
 <template>
-  <section class="review-page" aria-label="审查模式">
-    <div class="review-flow"><strong>审查模式</strong><span>逐帧检查 · 修改后提交本帧</span><small>A 原始标注永久保留</small></div>
-
-    <div v-if="error" class="review-error" role="alert">{{ error }} <button @click="retry" :disabled="busy">重试</button><template v-if="pending"><button @click="downloadLocal">导出本地修改</button><button @click="modal='conflict'">处理冲突 / 重新读取</button></template></div>
+  <section class="review-page workbench-page" aria-label="审查模式">
+    <WorkbenchHeader title="审查模式" description="检查已有框，逐帧提交">
+      <button @click="modal='help';stopPlayback()" title="快捷键（?）">快捷键 ⓘ</button>
+    </WorkbenchHeader>
+    <WorkflowProgress v-if="session" label="视频审查进度" :percent="session.progress.percent" :summary="`已提交 ${session.progress.submittedFrames} / ${total} 帧 · 剩余 ${session.progress.unsubmittedFrames} 帧`" :detail="session.progress.draftFrames ? `${session.progress.draftFrames} 帧草稿待提交` : ''" :completed="session.state==='reviewed'" :state="session.state==='reviewed'?'视频已审查 · B 版本已固定':session.progress.unsubmittedFrames===0?'全部帧已提交 · 待完成视频审查':'逐帧提交后，再完成视频审查'">
+      <button class="primary" :disabled="busy||!session.permissions.canComplete||dirty||!!pending" @click="modal='complete'">完成视频审查</button>
+    </WorkflowProgress>
     <div v-if="notice" class="review-notice">{{ notice }} <button @click="bookmark">重试位置同步</button></div>
-    <div class="review-top">
+    <WorkbenchLayout library-label="审查视频列表">
+      <template #library>
       <aside class="review-sidebar panel-r">
         <div class="section-head"><h2>待审查视频列表 <small>已完成标注</small></h2><button aria-label="刷新视频列表" :disabled="busy" @click="list">↻</button></div>
         <input class="review-search" v-model="query" placeholder="搜索视频名称或 ID…" aria-label="搜索视频" />
@@ -293,8 +312,10 @@ onUnmounted(()=>{alive=false;stopPlayback();cancelGesture();removeGuard();resize
           <p v-if="!visible.length" class="empty-state">暂无符合条件的已标注任务。<br>请先由标注端完成全视频标注并送审。</p>
         </div>
       </aside>
+      </template>
+      <template #canvas>
       <main class="review-center panel-r">
-        <div class="section-head"><div><h2>{{ session?.media.name || '选择视频开始审查' }}</h2><small v-if="session">{{ session.media.width }} × {{ session.media.height }} · 第 {{ fi+1 }} / {{ total }} 帧 <span class="frame-status" data-testid="frame-state">{{ session.state==='reviewed'?'已完成 · 只读':frame?.state==='submitted'?'已提交':frame?.hasDraft?'未提交草稿':'未审查' }}</span></small></div><div class="toolbar"><label><input v-model="overlay" type="checkbox" /> 叠加原框</label><button @click="modal='help';stopPlayback()" title="快捷键（?）">快捷键 ⓘ</button></div></div>
+        <div class="section-head"><div><h2>{{ session?.media.name || '选择视频开始审查' }}</h2><small v-if="session">{{ session.media.width }} × {{ session.media.height }} · 第 {{ fi+1 }} / {{ total }} 帧 <span class="frame-status" data-testid="frame-state">{{ session.state==='reviewed'?'已完成 · 只读':frame?.state==='submitted'?'已提交':frame?.hasDraft?'未提交草稿':'未审查' }}</span></small></div><div class="toolbar"><label><input v-model="overlay" type="checkbox" /> 叠加原框</label></div></div>
         <div v-if="session?.readOnlyReason" class="review-notice">{{ session.readOnlyReason }}</div>
         <div v-else-if="isReadonly&&session?.state!=='reviewed'" class="review-notice">当前账号仅可查看。任务由已领取的审查员编辑；你也可以领取尚未分配的任务，检查自己的标注。</div>
         <div ref="viewport" class="review-viewport">
@@ -318,21 +339,47 @@ onUnmounted(()=>{alive=false;stopPlayback();cancelGesture();removeGuard();resize
         <div class="zoom-bar"><small>{{ isReadonly?'只读查看': '拖动框移动 · 拖动角点缩放' }}</small><button @click="zoom=Math.max(.1,zoom-.1)" aria-label="缩小">−</button><span>{{ Math.round(zoom*100) }}%</span><button @click="zoom=Math.min(5,zoom+.1)" aria-label="放大">+</button><button @click="fit" title="显示完整视频帧">适应窗口</button></div>
         <div class="review-controls"><button :disabled="!frame||busy||!!error" @click="togglePlay" :aria-label="playing?'暂停':'播放'">{{ playing?'Ⅱ':'▶' }}</button><span>{{ time(fi) }} / {{ time(total) }}</span><input class="timeline" type="range" aria-label="视频时间轴" min="0" :max="Math.max(0,total-1)" :value="fi" :disabled="busy||!frame" @change="navigate(Number(($event.target as HTMLInputElement).value))"/><button :disabled="busy||!frame||fi===0" @click="navigate(fi-1)" title="上一帧（←）">上一帧</button><button :disabled="busy||!frame||fi===total-1" @click="navigate(fi+1)" title="下一帧（→）">下一帧</button><label>跳转到 <input ref="jumpInput" v-model="jump" aria-label="跳转帧号" inputmode="numeric" :disabled="busy||!frame" /></label><button :disabled="busy||!frame" @click="doJump">确定</button></div>
       </main>
+      </template>
+      <template #inspector>
       <aside class="review-right">
-        <WorkflowProgress v-if="session" label="视频审查进度" variant="card" :percent="session.progress.percent" :summary="`已提交 ${session.progress.submittedFrames} / ${total} 帧 · 剩余 ${session.progress.unsubmittedFrames} 帧`" :detail="`修改帧 ${session.progress.modifiedFrames} · 修改框 ${session.progress.modifiedBoxes} · 草稿 ${session.progress.draftFrames} 帧`" :completed="session.state==='reviewed'" :state="session.state==='reviewed'?'视频已审查 · B 版本已固定':session.progress.unsubmittedFrames===0?'全部帧已提交 · 待完成视频审查':'逐帧提交后，再完成视频审查'">
-          <button class="primary" :disabled="busy||!session.permissions.canComplete||dirty||!!pending" @click="modal='complete'">完成视频审查</button>
-        </WorkflowProgress>
-        <section class="review-submit-panel panel-r"><h2>审查操作</h2><small class="muted">每帧检查后提交，空帧也不例外。</small><div class="review-submit-buttons"><button :disabled="!canEdit||!history.length" @click="undo" :title="`撤销（${primaryKey}Z）`">↶ 撤销</button><button class="primary" data-testid="submit-frame" :disabled="!canSubmit" @click="submit" :title="`提交本帧（${primaryKey}Enter）`">✓ {{ busy?'处理中…':frame?.state==='submitted'&&!dirty?'本帧已提交':'提交本帧' }}</button></div><p class="save-label" role="status">{{ saveLabel }}</p><button v-if="frame?.hasDraft||dirty" class="full" :disabled="busy" @click="modal='discard'">放弃本帧草稿</button></section>
-        <div class="review-details-scroll panel-r">
-        <section><h2>当前帧审查统计</h2><div class="stats-grid"><div><small>标注框数</small><b>{{ working.length }}</b></div><div><small>已修改框</small><b class="red">{{ changed.length }}</b></div><div><small>未修改框</small><b class="green">{{ working.length-changed.length }}</b></div><div class="wide"><small>平均 IoU（修改框）</small><b>{{ average===null?'—':average.toFixed(2) }}</b></div><div class="wide"><small>最大位置偏移</small><b>{{ maximum===null?'—':`${maximum.toFixed(1)} px` }}</b></div></div></section>
-        <section v-if="session?.resume.draftFrameIndexes.length"><h2>待提交草稿</h2><p class="muted"><button v-for="i in session.resume.draftFrameIndexes.slice(0,12)" :key="i" class="link" :disabled="busy" @click="navigate(i)">第 {{ i+1 }} 帧</button></p></section>
-        </div>
+        <section class="review-submit-panel panel-r">
+          <h2>提交本帧</h2>
+          <p class="frame-summary" data-testid="review-frame-summary">本帧 {{ working.length }} 个框 · 已调整 {{ changed.length }} 个</p>
+          <div class="review-submit-buttons">
+            <button :disabled="!canEdit||!history.length" @click="undo" :title="`撤销（${primaryKey}Z）`">↶ 撤销</button>
+            <button class="primary" data-testid="submit-frame" :disabled="!canSubmit" @click="submit" :title="`提交本帧（${primaryKey}Enter）`">✓ {{ busy?'处理中…':frame?.state==='submitted'&&!dirty?'本帧已提交':'提交本帧' }}</button>
+          </div>
+          <p class="save-label" role="status">{{ saveLabel }}</p>
+          <div v-if="error" class="review-error" role="alert">{{ error }} <div class="review-error-actions"><button @click="retry" :disabled="busy">重试</button><template v-if="pending"><button @click="downloadLocal">导出本地修改</button><button @click="modal='conflict'">处理冲突 / 重新读取</button></template></div></div>
+          <button v-if="frame?.hasDraft||dirty" class="link discard-draft" :disabled="busy" @click="modal='discard'">放弃本帧草稿</button>
+        </section>
+        <section class="review-objects panel-r" aria-label="当前帧对象">
+          <div class="section-head"><h2>当前帧对象</h2><small>{{ visibleObjects.length }} / {{ rows.length }}</small></div>
+          <div class="object-filters">
+            <input v-model="objectQuery" placeholder="搜索对象 ID" aria-label="搜索对象 ID" />
+            <div class="object-filter-options" aria-label="对象筛选"><button :class="{active:objectFilter==='all'}" :aria-pressed="objectFilter==='all'" @click="objectFilter='all'">全部</button><button :class="{active:objectFilter==='changed'}" :aria-pressed="objectFilter==='changed'" @click="objectFilter='changed'">仅已调整</button></div>
+          </div>
+          <div ref="objectList" class="review-object-list" data-testid="review-object-list">
+            <button v-for="r in visibleObjects" :key="r.annotationId" :data-row="r.objectId" class="object-row" :class="{selected:selected===r.objectId,modified:!!r.m}" :aria-pressed="selected===r.objectId" @click="selectObject(r.objectId,true)"><b>#{{ String(r.objectId).padStart(3,'0') }}</b><span>{{ r.m?'已调整':'未调整' }}</span><span class="object-locate" aria-hidden="true">⌖</span></button>
+            <p v-if="!visibleObjects.length" class="empty-state">{{ !frame?'选择视频后显示标注对象。':!rows.length?'当前帧没有标注框，检查后仍需提交本帧。':'没有符合筛选条件的对象。' }}</p>
+          </div>
+          <details v-if="selectedRow&&session" :key="selectedRow.annotationId" class="review-object-details" data-testid="review-object-details">
+            <summary>对象对比与详情 <span>#{{ String(selectedRow.objectId).padStart(3,'0') }}</span></summary>
+            <div class="compare-pair"><div v-for="side in ['A','B']" :key="side"><h3 :class="side==='A'?'version-a':'version-b'">{{ side==='A'?'原始 A':`审查 B${frame?.hasDraft||dirty?' · 草稿':''}` }}</h3><svg :viewBox="crop(selectedRow.a,selectedRow.bbox,session.media.width,session.media.height)" class="crop" :aria-label="side==='A'?'原始标注 A 局部':'审查标注 B 局部'"><image :href="imageUrl" :width="session.media.width" :height="session.media.height"/><rect v-for="b in [side==='A'?selectedRow.a:selectedRow.bbox]" :key="side" :x="b[0]" :y="b[1]" :width="b[2]-b[0]" :height="b[3]-b[1]" :stroke="side==='A'?'var(--a)':'var(--b)'" fill="none" vector-effect="non-scaling-stroke" stroke-width="2"/></svg></div></div>
+            <dl class="object-metrics">
+              <div><dt>原始 A · x / y / w / h</dt><dd>{{ coords(selectedRow.a) }} px</dd></div>
+              <div><dt>审查 B · x / y / w / h</dt><dd>{{ coords(selectedRow.bbox) }} px</dd></div>
+              <div><dt>IoU</dt><dd>{{ selectedRow.m?selectedRow.m.iou.toFixed(2):'—' }}</dd></div>
+              <div><dt>中心位移</dt><dd>{{ selectedRow.m?`${selectedRow.m.shift.toFixed(1)} px`:'—' }}</dd></div>
+              <div><dt>尺寸变化 Δw / Δh</dt><dd>{{ selectedRow.m?`${signed(selectedRow.m.dw)} / ${signed(selectedRow.m.dh)} px`:'—' }}</dd></div>
+            </dl>
+            <p class="metric-note">数值仅表示调整幅度，不代表标注质量。</p>
+          </details>
+          <details v-if="session?.resume.draftFrameIndexes.length" class="review-drafts"><summary>待提交草稿 <span>{{ session.progress.draftFrames }} 帧</span></summary><div><button v-for="i in session.resume.draftFrameIndexes" :key="i" class="link" :disabled="busy" @click="navigate(i)">第 {{ i+1 }} 帧</button></div></details>
+        </section>
       </aside>
-    </div>
-    <div class="review-bottom">
-      <section class="review-compare panel-r"><h2>当前帧对比 <small>原标注 vs 审查后</small></h2><div class="compare-pair"><div v-for="side in ['A','B']" :key="side"><h3 :class="side==='A'?'green':'red'">{{ side==='A'?'原始标注（A）':`审查后（${frame?.hasDraft||dirty?'草稿':'当前'}）` }}</h3><svg v-if="selectedRow&&session" :viewBox="crop(selectedRow.a,selectedRow.bbox,session.media.width,session.media.height)" class="crop"><image :href="imageUrl" :width="session.media.width" :height="session.media.height"/><rect v-for="b in [side==='A'?selectedRow.a:selectedRow.bbox]" :key="side" :x="b[0]" :y="b[1]" :width="b[2]-b[0]" :height="b[3]-b[1]" :stroke="side==='A'?'#22c55e':'#ef4444'" fill="none" vector-effect="non-scaling-stroke" stroke-width="2"/></svg><div v-else class="crop empty-state">请选择一个标注框</div><small>{{ selectedRow?coords(side==='A'?selectedRow.a:selectedRow.bbox):'—' }}</small></div></div></section>
-      <section class="review-table panel-r"><h2>当前帧标注对比列表 <small>共 {{ rows.length }} 个框 · 坐标 x / y / w / h（px）</small></h2><div class="table-scroll"><table><thead><tr><th>ID</th><th>原始标注 A</th><th>审查后（当前）</th><th>状态</th><th>IoU</th><th>中心位移</th><th>尺寸变化 Δw / Δh</th><th>操作</th></tr></thead><tbody><tr v-for="r in rows" :key="r.annotationId" :data-row="r.objectId" :class="{selected:selected===r.objectId,modified:!!r.m}" @click="selectObject(r.objectId,true)"><td>#{{ String(r.objectId).padStart(3,'0') }}</td><td>{{ coords(r.a) }}</td><td>{{ coords(r.bbox) }}</td><td :title="r.m?.type">{{ r.m?'已修改':'未修改' }}</td><td>{{ r.m?r.m.iou.toFixed(2):'—' }}</td><td>{{ r.m?`${r.m.shift.toFixed(1)} px`:'—' }}</td><td>{{ r.m?`${signed(r.m.dw)} / ${signed(r.m.dh)}`:'—' }}</td><td><button class="link" @click.stop="selectObject(r.objectId,true)">查看</button></td></tr><tr v-if="!rows.length"><td colspan="8" class="empty-state">{{ frame?'当前帧没有标注框，检查后仍需提交本帧。':'选择视频后显示标注对象。' }}</td></tr></tbody></table></div></section>
-    </div>
+      </template>
+    </WorkbenchLayout>
     <div v-if="modal" class="review-modal-backdrop" @click.self="modal=null"><div ref="dialog" class="review-modal" role="dialog" aria-modal="true" :aria-label="modal==='help'?'快捷键':'审查提示'">
       <button class="modal-close" aria-label="关闭" @click="modal=null">×</button>
       <template v-if="modal==='help'"><h2>快捷键</h2><table class="help-table"><tbody><tr v-for="[action,key] in [['上一帧 / 下一帧','← / →'],['上一个 / 下一个框','[ / ]'],['定位帧号输入框','F'],['跳转（帧号输入框中）','Enter'],['撤销',primaryKey+'Z'],['提交本帧',primaryKey+'Enter'],['原框叠加','O'],['播放 / 暂停','Space'],['取消拖动 / 选中 / 关闭弹窗','Esc'],['快捷键帮助','?']]" :key="action"><td>{{ action }}</td><td><kbd>{{ key }}</kbd></td></tr></tbody></table><p class="muted">方向键只浏览，不移动框。输入框内保留文字编辑；长按不重复提交。视频完成始终单独确认。</p></template>

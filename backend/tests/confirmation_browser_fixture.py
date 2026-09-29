@@ -30,20 +30,25 @@ with db.connect() as c:
     review.migrate(c)
     confirmation.migrate(c)
 result = {"token": sign_jwt({"uid": 3}), "authorToken": sign_jwt({"uid": 1})}
-for mode in ["main", "zero", "failure"]:
+for mode in ["main", "zero", "failure", "many", "portrait"]:
     mid = "confirmation-" + mode + "-" + uuid.uuid4().hex[:6]
     directory = TRACK_DATA_DIR / mid
     directory.mkdir(parents=True, exist_ok=True)
     video = directory / (mode + ".avi")
+    width, height = (450, 800) if mode == "portrait" else (800, 450)
     writer = cv2.VideoWriter(
-        str(video), cv2.VideoWriter_fourcc(*"MJPG"), 10, (800, 450)
+        str(video), cv2.VideoWriter_fourcc(*"MJPG"), 10, (width, height)
     )
     frames = []
     for fi in range(4):
         image = np.random.default_rng(42 + fi).integers(
-            80, 125, (450, 800, 3), dtype=np.uint8
+            80, 125, (height, width, 3), dtype=np.uint8
         )
         boxes = [[200, 140, 260, 200], [400, 210, 470, 290]] if fi < 3 else []
+        if mode == "many" and fi < 3:
+            boxes = [[20 + i % 7 * 100, 30 + i // 7 * 60, 65 + i % 7 * 100, 60 + i // 7 * 60] for i in range(45)]
+        if mode == "portrait":
+            boxes = [[round(value * (width / 800 if axis % 2 == 0 else height / 450)) for axis, value in enumerate(box)] for box in boxes]
         for x1, y1, x2, y2 in boxes:
             cv2.ellipse(
                 image,
@@ -83,21 +88,26 @@ for mode in ["main", "zero", "failure"]:
     writer.release()
     (directory / "media.json").write_text(
         json.dumps(
-            dict(videoName=video.name, width=800, height=450, fps=10, frameCount=4)
+            dict(videoName=video.name, width=width, height=height, fps=10, frameCount=4)
         )
     )
     m = upsert_media_revision(
-        mid, compute_file_sha256(video), video.stat().st_size, 800, 450, 10, 4
+        mid, compute_file_sha256(video), video.stat().st_size, width, height, 10, 4
     )
     a = freeze_baseline(m, mid, 1, frames)
     sid = create_review_session(a["id"])["id"]
     review.write("claim", sid, 2, uuid.uuid4().hex, {})
     for fi in range(4):
         patch = []
-        if mode != "zero" and fi < 2:
+        if mode == "many" and fi == 0:
+            patch = [dict(objectId=o["objectId"], bbox=[o["bbox"][0] + 3, o["bbox"][1] + 2, o["bbox"][2] + 3, o["bbox"][3] + 2]) for o in frames[fi]["objects"]]
+        elif mode not in ("zero", "many") and fi < 2:
             patch = [dict(objectId=1, bbox=[207.125, 146, 269.625, 207])]
             if fi == 0:
                 patch.append(dict(objectId=2, bbox=[400, 210, 481.25, 299.5]))
+        if mode == "portrait":
+            for change in patch:
+                change["bbox"] = [value * (width / 800 if axis % 2 == 0 else height / 450) for axis, value in enumerate(change["bbox"])]
         review.write(
             "submit",
             sid,
@@ -118,4 +128,4 @@ for mode in ["main", "zero", "failure"]:
     )
     result[mode] = {"sid": r["confirmationSessionId"], "mediaId": mid}
 Path("work/confirmation-browser-fixture.json").write_text(json.dumps(result))
-print("Created three isolated C tasks with 4 source frames each.")
+print("Created five isolated C tasks with 4 source frames each (including 45-change navigation and portrait context).")

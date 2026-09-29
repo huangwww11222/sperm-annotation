@@ -37,6 +37,7 @@ const createWorkspace = () => {
     ]
   }
   const mediaAssets = ref<MediaAsset[]>(loadMediaAssets())
+  // Read legacy closed-media IDs so upgrades retain their original annotation identity.
   const loadClosedMediaFrontendIds = (): Record<string, string> => {
     try {
       return JSON.parse(localStorage.getItem('closedMediaFrontendIds') || '{}')
@@ -93,32 +94,6 @@ const createWorkspace = () => {
   const zoomIn = (step = 0.1) => { if (isInteracting()) return; zoom.value = Math.min(5, +(zoom.value + step).toFixed(2)) }
   const zoomOut = (step = 0.1) => { if (isInteracting()) return; zoom.value = Math.max(0.25, +(zoom.value - step).toFixed(2)) }
   const zoomReset = () => { if (!isInteracting()) zoom.value = 1 }
-  const closeMedia = async (mediaId: string) => {
-    if (objectDeletionBusy.value || trackingFeedbackBusy.value || pendingDeletion.value || pendingFeedback.value) return
-    const media = mediaAssets.value.find((m) => m.id === mediaId)
-    if (!media) return
-
-    if (media.serverMediaId && mediaId === currentMediaId.value) {
-      try { await persistWorkspaceState(mediaId, true) }
-      catch (error) { console.warn('关闭前保存工作区状态失败：', error) }
-    }
-
-    // 素材列表中的按钮只代表关闭当前浏览器视图。后端原视频、人工标注、
-    // tracker_results.json、数据集以及数据库记录全部保留，之后可通过
-    // “加载标注”或刷新后端素材列表重新打开。
-    if (media.url.startsWith('blob:')) URL.revokeObjectURL(media.url)
-    if (media.serverMediaId) {
-      closedMediaFrontendIds[media.serverMediaId] = media.id
-      persistClosedMediaFrontendIds()
-    }
-    mediaAssets.value = mediaAssets.value.filter((m) => m.id !== mediaId)
-    delete trackingFramesByMedia.value[mediaId]
-    if (selectedMediaId.value === mediaId) {
-      selectedMediaId.value = mediaAssets.value.length ? mediaAssets.value[0].id : ''
-    }
-    statusMessage.value = `已关闭素材：${media.name}；后端文件和标注记录均已保留`
-    showToast(`已关闭「${media.name}」，后端记录未删除`)
-  }
   const toastMessage = ref('')
   let toastTimer: ReturnType<typeof setTimeout> | null = null
   const showToast = (message: string) => {
@@ -952,9 +927,12 @@ const createWorkspace = () => {
 
   const deleteMedia = async (mediaId: string) => {
     const media = mediaAssets.value.find(item => item.id === mediaId)
-    if (!media?.serverMediaId || isAiBusy.value || deletingMediaId.value || workspaceRestoring.value) return
+    if (!media || isAiBusy.value || deletingMediaId.value || workspaceRestoring.value || objectDeletionBusy.value || trackingFeedbackBusy.value || pendingDeletion.value || pendingFeedback.value) return
     mediaDeleteError.value = ''
-    if (!window.confirm(`将从共享素材库删除「${media.name}」的原视频、工作区和追踪文件，其他使用者也将无法访问。此操作不能撤销；已送审的视频不能删除。是否继续？`)) return
+    const message = media.serverMediaId
+      ? `将从共享素材库删除「${media.name}」的原视频、工作区和追踪文件，其他使用者也将无法访问。此操作不能撤销；已送审的视频不能删除。是否继续？`
+      : `将删除「${media.name}」在本机工作区中的素材和标注，不能撤销。电脑原文件和已保存到服务器的标注记录会保留。是否继续？`
+    if (!window.confirm(message)) return
     deletingMediaId.value = mediaId
     pausePlayback(); cancelAnnotationGesture()
     const pendingTimer = workspaceSaveTimers.get(mediaId)
@@ -964,14 +942,18 @@ const createWorkspace = () => {
       // Drain writes already sent before DELETE. New saves are blocked until
       // it finishes, so a delayed autosave cannot recreate the removed folder.
       await saveQueues.get(mediaId)?.catch(() => {})
-      const result = await trackApi.deleteMedia(media.serverMediaId)
-      if (!result.deleted || result.mediaId !== media.serverMediaId) throw new Error('服务器未确认删除，请刷新素材列表核对')
+      if (media.serverMediaId) {
+        const result = await trackApi.deleteMedia(media.serverMediaId)
+        if (!result.deleted || result.mediaId !== media.serverMediaId) throw new Error('服务器未确认删除，请刷新素材列表核对')
+      }
       mediaAssets.value = mediaAssets.value.filter(item => item.id !== mediaId)
       delete annotationsByMedia.value[mediaId]
       delete trackingFramesByMedia.value[mediaId]
       delete deletedTrackingIds.value[mediaId]
-      delete closedMediaFrontendIds[media.serverMediaId]
-      persistClosedMediaFrontendIds()
+      if (media.serverMediaId) {
+        delete closedMediaFrontendIds[media.serverMediaId]
+        persistClosedMediaFrontendIds()
+      }
       workspaceViews.delete(mediaId); saveTickets.delete(mediaId)
       if (media.url.startsWith('blob:')) URL.revokeObjectURL(media.url)
       frameCache.clear()
@@ -982,11 +964,11 @@ const createWorkspace = () => {
         localStorage.setItem('mediaAssets', JSON.stringify(mediaAssets.value))
         localStorage.setItem('annotationsByMedia', JSON.stringify(annotationsByMedia.value))
       } catch (error) { console.warn('[annotation.local_save_failed]', error) }
-      console.info('[annotation.media_deleted]', { mediaId: media.serverMediaId })
+      console.info('[annotation.media_deleted]', { mediaId: media.serverMediaId || media.id, scope: media.serverMediaId ? 'server' : 'local' })
       statusMessage.value = `已删除素材：${media.name}`
       showToast(statusMessage.value)
     } catch (error) {
-      console.error('[annotation.media_delete_failed]', { mediaId: media.serverMediaId, error })
+      console.error('[annotation.media_delete_failed]', { mediaId: media.serverMediaId || media.id, scope: media.serverMediaId ? 'server' : 'local', error })
       mediaDeleteError.value = error instanceof Error ? error.message : '删除失败，请重试'
       statusMessage.value = mediaDeleteError.value
     } finally {
@@ -2468,7 +2450,7 @@ const createWorkspace = () => {
   return {
     getObjectDeletionSummary, removeObjectAcrossVideo, undoVideoObjectDeletion, retryObjectDeletion, canUndoVideoDeletion, lastVideoObjectDeletion, objectDeletionBusy, objectDeletionError, objectDeletionPendingAction, confirmTrackingAnomaly, retryTrackingAnomalyFeedback, trackingFeedbackBusy, trackingFeedbackError, trackingFeedbackPending, trackingFeedbackPendingAction, trackingCalibrationSummary, resetTrackingCalibration, trackingWarningSummary,
     deleteMedia, deletingMediaId, mediaDeleteError, persistWorkspaceState, retryExactFrame, saveState, saveError, playbackRate, pausePlayback, displayObjects, editingBlocked, workspaceRestoring, frameError, loadExactFrame, nudgeSelected, cancelAnnotationGesture, canUndo, canRedo,
-    api, mediaAssets, selectedMediaId, activeTool, objectNameInput, selectedObjectId, currentFrame, currentTime, videoDuration, videoFps, frameInput, isPlaying, isAiBusy, trackingFrameCount, statusMessage, toastMessage, showToast, zoom, zoomIn, zoomOut, zoomReset, closeMedia, savedResults, loadedRemoteResultKeys, effectResults, selectedEffectId, effectTime, effectPlaying, effectVideoRef, imageRef, videoRef, exactFrameImageRef, exactFrameUrl, exactFrameLoading, videoPlaybackFallback, annotationHitRef, fileInputRef, videoInputRef, annotationFolderInputRef, effectFolderInputRef, annotationsByMedia, trackingFramesByMedia, anomalyObjectIds, anomalyFrames, pausedAnomalies, anomalyPanelVisible, trackingPausedFrame, closeAnomalyPanel, selectedMedia, isVideo, maxFrameIndex, currentMediaId, currentObjects, selectedObject, selectedEffect, formatTime, timeToFrame, frameToTime, getStagePoint, addObject, resetVideoViewToFirstFrame, ensureVideoFirstFrame, selectTool, onStageClick, tempBbox, onBboxDown, onBboxMove, onBboxUp, onObjectDropdownChange, selectObject, removeObject, renameObject, undo, redo, copyPreviousFrame, brightness, contrast, mediaFilterStyle, resetMediaFilter, annotatedFrameCount, clearSelection, openFilePicker, handleFiles, openAnnotationFolderPicker, handleAnnotationFolderFiles, onImageLoaded, onVideoLoaded, onVideoTimeUpdate, onVideoError, loadTrackingResult, seekVideo, seekToInputFrame, seekByFrame, togglePlayback, onVideoEnded, onTimelineClick, runAiSegment, runAiTrack, getMediaPixelSize, buildSam3AnnotationsJson, generateAnnotationsJson, loadSavedResults, openEffectFolderPicker, handleEffectFolder, loadEffects, onEffectTimeUpdate, toggleEffectPlayback, selectEffect, effectOverlayObjects, resetAnnotationViewForMedia, loadServerMedia
+    api, mediaAssets, selectedMediaId, activeTool, objectNameInput, selectedObjectId, currentFrame, currentTime, videoDuration, videoFps, frameInput, isPlaying, isAiBusy, trackingFrameCount, statusMessage, toastMessage, showToast, zoom, zoomIn, zoomOut, zoomReset, savedResults, loadedRemoteResultKeys, effectResults, selectedEffectId, effectTime, effectPlaying, effectVideoRef, imageRef, videoRef, exactFrameImageRef, exactFrameUrl, exactFrameLoading, videoPlaybackFallback, annotationHitRef, fileInputRef, videoInputRef, annotationFolderInputRef, effectFolderInputRef, annotationsByMedia, trackingFramesByMedia, anomalyObjectIds, anomalyFrames, pausedAnomalies, anomalyPanelVisible, trackingPausedFrame, closeAnomalyPanel, selectedMedia, isVideo, maxFrameIndex, currentMediaId, currentObjects, selectedObject, selectedEffect, formatTime, timeToFrame, frameToTime, getStagePoint, addObject, resetVideoViewToFirstFrame, ensureVideoFirstFrame, selectTool, onStageClick, tempBbox, onBboxDown, onBboxMove, onBboxUp, onObjectDropdownChange, selectObject, removeObject, renameObject, undo, redo, copyPreviousFrame, brightness, contrast, mediaFilterStyle, resetMediaFilter, annotatedFrameCount, clearSelection, openFilePicker, handleFiles, openAnnotationFolderPicker, handleAnnotationFolderFiles, onImageLoaded, onVideoLoaded, onVideoTimeUpdate, onVideoError, loadTrackingResult, seekVideo, seekToInputFrame, seekByFrame, togglePlayback, onVideoEnded, onTimelineClick, runAiSegment, runAiTrack, getMediaPixelSize, buildSam3AnnotationsJson, generateAnnotationsJson, loadSavedResults, openEffectFolderPicker, handleEffectFolder, loadEffects, onEffectTimeUpdate, toggleEffectPlayback, selectEffect, effectOverlayObjects, resetAnnotationViewForMedia, loadServerMedia
   }
 }
 

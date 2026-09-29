@@ -32,12 +32,13 @@ npm run build --prefix frontend
 | Tracking 调用/完成定位 | seed、rewind、timing、manual baseline、frontend tracking contract pytest | `annotation-tracking-ui.mjs`（14，模拟响应，无真实 GPU） |
 | Chrome 93 / HTTP、素材删除 | `test:compatibility`、`test_media_deletion.py` | `browser-compat-media.mjs`；下述旧 API 回归模式 |
 | 送审 | `test_review_completion.py` | `review-ingress-browser.mjs`（6） |
-| B 草稿/提交/恢复 | `test_review_workflow.py`、`test:review` | `review-browser.mjs`（27）、`review-failure-browser.mjs`（17） |
-| C 选择/恢复/最终版本 | `test_confirmation_workflow.py`、`test:confirmation` | `confirmation-browser.mjs`（39）、`confirmation-failure-browser.mjs`（30） |
+| B 草稿/提交/恢复 | `test_review_workflow.py`、`test:review` | `review-browser.mjs`（27）、`review-failure-browser.mjs`（19） |
+| C 选择/恢复/最终版本 | `test_confirmation_workflow.py`、`test:confirmation` | `confirmation-browser.mjs`（40）、`confirmation-failure-browser.mjs`（34） |
 | 训练导出/门禁/版本 | `test_training_export.py` | `training-export-browser.mjs`（29） |
 | 全窗口专注、视频进度 | 上述对应页面回归、构建 | `workspace-layout-browser.mjs`（49） |
+| 三页工作台一致性、紧凑对象导航 | 上述对应页面回归、构建 | `workbench-consistency-browser.mjs`（124）；包含两尺寸浅深主题、跨页收起、专注、原生折叠、对象/修改项导航与保存 |
 | 数据库查询/升级、Docker 发布 | `test_annotation_result_dedupe.py`、`test_deployment_preflight.py`、`test_docker_deployment_contract.py`、`test_model_distribution.py` | 下方容器验收；不是只运行前端构建 |
-| 核心操作优先级、用户说明 | 上述 B/C/导出回归、构建 | `workspace-priority-browser.mjs`（35） |
+| 核心操作优先级、用户说明 | 上述 B/C/导出回归、构建 | `workspace-priority-browser.mjs`（36） |
 
 括号为当前脚本检查数量，**不是每次修改自动通过的结果**。测试源位于 `backend/tests/` 与 `frontend/tests/`。
 
@@ -60,7 +61,7 @@ work/review-venv/bin/python backend/tests/annotation_ux_fixture.py
 work/review-venv/bin/python backend/tests/review_browser_fixture.py
 ```
 
-先生成 C 夹具建立固定测试用户 ID，再生成其他夹具。UX 脚本要求路径含 `/work/e2e-confirm-ux`，生成横/竖两个 60 帧真实 AVI，并**重置测试媒体工作区**。C 夹具生成 main、zero、failure 三个独立任务，B 夹具生成一个三帧任务。token 在 `work/*fixture.json`，不要输出到报告。
+先生成 C 夹具建立固定测试用户 ID，再生成其他夹具。UX 脚本要求路径含 `/work/e2e-confirm-ux`，生成横/竖两个 60 帧真实 AVI，并**重置测试媒体工作区**。C 夹具生成 main、zero、failure、many、portrait 五个独立任务；many 含 45 个真实修改项，用于分页导航，portrait 是 450×800 真实竖向视频，用于检查全幅主图比例和可见边界。B 夹具生成一个三帧任务。token 在 `work/*fixture.json`，不要输出到报告。
 
 ### 2. 启动测试服务
 
@@ -84,9 +85,11 @@ API_PROXY_TARGET=http://127.0.0.1:3301 npm run dev --prefix frontend -- --host 1
 node frontend/tests/workspace-layout-browser.mjs
 ```
 
-这个脚本同时使用 B/C/UX 夹具，检查横竖素材、纵向增益、原图比例、退出恢复、手势取消、窗口缩高、离页清理、吸顶进度、100% 与完成、零修改。它会改变 B 与 C 状态，跑其他状态测试前重新生成相应夹具。
+这个脚本同时使用 B/C/UX 夹具，检查横竖素材、纵向增益、原图比例、退出恢复、手势取消、窗口缩高、离页清理、顶部进度、100% 与完成、零修改。它会改变 B 与 C 状态，跑其他状态测试前重新生成相应夹具。
 
-`node frontend/tests/workspace-priority-browser.mjs` 同样需要 B/C/UX 夹具；检查 1366×768、1180×760 的右上进度卡片和提交可见性、C 首屏操作与完成后导出顺序、说明章节/搜索/深色主题/Markdown 原文下载，以及说明窗口中的键盘隔离、焦点循环、退出滚动恢复和章节滚动重置。它会完成 C main，运行其他 C 正常测试前需重新生成夹具。
+`node frontend/tests/workspace-priority-browser.mjs` 同样需要 B/C/UX 夹具；检查 1366×768、1180×760 的顶部进度和右上提交可见性、C 首屏操作与完成后导出顺序、说明章节/搜索/深色主题/Markdown 原文下载，以及说明窗口中的键盘隔离、焦点循环、退出滚动恢复和章节滚动重置。它会完成 C main，运行其他 C 正常测试前需重新生成夹具。
+
+`node frontend/tests/workbench-consistency-browser.mjs` 使用同一套 B/C/UX 夹具；`CONFIRMATION_ORIGIN` 可指定前端地址。检查三页在 1366×768、1180×760 及浅深主题下的共用区域、核心操作、列表独立滚动、跨页视频库收起和专注全宽、A/B 折叠详情的键盘行为、B 筛选定位与真实草稿、C 分组导航/回访、长文件名、45 项分页定位、说明隔离及零修改显式完成。C 完整帧还检查横竖源图四角与等比例显示、主图及局部图首屏大小、图上鼠标/键盘选择联动且不产生决定、未修改对象非交互、弹窗内图像读取和位置保存失败的分别重试。会写 B 草稿、消费 C main/zero，并浏览 many/portrait；后续 B/C 正常或故障脚本前必须重新生成对应夹具，不能并行重置同一批任务。
 
 其他脚本按上表选择 `node frontend/tests/<脚本>.mjs`：
 
@@ -103,7 +106,7 @@ Vite 调试脚本若需要访问 workspace，须导入浏览器实际已加载�
 
 ### Chrome 93 / HTTP 专项回归
 
-`browser-compat-media.mjs` 使用真实上传的短 AVI、送审接口和删除接口；拒绝非 `work/` 夹具路径。沿用以上 B/C/UX 夹具，推荐独立数据根 `work/e2e-confirm-ux-compat-*`。启动后端 3307；前端用 `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=hospital-test.local API_PROXY_TARGET=http://127.0.0.1:3307 npm run dev --prefix frontend -- --host 127.0.0.1 --port 5377 --strictPort`。
+`browser-compat-media.mjs` 覆盖素材列表仅保留删除、本地图片删除范围提示、取消与刷新不复活，并使用真实上传的短 AVI、送审接口和删除接口；拒绝非 `work/` 夹具路径。沿用以上 B/C/UX 夹具，推荐独立数据根 `work/e2e-confirm-ux-compat-*`。启动后端 3307；前端用 `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=hospital-test.local API_PROXY_TARGET=http://127.0.0.1:3307 npm run dev --prefix frontend -- --host 127.0.0.1 --port 5377 --strictPort`。
 
 ```bash
 # 库路径按前述 PLAYWRIGHT_MODULE 设置；COMPAT_VIDEO 可指定生成的 AVI。

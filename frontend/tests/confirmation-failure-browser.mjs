@@ -8,6 +8,7 @@ const browser=await chromium.launch({channel:'chrome',headless:true}),page=await
 if (process.env.LEGACY_BROWSER === '1') await useLegacyBrowserAPIs(page)
 const errors=[],logs=[];let checks=0
 page.on('pageerror',e=>errors.push(String(e)));page.on('console',m=>logs.push({type:m.type(),text:m.text()}))
+const inView=loc=>loc.evaluate(e=>{const r=e.getBoundingClientRect();return r.top>=70&&r.bottom<=innerHeight&&e.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2))})
 const check=(v,msg)=>{assert(v,msg);console.log('PASS',++checks,msg)}
 const idle=()=>page.waitForSelector('.confirmation-page[data-busy="false"]')
 const button=name=>page.getByRole('button',{name,exact:true})
@@ -21,11 +22,15 @@ const decisionPattern='**/api/confirmation/sessions/*/changes/*/decision'
 try{
  await page.addInitScript(({token})=>{localStorage.setItem('rare-sperm-token',token);localStorage.setItem('rare-sperm-auth',JSON.stringify({id:'3',name:'confirm-C',role:'annotator'}))},fixture)
  await page.goto(origin+'/confirm');await idle();await page.locator(`[data-session-id="${sid}"]`).click();await idle();await button('领取并开始确认').click();await idle()
+ await page.setViewportSize({width:1180,height:760})
  // A failed image must not allow choosing against a stale previous frame.
  await page.route('**/api/track/frame/*/1',route=>route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({message:'Injected image failure'})}))
  await go(3);await page.getByRole('alert').waitFor()
  check(await page.getByTestId('choose-a').isDisabled()&&(await session()).progress.decided===0,'failed frame disables choice and retains progress')
  check(await page.locator('.c-crops svg').count()===0,'stale previous image is removed')
+ check(await page.locator('.c-context svg').count()===0,'failed source frame also clears the enlarged main context image')
+ check(await inView(page.getByTestId('choose-a'))&&await inView(page.getByTestId('choose-b')),'image failure keeps disabled choices visible for context')
+ check(await inView(button('重试加载')),'image retry remains visible at compact size')
  await page.unroute('**/api/track/frame/*/1');await button('重试加载').click();await idle()
  check(await page.getByTestId('choose-a').isEnabled(),'frame retry loads actual target and re-enables choice')
  await go(1)
@@ -34,7 +39,8 @@ try{
  await page.route(decisionPattern,route=>{keys.push(route.request().headers()['idempotency-key']);return route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({message:'Injected storage unavailable',code:'STORAGE_UNAVAILABLE',requestId:'test-injected-503'})})})
  await choose('B');await page.getByRole('alert').waitFor()
  check((await session()).progress.decided===0,'failed decision does not mark item saved')
- check((await page.getByTestId('current-item').innerText()).includes('修改项 1 / 3'),'failed decision never auto-advances')
+ check(await inView(button('重试原请求'))&&await inView(page.getByTestId('choose-a')),'decision failure exposes recovery and primary controls together')
+ check((await page.locator('.c-step-nav').innerText()).includes('修改项 1 / 3'),'failed decision never auto-advances')
  check((await page.getByRole('alert').innerText()).includes('test-injected-503'),'error exposes request ID for log investigation')
  await button('审查模式').click();await idle()
  check(new URL(page.url()).pathname==='/confirm','route leave guard blocks unresolved failed decision')
@@ -42,7 +48,7 @@ try{
  await page.reload();await idle();check((await page.getByRole('alert').innerText()).includes('保存结果尚未确认'),'refresh restores unresolved request journal')
  await page.unroute(decisionPattern);await button('重试原请求').click();await idle()
  check((await session()).progress.decided===1,'retry commits restored choice')
- check((await page.getByTestId('current-item').innerText()).includes('修改项 2 / 3'),'successful retry may auto-advance')
+ check((await page.locator('.c-step-nav').innerText()).includes('修改项 2 / 3'),'successful retry may auto-advance')
  // Server committed but response vanished; replay must not generate a second event.
  let lost=true;keys=[]
  await page.route(decisionPattern,async route=>{
@@ -52,7 +58,7 @@ try{
  await choose('A');await page.getByRole('alert').waitFor()
  const before=(await changes())[1]
  check(before.decision.choice==='A','lost response may still have a committed server choice')
- check((await page.getByTestId('current-item').innerText()).includes('修改项 2 / 3'),'uncertain response stays on affected item')
+ check((await page.locator('.c-step-nav').innerText()).includes('修改项 2 / 3'),'uncertain response stays on affected item')
  await button('重试原请求').click();await idle()
  const after=(await changes())[1]
  check(keys[0]===keys[1]&&before.decision.eventId===after.decision.eventId&&before.decisionRevision===after.decisionRevision,'lost-response replay returns identical event and revision')

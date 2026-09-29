@@ -17,7 +17,7 @@ const row = () => page.locator('.asset-card').filter({ hasText: 'compat-upload.a
 async function loaded() {
   await page.locator('img.exact-media').waitFor()
   await page.getByRole('button', { name: '完成标注并送审', exact: true }).waitFor()
-  await page.waitForFunction(() => !document.querySelector('.annotation-heading .btn-primary')?.disabled)
+  await page.waitForFunction(() => !document.querySelector('.annotation-stage-status .btn-primary')?.disabled)
 }
 async function deleteClick(accept = true) {
   page.once('dialog', async dialog => { check(dialog.message().includes('不能撤销'), 'deletion explains its effect'); await (accept ? dialog.accept() : dialog.dismiss()) })
@@ -31,6 +31,21 @@ try {
   }, fixture)
   await page.goto(origin + '/annotate')
   check(await page.evaluate(() => !isSecureContext && typeof crypto.randomUUID === 'undefined' && typeof AbortSignal.timeout === 'undefined'), 'actual insecure HTTP context lacks both modern APIs')
+  const localRow = page.locator('.asset-card').filter({ hasText: 'microfluidic-sample.svg' })
+  await localRow.waitFor()
+  check(await page.getByRole('button', { name: /关闭素材/ }).count() === 0, 'media list exposes deletion only')
+  const localDelete = localRow.getByRole('button', { name: '删除素材 microfluidic-sample.svg', exact: true })
+  page.once('dialog', async d => { check(d.message().includes('电脑原文件和已保存到服务器的标注记录会保留'), 'local deletion explains its distinct scope'); await d.dismiss() })
+  await localDelete.click()
+  check(await localRow.count() === 1 && deletes.length === 0, 'cancel preserves local image without server deletion')
+  page.once('dialog', d => d.accept())
+  await localDelete.click()
+  await localRow.waitFor({ state: 'detached' })
+  check(deletes.length === 0, 'local image deletion sends no server DELETE')
+  check(await page.evaluate(() => !JSON.parse(localStorage.getItem('annotationsByMedia') || '{}')['img-demo-001']), 'local image annotations are removed')
+  await page.reload()
+  await page.locator('.asset-card').filter({ hasText: 'review-fixture.avi' }).waitFor()
+  check(await localRow.count() === 0, 'deleted local image stays removed after refresh')
   const upload = page.waitForResponse(r => r.url().endsWith('/api/track/upload') && r.request().method() === 'POST')
   await page.locator('input[accept="video/*"]').setInputFiles({ name: 'compat-upload.avi', mimeType: 'video/x-msvideo', buffer: fs.readFileSync(videoFile) })
   const response = await upload
