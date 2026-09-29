@@ -41,7 +41,7 @@ cd sperm-annotation
 
 - [用户使用说明](frontend/src/help/user-guide.md)：操作步骤、快捷键、保存续做、常见问题；前端顶部也可阅读、搜索和下载。
 - [Docker 部署说明](docs/DOCKER_DEPLOYMENT.md)：模型配置、预构建镜像、日志、升级、备份与恢复。
-- 内网客户端支持 Chrome 93，上传抽帧和审查流程已适配 HTTP。已部署医院版本的小型离线更新见 [专项补丁](docs/DOCKER_DEPLOYMENT.md#2026-09-29-医院-chrome-93-专项离线补丁)，适用版本由脚本校验。
+- 内网客户端支持 Chrome 93，上传抽帧和审查流程已适配 HTTP。新部署直接使用当前完整版本；医院内网部署须重新构建并导出完整镜像，见 [离线部署](docs/DOCKER_DEPLOYMENT.md#6-预构建镜像与离线部署)。仅替换部署脚本不会更新旧镜像中的应用代码。
 - 查看状态：`docker compose ps`；排查：`docker compose logs --tail=100 backend frontend`。
 - 更新前先备份数据；更新代码后执行 `bash deploy.sh`，Windows 执行 `.\deploy.ps1`。
 - 仅运行 **一个 backend 实例、一个 worker**，SQLite 放在服务器本地磁盘。

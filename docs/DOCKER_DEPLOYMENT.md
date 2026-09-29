@@ -158,6 +158,16 @@ Windows：`.\deploy.ps1 -Mode gpu -Pull`。等价命令是 `docker compose pull`
 
 离线环境在联网机器 `docker save` 导出对应前后端镜像，到目标服务器 `docker load`；复制源码中的 scripts/、model-distribution/、compose.yaml、compose.gpu.yaml（需要 GPU 时）、实际 `.env` 和已准备好的完整模型，并设置 SAM3_AUTO_DOWNLOAD=false，执行 `docker compose up -d --no-build --wait`。不运行会联网拉取的 `--pull` 模式。CPU/GPU 镜像、平台和 `.env` 名称必须匹配。
 
+### 医院内网：交付最新完整版本
+
+常规交付使用同一源码版本生成的完整离线包，不要求安装者先安装旧版再打补丁。联网准备电脑更新到已修复的源码版本，构建 **linux/amd64 的 GPU 后端和前端镜像**，再导出新的 `images.tar`。同时更新包内的 Compose 配置、`scripts/`、`model-distribution/`、一键安装/部署脚本和校验清单，记录源码提交号及镜像标签/摘要。不要沿用旧包的 `images.tar` 或旧校验值；Windows 准备电脑使用 Docker 的 Linux 容器模式，无需具备目标服务器的 NVIDIA GPU，但最终 GPU 验收必须在服务器完成。
+
+医院当前使用的 `install-offline.sh` / `deploy-offline.sh` 是离线包入口，不是根目录的联网源码构建入口。更新这两个入口时，保持“本地校验 → docker load → 复用配置和模型 → 不构建、不拉取地启动 → 健康检查与日志”的流程。首次安装默认 GPU + AI；已有部署升级必须保留 `.env`、登录密钥、Compose 项目名和实际数据/模型挂载路径，不能拿新包的示例配置覆盖服务器配置。目标服务器已具备完整模型时可复用，设置 `SAM3_AUTO_DOWNLOAD=false`；首次离线安装须在包中准备完整模型。
+
+升级现有医院部署前按第 8 节备份并暂停写入，把新包解压到独立目录，再核对与原部署的数据挂载和项目名一致后执行一键更新。离线启动使用 `docker compose up -d --no-build --pull never --wait`，禁止在内网执行源码构建或拉取。保留旧镜像和备份用于恢复，更新后客户端按 Ctrl+F5，并验收上传抽帧、送审、删除后刷新、原有账号/标注恢复及真实 GPU 追踪。
+
+仓库代码推送成功不代表医院已有离线包已经更新；必须重新生成并交付上述镜像和配套文件。下面的专项补丁只作为既有旧版本的临时修复方案。
+
 ## 7. 迁移现有数据库和 Storage
 
 先停旧后端和新后端，完整备份，确认没有写入或 Tracking：
