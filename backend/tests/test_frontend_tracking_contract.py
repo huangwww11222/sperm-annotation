@@ -75,7 +75,11 @@ def test_media_list_close_never_deletes_backend_storage() -> None:
     close_block = store[store.index("const closeMedia"):store.index("const toastMessage")]
 
     assert "trackApi.deleteMedia" not in close_block
-    assert "async deleteMedia" not in track_api
+    # Closing still preserves data; deletion is a separate, confirmed action.
+    assert "async deleteMedia" in track_api
+    assert "deleteMedia(media.id)" in page
+    delete_block = store[store.index("const deleteMedia"):store.index("// Switching assets")]
+    assert "window.confirm" in delete_block
     assert "delete annotationsByMedia" not in close_block
     assert "closedMediaFrontendIds[media.serverMediaId] = media.id" in close_block
     assert "closedMediaFrontendIds[serverItem.mediaId] || `server-${serverItem.mediaId}`" in store

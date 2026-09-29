@@ -1,3 +1,4 @@
+import { useLegacyBrowserAPIs } from './legacy-browser-profile.mjs'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 const {chromium}=await import(process.env.PLAYWRIGHT_MODULE || 'playwright')
@@ -5,6 +6,7 @@ const fixture=JSON.parse(fs.readFileSync('work/browser-fixture.json'))
 const origin=process.env.REVIEW_ORIGIN || 'http://127.0.0.1:5373'
 const browser=await chromium.launch({channel:'chrome',headless:true})
 const page=await browser.newPage({viewport:{width:1600,height:1000}})
+if (process.env.LEGACY_BROWSER === '1') await useLegacyBrowserAPIs(page)
 const errors=[];page.on('pageerror',e=>errors.push(String(e)))
 try{
  await page.addInitScript(({authorToken})=>{localStorage.setItem('rare-sperm-token',authorToken);localStorage.setItem('rare-sperm-auth',JSON.stringify({id:'1',name:'review-A'}))},fixture)

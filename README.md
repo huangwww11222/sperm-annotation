@@ -41,6 +41,7 @@ cd sperm-annotation
 
 - [用户使用说明](frontend/src/help/user-guide.md)：操作步骤、快捷键、保存续做、常见问题；前端顶部也可阅读、搜索和下载。
 - [Docker 部署说明](docs/DOCKER_DEPLOYMENT.md)：模型配置、预构建镜像、日志、升级、备份与恢复。
+- 内网客户端支持 Chrome 93，上传抽帧和审查流程已适配 HTTP。已部署医院版本的小型离线更新见 [专项补丁](docs/DOCKER_DEPLOYMENT.md#2026-09-29-医院-chrome-93-专项离线补丁)，适用版本由脚本校验。
 - 查看状态：`docker compose ps`；排查：`docker compose logs --tail=100 backend frontend`。
 - 更新前先备份数据；更新代码后执行 `bash deploy.sh`，Windows 执行 `.\deploy.ps1`。
 - 仅运行 **一个 backend 实例、一个 worker**，SQLite 放在服务器本地磁盘。
@@ -53,7 +54,7 @@ compose.yaml / compose.gpu.yaml        基础服务与默认启用的 GPU 覆盖
 .env.docker.example                   可提交的配置模板
 backend/                              API、数据库、追踪、测试、Dockerfile
 frontend/                             界面、用户手册、测试、Dockerfile、Nginx
-scripts/                              模型自动安装、仓库检查和隔离容器验收
+scripts/                              模型自动安装、专项离线补丁、仓库检查和容器验收
 model-distribution/                   固定模型清单、来源与 SAM 许可
 .github/workflows/                    PR 验证与版本镜像发布
 AGENTS.md / docs/                     AI 开发入口和当前技术文档

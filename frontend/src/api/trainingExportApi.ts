@@ -1,3 +1,4 @@
+import { withRequestTimeout } from '../utils/browserCompat'
 import { tokenStore } from './http'
 
 export interface ExportSettings {
@@ -24,26 +25,28 @@ export interface ExportJob {
 
 async function request<T>(path: string, method = 'GET', body?: unknown, key?: string, blob = false): Promise<T> {
   try {
-    const response = await fetch('/api/datasets' + path, {
-      method,
-      signal: AbortSignal.timeout(blob ? 300000 : 30000),
-      headers: {
-        Authorization: `Bearer ${tokenStore.get()}`,
-        'Content-Type': 'application/json',
-        ...(key ? { 'X-Review-Contract': '2', 'Idempotency-Key': key } : {}),
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    })
-    if (!response.ok) {
-      const data = await response.json().catch(() => ({}))
-      throw {
-        message: data.message || `导出请求失败（${response.status}）`,
-        code: data.code,
-        status: response.status,
-        requestId: data.requestId || response.headers.get('X-Request-ID'),
+    return await withRequestTimeout(blob ? 300000 : 30000, async (signal) => {
+      const response = await fetch('/api/datasets' + path, {
+        method,
+        signal,
+        headers: {
+          Authorization: `Bearer ${tokenStore.get()}`,
+          'Content-Type': 'application/json',
+          ...(key ? { 'X-Review-Contract': '2', 'Idempotency-Key': key } : {}),
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      })
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}))
+        throw {
+          message: data.message || `导出请求失败（${response.status}）`,
+          code: data.code,
+          status: response.status,
+          requestId: data.requestId || response.headers.get('X-Request-ID'),
+        }
       }
-    }
-    return (blob ? await response.blob() : await response.json()) as T
+      return (blob ? await response.blob() : await response.json()) as T
+    })
   } catch (error) {
     console.error('[dataset.request_failed]', { path, method, error })
     throw error

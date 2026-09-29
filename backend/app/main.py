@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 import uuid
@@ -964,7 +965,11 @@ def list_media(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
 @source_write
 def delete_media(media_id: str, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     """删除一个视频素材及其目录下的所有文件。"""
+    logger = logging.getLogger("review.media")
+    if not media_id or media_id in {".", ".."} or Path(media_id).name != media_id or "\\" in media_id:
+        raise HTTPException(400, "素材 ID 无效")
     if tracking_is_busy():
+        logger.warning("media.delete_rejected media=%s user=%s reason=tracking_busy", media_id, user["uid"])
         raise HTTPException(409, "SAM3 Tracking 正在运行，无法删除素材")
     directory = media_dir(media_id)
     if not directory.is_dir():
@@ -973,9 +978,19 @@ def delete_media(media_id: str, user: dict[str, Any] = Depends(current_user)) ->
     with connect() as conn:
         referenced = conn.execute('SELECT 1 FROM annotation_baselines a JOIN media_revisions m ON m.id=a.media_revision_id WHERE m.media_id=? LIMIT 1',(media_id,)).fetchone()
     if referenced:
+        logger.warning("media.delete_rejected media=%s user=%s reason=baseline_reference", media_id, user["uid"])
         raise HTTPException(409, "视频已被审查基准引用，不能删除原始视频")
+    current, legacy = TRACK_DATA_DIR / media_id, LEGACY_TRACK_DATA_DIR / media_id
+    if current.is_dir() and legacy.is_dir() and current.resolve() != legacy.resolve():
+        logger.warning("media.delete_rejected media=%s user=%s reason=duplicate_storage", media_id, user["uid"])
+        raise HTTPException(409, "新旧存储中存在同名目录，请管理员先核对迁移，避免删除后旧视频重新出现")
     import shutil
-    shutil.rmtree(directory, ignore_errors=True)
+    try:
+        shutil.rmtree(directory)
+    except OSError as exc:
+        logger.exception("media.delete_failed media=%s user=%s", media_id, user["uid"])
+        raise HTTPException(500, "删除素材文件失败，请管理员查看服务日志后重试") from exc
+    logger.info("media.deleted media=%s user=%s", media_id, user["uid"])
     return {"deleted": True, "mediaId": media_id}
 
 

@@ -1,12 +1,13 @@
 # 代码地图与运行入口
 
-基线：2026-09-27。Vue 3 + TypeScript + Vite；FastAPI + SQLite；SAM3 在后端按需加载。前端依赖见 [package.json](../frontend/package.json)，Python 依赖见 [requirements.txt](../backend/requirements.txt)，不在说明文档复制版本号。
+Vue 3 + TypeScript + Vite；FastAPI + SQLite；SAM3 在后端按需加载。前端依赖见 [package.json](../frontend/package.json)，Python 依赖见 [requirements.txt](../backend/requirements.txt)，不在说明文档复制版本号。
 
 ## 按职责找文件
 
 | 职责 | 实现入口 |
 | --- | --- |
 | Docker 部署入口 | 根目录 `deploy.sh` / `deploy.ps1`、`compose.yaml` / `compose.gpu.yaml`、`.env.docker.example` |
+| Chrome 93 / HTTP 兼容与专项离线修复 | `frontend/src/utils/browserCompat.ts`、`scripts/build_compat_update.py` / `install_compat_update.sh`；用途和适用版本见 Docker 部署说明 |
 | 容器启动前检查 | `backend/app/deployment_check.py`、`backend/docker-entrypoint.sh` |
 | 模型随仓库交付 | `model-distribution/manifest.json` 与 `LICENSE-SAM.txt`、`scripts/prepare_model.py` / `build_model_bundle.py` |
 | 仓库与容器验收 | `scripts/check_repository.py`、`scripts/docker_smoke.py`、`.github/workflows/` |

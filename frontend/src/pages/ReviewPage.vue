@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { createRequestId } from '../utils/browserCompat'
 import WorkflowProgress from '../components/WorkflowProgress.vue'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { reviewWorkflowApi as api, type Frame, type Session, type Mutation, type Failure } from '../api/reviewWorkflowApi'
@@ -64,7 +65,7 @@ async function bookmark() {
   if(!session.value||!frame.value) return
   const sid=session.value.id,index=fi.value
   if(!pendingBookmark||pendingBookmark.sid!==sid||pendingBookmark.index!==index)
-    pendingBookmark={sid,index,revision:session.value.resume.cursorRevision,key:crypto.randomUUID()}
+    pendingBookmark={sid,index,revision:session.value.resume.cursorRevision,key:createRequestId()}
   try {
     let op=pendingBookmark
     let result
@@ -74,7 +75,7 @@ async function bookmark() {
       // A different window (or a response lost before navigation) advanced the cursor.
       const fresh=await api.session(sid)
       if(session.value?.id!==sid||fi.value!==index)return
-      op={sid,index,revision:fresh.resume.cursorRevision,key:crypto.randomUUID()};pendingBookmark=op
+      op={sid,index,revision:fresh.resume.cursorRevision,key:createRequestId()};pendingBookmark=op
       result=await api.cursor(sid,index,op.revision,op.key)
     }
     if(session.value?.id===sid&&fi.value===index){
@@ -107,7 +108,7 @@ async function open(s:Session) {
   busy.value=true;error.value=''
   try {
     let detail=await api.session(s.id)
-    if(detail.permissions.canClaim) detail=(await api.claim(s.id,crypto.randomUUID())).session
+    if(detail.permissions.canClaim) detail=(await api.claim(s.id,createRequestId())).session
     updateSession(detail);historical.value=detail.resume.lastViewedFrameIndex
     const target=detail.state==='reviewed'?(historical.value??0):(detail.resume.firstUnsubmittedFrameIndex??historical.value??0)
     frame.value=null;working.value=[];pending=null
@@ -140,7 +141,7 @@ async function perform(kind:'draft'|'submit'|'discard'|'finish') {
   if(!session.value||!frame.value)return null
   if(requestPromise) return requestPromise
   if(pending&&pending.kind!==kind) {error.value='请先重试未完成的请求，或处理版本冲突。';return null}
-  if(!pending)pending={kind,key:crypto.randomUUID(),sessionId:session.value.id,fi:fi.value,body:kind==='finish'?{expectedSessionRevision:session.value.revision}:
+  if(!pending)pending={kind,key:createRequestId(),sessionId:session.value.id,fi:fi.value,body:kind==='finish'?{expectedSessionRevision:session.value.revision}:
     {expectedFrameRevision:frame.value.frameRevision,...(kind==='draft'||kind==='submit'?{patch:clone(patch.value)}:{})}}
   requestPromise=runPending()
   const r=await requestPromise;requestPromise=null;return r

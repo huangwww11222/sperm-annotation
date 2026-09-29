@@ -1,3 +1,4 @@
+import { useLegacyBrowserAPIs } from './legacy-browser-profile.mjs'
 // Uses only the disposable confirmation fixtures and isolated test servers.
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -7,6 +8,7 @@ const fixture = JSON.parse(fs.readFileSync('work/confirmation-browser-fixture.js
 const origin = process.env.CONFIRMATION_ORIGIN || 'http://127.0.0.1:5373'
 const browser = await chromium.launch({ channel: 'chrome', headless: true })
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } })
+if (process.env.LEGACY_BROWSER === '1') await useLegacyBrowserAPIs(page)
 const errors = [], logs = []
 let checks = 0
 page.on('pageerror', e => errors.push(String(e)))

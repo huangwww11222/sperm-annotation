@@ -1,3 +1,4 @@
+import { useLegacyBrowserAPIs } from './legacy-browser-profile.mjs'
 // Real browser acceptance test. Run against the isolated fixture documented in docs/TESTING.md.
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -6,6 +7,7 @@ const fixture=JSON.parse(fs.readFileSync(process.env.REVIEW_FIXTURE || 'work/bro
 const origin=process.env.REVIEW_ORIGIN || 'http://127.0.0.1:5373'
 const browser=await chromium.launch({channel:process.env.CHROME_CHANNEL || 'chrome',headless:true})
 const page=await browser.newPage({viewport:{width:1440,height:900}})
+if (process.env.LEGACY_BROWSER === '1') await useLegacyBrowserAPIs(page)
 const events=[], errors=[]
 page.on('console',m=>events.push({type:m.type(),text:m.text()}));page.on('pageerror',e=>errors.push(String(e)))
 let assertions=0

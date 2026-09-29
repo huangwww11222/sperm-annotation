@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { createRequestId } from '../utils/browserCompat'
 import { ref } from 'vue'
 import { useWorkspace } from '../stores/workspace'
 import { reviewWorkflowApi as api, type CompletionPreview } from '../api/reviewWorkflowApi'
@@ -26,7 +27,7 @@ async function submit(){
   if(!preview.value||busy.value)return
   busy.value=true;error.value=''
   try {
-    if(!pending)pending={key:crypto.randomUUID(),body:{expectedSourceRevision:preview.value.sourceRevision,confirmComplete:confirmed.value,explicitEmptyFrameRanges:ranges()}}
+    if(!pending)pending={key:createRequestId(),body:{expectedSourceRevision:preview.value.sourceRevision,confirmComplete:confirmed.value,explicitEmptyFrameRanges:ranges()}}
     await api.completeAnnotation(mediaId,pending.body,pending.key);pending=null;success.value='已生成完整原始标注快照和待审查任务。你可以直接进入“审查模式”领取并检查自己的标注，也可以由其他审查员领取。'
   }catch(e:any){error.value=(e.message||'送审失败')+(e.requestId?`（记录号 ${e.requestId}）`:'');console.error('[review.annotation_completion_failed]',e)
     if(e.status&&e.status<500)pending=null

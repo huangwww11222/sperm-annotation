@@ -1,3 +1,4 @@
+import { createRequestId } from '../utils/browserCompat'
 import { computed, nextTick, ref, watch } from 'vue'
 import { FrameCache } from '../annotation/frameCache'
 import { hitHandle, moveBox, resizeBox, type Box } from '../annotation/geometry'
@@ -74,6 +75,8 @@ const createWorkspace = () => {
   const frameInput = ref(0)
   const isPlaying = ref(false)
   const isAiBusy = ref(false)
+  const deletingMediaId = ref<string | null>(null)
+  const mediaDeleteError = ref('')
   const trackingFrameCount = ref(5)
   const statusMessage = ref('就绪')
   const saveState = ref<'idle'|'saving'|'saved'|'error'>('idle')
@@ -293,7 +296,7 @@ const createWorkspace = () => {
   const displayObjects = computed(() => dragPreview.value
     ? currentObjects.value.map(o => o.id === dragPreview.value!.id ? { ...o, bbox: dragPreview.value!.bbox } : o)
     : currentObjects.value)
-  const editingBlocked = computed(() => isAiBusy.value || exactFrameLoading.value || isPlaying.value || workspaceRestoring.value || !!frameError.value)
+  const editingBlocked = computed(() => isAiBusy.value || !!deletingMediaId.value || exactFrameLoading.value || isPlaying.value || workspaceRestoring.value || !!frameError.value)
   const workspaceRestoring = ref(false)
   const selectedObject = computed(() => currentObjects.value.find((item) => item.id === selectedObjectId.value) ?? null)
   const selectedEffect = computed(() => effectResults.value.find((item) => item.id === selectedEffectId.value) ?? effectResults.value[0] ?? null)
@@ -644,6 +647,7 @@ const createWorkspace = () => {
   }
 
   persistWorkspaceState = async (mediaId: string, useCurrentUiState = false) => {
+    if (deletingMediaId.value === mediaId) return
     const media = mediaAssets.value.find((item) => item.id === mediaId)
     if (!media?.serverMediaId || workspaceRestoreInProgress || (workspaceRestoring.value && mediaId === currentMediaId.value)) return
     const includeUiState = useCurrentUiState || mediaId === currentMediaId.value
@@ -695,6 +699,7 @@ const createWorkspace = () => {
   }
 
   scheduleWorkspaceStateSave = (mediaId: string) => {
+    if (deletingMediaId.value === mediaId) return
     if (!mediaId || workspaceRestoreInProgress || workspaceRestoring.value || !mediaAssets.value.find(m => m.id === mediaId)?.serverMediaId) return
     if (mediaId === currentMediaId.value) saveState.value = 'saving'
     const previous = workspaceSaveTimers.get(mediaId)
@@ -703,6 +708,52 @@ const createWorkspace = () => {
       workspaceSaveTimers.delete(mediaId)
       void persistWorkspaceState(mediaId).catch((error) => console.warn('工作区状态保存失败：', error))
     }, 800))
+  }
+
+  const deleteMedia = async (mediaId: string) => {
+    const media = mediaAssets.value.find(item => item.id === mediaId)
+    if (!media?.serverMediaId || isAiBusy.value || deletingMediaId.value || workspaceRestoring.value) return
+    mediaDeleteError.value = ''
+    if (!window.confirm(`将从共享素材库删除「${media.name}」的原视频、工作区和追踪文件，其他使用者也将无法访问。此操作不能撤销；已送审的视频不能删除。是否继续？`)) return
+    deletingMediaId.value = mediaId
+    pausePlayback(); cancelAnnotationGesture()
+    const pendingTimer = workspaceSaveTimers.get(mediaId)
+    if (pendingTimer) clearTimeout(pendingTimer)
+    workspaceSaveTimers.delete(mediaId)
+    try {
+      // Drain writes already sent before DELETE. New saves are blocked until
+      // it finishes, so a delayed autosave cannot recreate the removed folder.
+      await saveQueues.get(mediaId)?.catch(() => {})
+      const result = await trackApi.deleteMedia(media.serverMediaId)
+      if (!result.deleted || result.mediaId !== media.serverMediaId) throw new Error('服务器未确认删除，请刷新素材列表核对')
+      mediaAssets.value = mediaAssets.value.filter(item => item.id !== mediaId)
+      delete annotationsByMedia.value[mediaId]
+      delete trackingFramesByMedia.value[mediaId]
+      delete deletedTrackingIds.value[mediaId]
+      delete closedMediaFrontendIds[media.serverMediaId]
+      persistClosedMediaFrontendIds()
+      workspaceViews.delete(mediaId); saveTickets.delete(mediaId)
+      if (media.url.startsWith('blob:')) URL.revokeObjectURL(media.url)
+      frameCache.clear()
+      if (selectedMediaId.value === mediaId) selectedMediaId.value = mediaAssets.value[0]?.id || ''
+      // Persist immediately as well as the normal debounced save, allowing an
+      // immediate refresh after successful deletion.
+      try {
+        localStorage.setItem('mediaAssets', JSON.stringify(mediaAssets.value))
+        localStorage.setItem('annotationsByMedia', JSON.stringify(annotationsByMedia.value))
+      } catch (error) { console.warn('[annotation.local_save_failed]', error) }
+      console.info('[annotation.media_deleted]', { mediaId: media.serverMediaId })
+      statusMessage.value = `已删除素材：${media.name}`
+      showToast(statusMessage.value)
+    } catch (error) {
+      console.error('[annotation.media_delete_failed]', { mediaId: media.serverMediaId, error })
+      mediaDeleteError.value = error instanceof Error ? error.message : '删除失败，请重试'
+      statusMessage.value = mediaDeleteError.value
+    } finally {
+      deletingMediaId.value = null
+      // A refused/failed delete must not cancel unsaved annotation work.
+      if (mediaDeleteError.value && pendingTimer) scheduleWorkspaceStateSave(mediaId)
+    }
   }
 
   // Switching assets happens before the new asset resets the shared editor
@@ -793,7 +844,7 @@ const createWorkspace = () => {
       if (type === 'video' && !isVideoFile(file)) continue
 
       const media: MediaAsset = {
-        id: `local-${crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`}`,
+        id: `local-${createRequestId()}`,
         name: file.name,
         type,
         url: URL.createObjectURL(file),
@@ -932,7 +983,7 @@ const createWorkspace = () => {
     const { rows, meta } = parseTrackerResults(await trackerFile.text())
     if (!rows.length) throw new Error('tracker_results.json 中没有可用的逐帧标注')
 
-    const mediaId = `loaded-${crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`} `
+    const mediaId = `loaded-${createRequestId()}`
     const safeMediaId = mediaId.trim()
     const mediaMeta = meta?.media || {}
     const trackingMeta = meta?.tracking || {}
@@ -2083,7 +2134,12 @@ const createWorkspace = () => {
    */
   const loadServerMedia = async () => {
     try {
+      const cachedIds = new Set(mediaAssets.value.filter(item => item.serverMediaId).map(item => item.id))
       const res = await trackApi.listMedia()
+      const existingIds = new Set(res.items.map(item => item.mediaId))
+      // Uploads may finish while the list request is in flight. Only reconcile
+      // entries that were already cached when this request began.
+      mediaAssets.value = mediaAssets.value.filter(item => !cachedIds.has(item.id) || !item.serverMediaId || existingIds.has(item.serverMediaId))
       // 建立 serverMediaId -> MediaAsset 的索引
       const byServerId = new Map<string, MediaAsset>()
       for (const m of mediaAssets.value) {
@@ -2134,13 +2190,14 @@ const createWorkspace = () => {
       }
       const active = mediaAssets.value.find((item) => item.id === selectedMediaId.value)
       if (active?.serverMediaId) await resetAnnotationViewForMedia(active.id)
-    } catch {
-      // 后端未启动时静默处理
+    } catch (error) {
+      console.error('[annotation.media_list_failed]', error)
+      statusMessage.value = '素材列表同步失败，请刷新重试；本机列表已保留'
     }
   }
 
   return {
-    persistWorkspaceState, retryExactFrame, saveState, saveError, playbackRate, pausePlayback, displayObjects, editingBlocked, workspaceRestoring, frameError, loadExactFrame, nudgeSelected, cancelAnnotationGesture, canUndo, canRedo,
+    deleteMedia, deletingMediaId, mediaDeleteError, persistWorkspaceState, retryExactFrame, saveState, saveError, playbackRate, pausePlayback, displayObjects, editingBlocked, workspaceRestoring, frameError, loadExactFrame, nudgeSelected, cancelAnnotationGesture, canUndo, canRedo,
     api, mediaAssets, selectedMediaId, activeTool, objectNameInput, selectedObjectId, currentFrame, currentTime, videoDuration, videoFps, frameInput, isPlaying, isAiBusy, trackingFrameCount, statusMessage, toastMessage, showToast, zoom, zoomIn, zoomOut, zoomReset, closeMedia, savedResults, loadedRemoteResultKeys, effectResults, selectedEffectId, effectTime, effectPlaying, effectVideoRef, imageRef, videoRef, exactFrameImageRef, exactFrameUrl, exactFrameLoading, videoPlaybackFallback, annotationHitRef, fileInputRef, videoInputRef, annotationFolderInputRef, effectFolderInputRef, annotationsByMedia, trackingFramesByMedia, anomalyObjectIds, anomalyFrames, pausedAnomalies, anomalyPanelVisible, trackingPausedFrame, closeAnomalyPanel, selectedMedia, isVideo, maxFrameIndex, currentMediaId, currentObjects, selectedObject, selectedEffect, formatTime, timeToFrame, frameToTime, getStagePoint, addObject, resetVideoViewToFirstFrame, ensureVideoFirstFrame, selectTool, onStageClick, tempBbox, onBboxDown, onBboxMove, onBboxUp, onObjectDropdownChange, selectObject, removeObject, renameObject, undo, redo, copyPreviousFrame, brightness, contrast, mediaFilterStyle, resetMediaFilter, annotatedFrameCount, clearSelection, openFilePicker, handleFiles, openAnnotationFolderPicker, handleAnnotationFolderFiles, onImageLoaded, onVideoLoaded, onVideoTimeUpdate, onVideoError, loadTrackingResult, seekVideo, seekToInputFrame, seekByFrame, togglePlayback, onVideoEnded, onTimelineClick, runAiSegment, runAiTrack, getMediaPixelSize, buildSam3AnnotationsJson, generateAnnotationsJson, loadSavedResults, openEffectFolderPicker, handleEffectFolder, loadEffects, onEffectTimeUpdate, toggleEffectPlayback, selectEffect, effectOverlayObjects, resetAnnotationViewForMedia, loadServerMedia
   }
 }

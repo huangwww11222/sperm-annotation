@@ -28,3 +28,7 @@ backend/data/app.db-wal
 *.db
 *.db-shm
 *.db-wal
+
+# Local delivery backups and user-supplied video data.
+/update-backups/
+/测试精子视频/

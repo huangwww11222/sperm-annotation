@@ -1,3 +1,4 @@
+import { withRequestTimeout } from '../utils/browserCompat'
 import { tokenStore } from './http'
 import type { ReviewObject, Patch } from '../review/geometry'
 export interface CompletionPreview { sourceRevision:string;frameCount:number;objectFrames:number;emptyFrames:number;unknownFrames:number;unknownFrameRanges:{start:number;end:number}[] }
@@ -19,15 +20,17 @@ export interface Frame {
 export interface Mutation { frame?:Frame;session:Session;nextUnsubmittedFrameIndex?:number|null }
 export interface Failure { message:string;status:number;code?:string;requestId?:string }
 async function request<T>(path:string,method='GET',body?:unknown,key?:string):Promise<T> {
-  const response=await fetch('/api/review'+path,{method,signal:AbortSignal.timeout(30000),headers:{Authorization:`Bearer ${tokenStore.get()}`,'Content-Type':'application/json',
-    ...(key?{'X-Review-Contract':'2','Idempotency-Key':key}:{})},body:body===undefined?undefined:JSON.stringify(body)})
-  const data=await response.json()
-  if(!response.ok) {
-    const failure:Failure={status:response.status,message:data.message|| (typeof data.detail==='string'?data.detail:'请求未通过校验'),code:data.code,requestId:data.requestId||response.headers.get('X-Request-ID')}
-    console.error('[review.request_failed]',{method,path,...failure})
-    throw failure
-  }
-  return data
+  return withRequestTimeout(30000, async (signal) => {
+    const response=await fetch('/api/review'+path,{method,signal,headers:{Authorization:`Bearer ${tokenStore.get()}`,'Content-Type':'application/json',
+      ...(key?{'X-Review-Contract':'2','Idempotency-Key':key}:{})},body:body===undefined?undefined:JSON.stringify(body)})
+    const data=await response.json()
+    if(!response.ok) {
+      const failure:Failure={status:response.status,message:data.message|| (typeof data.detail==='string'?data.detail:'请求未通过校验'),code:data.code,requestId:data.requestId||response.headers.get('X-Request-ID')}
+      console.error('[review.request_failed]',{method,path,...failure})
+      throw failure
+    }
+    return data
+  })
 }
 export const reviewWorkflowApi={
   completionPreview:(id:string)=>request<CompletionPreview>(`/media/${encodeURIComponent(id)}/completion-preview`),

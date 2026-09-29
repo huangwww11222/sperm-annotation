@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { createRequestId } from '../utils/browserCompat'
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { useAuth } from '../stores/auth'
 import { trainingExportApi as api, type ExportJob, type ExportSettings, type ExportSummary } from '../api/trainingExportApi'
@@ -92,7 +93,7 @@ async function create(retry = false) {
   if (busy.value || !summary.value || working.value) return
   error.value = ''; busy.value = true
   if (!retry) {
-    intent.value = { settings: { finalVersionIds: [props.finalVersionId], format: format.value, splitRatio: splitRatio.value }, key: crypto.randomUUID() }
+    intent.value = { settings: { finalVersionIds: [props.finalVersionId], format: format.value, splitRatio: splitRatio.value }, key: createRequestId() }
     job.value = null; persist()
   }
   if (!intent.value) { busy.value = false; return }

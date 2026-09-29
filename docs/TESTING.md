@@ -1,6 +1,6 @@
 # 测试与日志排查
 
-基线：2026-09-27。测试需要证明目标行为和核心边界；不要为纯文案反复跑 GPU，也不要以构建通过代替交互验证。
+测试需要证明目标行为和核心边界；不要为纯文案反复跑 GPU，也不要以构建通过代替交互验证。
 
 ## 先隔离数据
 
@@ -14,6 +14,7 @@ APP_DB_FILE="$PWD/work/agent-test-data/app.db" \
 APP_STORAGE_DIR="$PWD/work/agent-test-storage" \
 PYTHONPATH=backend work/review-venv/bin/python -m pytest backend/tests -q
 
+npm run test:compatibility --prefix frontend
 npm run test:annotation --prefix frontend
 npm run test:review --prefix frontend
 npm run test:confirmation --prefix frontend
@@ -28,6 +29,7 @@ npm run build --prefix frontend
 | --- | --- | --- |
 | 标注手势、性能、续标、快捷键 | `test:annotation`；必要时 `test_frontend_tracking_contract.py`、`test_manual_baseline_restore.py` | `annotation-ux-browser.mjs`（48）；`annotation-ui-consistency.mjs`（14） |
 | Tracking 调用/完成定位 | seed、rewind、timing、manual baseline、frontend tracking contract pytest | `annotation-tracking-ui.mjs`（10，模拟响应，无真实 GPU） |
+| Chrome 93 / HTTP、素材删除 | `test:compatibility`、`test_media_deletion.py` | `browser-compat-media.mjs`；下述旧 API 回归模式 |
 | 送审 | `test_review_completion.py` | `review-ingress-browser.mjs`（6） |
 | B 草稿/提交/恢复 | `test_review_workflow.py`、`test:review` | `review-browser.mjs`（27）、`review-failure-browser.mjs`（17） |
 | C 选择/恢复/最终版本 | `test_confirmation_workflow.py`、`test:confirmation` | `confirmation-browser.mjs`（39）、`confirmation-failure-browser.mjs`（30） |
@@ -97,6 +99,22 @@ Vite 调试脚本若需要访问 workspace，须导入浏览器实际已加载�
 
 结束后只停止自己启动的测试服务器；业务数据不清理。截图/控制台保存在 `output/playwright/`，命令日志放 `work/`。
 
+### Chrome 93 / HTTP 专项回归
+
+`browser-compat-media.mjs` 使用真实上传的短 AVI、送审接口和删除接口；拒绝非 `work/` 夹具路径。沿用以上 B/C/UX 夹具，推荐独立数据根 `work/e2e-confirm-ux-compat-*`。启动后端 3307；前端用 `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=hospital-test.local API_PROXY_TARGET=http://127.0.0.1:3307 npm run dev --prefix frontend -- --host 127.0.0.1 --port 5377 --strictPort`。
+
+```bash
+# 库路径按前述 PLAYWRIGHT_MODULE 设置；COMPAT_VIDEO 可指定生成的 AVI。
+node frontend/tests/browser-compat-media.mjs
+LEGACY_BROWSER=1 REVIEW_ORIGIN=http://127.0.0.1:5377 node frontend/tests/review-browser.mjs
+LEGACY_BROWSER=1 CONFIRMATION_ORIGIN=http://127.0.0.1:5377 node frontend/tests/confirmation-browser.mjs
+LEGACY_BROWSER=1 CONFIRMATION_ORIGIN=http://127.0.0.1:5377 node frontend/tests/confirmation-failure-browser.mjs
+# 重新生成 C 夹具后再执行导出测试。
+LEGACY_BROWSER=1 CONFIRMATION_ORIGIN=http://127.0.0.1:5377 node frontend/tests/training-export-browser.mjs
+```
+
+兼容配置禁用 AbortSignal.timeout、crypto.randomUUID、requestVideoFrameCallback；专项脚本另用仅在测试 Chrome 内解析到 127.0.0.1 的 hospital-test.local 验证真正的非安全 HTTP 上下文。覆盖上传、真实提帧、换帧、送审响应丢失后沿用原键、取消删除、删除失败保留、成功后立即刷新、过期缓存清理、A 快照保护。其余流程脚本可用 `LEGACY_BROWSER=1` 复用缺失 API 配置。它不是 Chrome 93 整个引擎的模拟，交付后仍需医院 Windows 7 / Chrome 93 客户端验收。
+
 ## 仓库与 Docker 交付验收
 
 `python3 scripts/check_repository.py` 检查 Git 跟踪文件，拒绝业务数据、模型、本机密钥、冲突标记和重复 Python 顶层定义。它读取索引中的文件列表；新文件提交后同样受 CI 检查，不扫描用户运行目录内容。
@@ -148,26 +166,19 @@ docker compose down
 | `dataset.failed/enqueue_failed/interrupted` | 提帧/写包/发布/重启失败 |
 | `annotation.frame_slow/frame_failed/prefetch_failed` | 媒体、目标帧、耗时；慢阈值 250ms |
 | `annotation.workspace_save_failed/tracking_load_failed` | 媒体、保存序号与实际读取异常 |
+| `media.deleted/delete_failed/delete_rejected`、`annotation.media_deleted/media_delete_failed/media_list_failed` | 删除结果、媒体 ID、操作者、文件系统异常；前端网络失败不得当删除成功 |
 | `annotation.local_save_failed/selection_save_failed`、`ui.preference_save_failed` | 本机存储不可用 |
 
 日志不记录 JWT/密码；不要记录每个鼠标移动。浏览器 route 注入的 503 不会出现在服务端日志；数据库触发器故障测试验证真实事务回滚与日志。
 
 ## 最近验证记录
 
-2026-09-28 模型随仓库交付：固定官方 facebook/sam3 快照，权重 SHA256 `6d06f0a5f84e435071fe6603e61d0b4cc7b40e0d39d487cfd4d67d8cc11cc14a`，所有随包配置/许可与官方 Git blob 一致。模型以仓库 Release 附件提供，Git 仅记录清单、完整许可和安装工具。部署相关 **18 项 pytest 通过**，覆盖分块续传、SHA256 失败不发布模型、完整安装与缓存复用、自备模型不覆盖、关闭下载、路径防护及模型失败停止部署；PowerShell 7.4 模拟 Docker 默认/GPU/CPU 三组通过。真实 3.44 GB 权重经本机 HTTP 分块下载/组装、完整 SHA256 和再次零下载复用验证；实际 model-setup Compose 容器通过缓存校验。生产 CPU 镜像能从该包加载 Sam3TrackerVideoProcessor，safetensors 1797 个张量头可读取。日志 `work/model-distribution-*.log`、`work/model-full-restore.log`、`work/model-setup-container.log`、`work/model-processor-check.log`。15 个公开模型 Release 附件的远端大小和 SHA256 与本地包一致；匿名下载已核对清单、许可、处理器配置及四个权重块开头，确认无需模型站凭据。Windows CI 发现模拟失败留下 LASTEXITCODE=42，虽然断言全通过，runner 仍按失败退出；测试清理阶段重置该模拟退出码，保留部署脚本对真实失败的检查。未运行真实 GPU 推理。
+2026-09-29 Chrome 93 / HTTP 与素材删除修复：后端和离线更新脚本 **169 项通过**（其中更新脚本 7 项验证 CPU/GPU 配置选择、版本/运行配置不符停止、AI 忙/构建失败不切换服务、重启失败自动恢复原镜像）；前端兼容/几何/缓存 **5+5+6+4 项通过**，类型检查与 Chrome 93 目标构建通过。浏览器专项 **21**、B **27**、C **39**、C 故障恢复 **30**、训练导出 **29**、离线生产页面 **4**，合计 **150 项通过**；业务流程回归禁用了新版超时、UUID 和视频帧回调 API，专项/生产页面另验证真正的非安全 HTTP。
 
-2026-09-27 默认 AI 部署调整：首次无参数 Bash/PowerShell 安装及 `.env.docker.example` 默认选择 GPU + AI；显式 CPU 及已有配置保持原行为。部署相关 pytest **14 通过**，含真实 Compose 解析默认模板/GPU/CPU 三种配置；PowerShell 7.4 容器中默认/GPU/CPU 三组模拟 Docker 安装测试通过，验证重复执行保留密钥与模式冲突保护。日志 `work/ai-default-tests.log`、`work/ai-default-powershell.log`。本轮未运行真实 GPU 推理。
+实际隔离 CPU Compose 在旧镜像上运行小型补丁；发现并修正解压目录权限导致的 Nginx 403，新增首页与 API 双检查。真实验证安装、原镜像回滚、再次安装，以及升级前登录令牌、工作区、确认结果和训练包保留。容器中的生产构建实际通过上传/提帧、删除后刷新、人工框送审。补丁以现有本地镜像加 COPY 层，构建禁止拉取与网络，不传模型。Linux/Windows 7 Chrome 93 的实际客户端与 GPU 推理仍需医院端验收；本机缺失 API 测试和 CPU 容器不能代替它们。
 
-2026-09-27 的第三方 Docker 交付整理：先复现了本地 `list_annotations(..., source=...)` 的 TypeError，再修复查询、同名视频身份与旧库补列/建索引顺序。本机后端 **146 通过**；实际 Python 3.12 Linux ARM64 CPU 镜像中 **145 通过、1 跳过**（镜像内不安装 Docker CLI，Compose 解析项在宿主机已通过）。生产前后端镜像构建通过，后端 `pip check` 通过，SAM3 Tracker Model/Processor 可导入；实际版本为 Python 3.12.14、NumPy 2.5.3、torch 2.14.0+cpu。
+数据位于 `work/e2e-confirm-ux-compat-*`、`work/compat-offline-test/runtime`，日志 `work/compat-*.log`，截图 `output/playwright/compat-*`。离线包生成方式与执行命令见 [Docker 部署说明](DOCKER_DEPLOYMENT.md#2026-09-29-医院-chrome-93-专项离线补丁)。`test_offline_compat_update.py` 使用模拟 Docker，不访问真实服务器；生产页面脚本为 `offline-update-browser.mjs`，默认验证本机隔离容器 18087 端口，可用 `COMPAT_PRODUCTION_PORT` 修改端口，需先生成上述三帧 AVI 夹具。
 
-实际隔离 Compose 从空库完成 SPA/健康检查、注册、真实 AVI 上传、人工记录保存/查询、工作区保存、B/C 显式完成、YOLO 真实图片和标签导出；删除并重建容器后，原登录令牌、工作区、确认版本与 ZIP 均保留。Bash CPU/GPU 初始化保护由 pytest 覆盖；PowerShell 7.4 容器内通过 CPU/GPU 两组模拟 Docker 的安装配置测试，**不是 Windows/WSL2 实机验收**。仓库检查、155 个本地文档链接检查通过；从 Git 索引移除的 164 个运行文件仍全部保留在本地。
+模型交付的专项验收：2026-09-28 部署测试 18 项通过，完整模型包校验、下载续传与缓存复用、处理器加载及公开 Release 附件检查完成；未运行真实 GPU 推理。固定模型信息以 `model-distribution/manifest.json` 为准。
 
-测试项目 `annotation-deploy-audit`，数据位于 `work/docker-deploy-release-check`；日志 `work/deploy-*.log`。本机 Docker Hub 令牌端点连接重置，使用 Docker Official Images 的 ECR Public 副本取得基础镜像后完成构建，没有修改用户 Docker 镜像源或业务配置。此次未运行真实 CUDA/模型权重推理，未在 GitHub 触发 CI，也未发布镜像；新增 CI 发布流程需要推送后执行。测试期间未使用生产 DB/storage。
-
-2026-09-27 的操作优先级与用户说明调整：新增检查 **35**、专注/布局 **49**、B 正常 **27**、C 正常 **39**、C 故障恢复 **30**、训练导出 **29**、外观/记录 **14** 均通过，浏览器本轮合计 **223 项**。后端全量 **133 通过**，前端几何/缓存 **5+6+4 通过**，类型检查和生产构建通过；当前和归档文档的 **148 个本地链接**无失效。
-
-使用 `work/e2e-confirm-ux-priority-*` 独立数据；命令日志 `work/priority-*.log`，新增截图 `output/playwright/priority-*`。依据浏览器断言与滚动位置记录修复了说明窗口的 Tab 焦点循环、Esc 关闭时滚动锁清理，以及切换章节时旧键盘滚动动画延续的问题。训练回归实际生成并检查 YOLO/COCO ZIP，验证重新确认期间和旧版本的下载门禁。未运行真实 GPU 推理或 Docker/Windows 部署。
-
-同日较早的专注/进度调整：新增布局浏览器检查 **49 通过**；后端全量 **133 通过**；前端几何/缓存 **5+6+4 通过**；类型检查及生产构建通过。人工标注 **48**、外观/记录 **14**、B 正常 **27**、C 正常 **39**、C 故障恢复 **30**、训练导出 **29** 均通过，该轮浏览器合计 **236 项**。
-
-较早一轮测试用 `work/e2e-confirm-ux-layout-*` 独立数据。命令日志 `work/layout-*.log`，截图 `output/playwright/layout-*`（同名布局脚本重跑会更新截图）。该轮浏览器回归发现了布局调整后已完成区域被多余模板层隐藏的问题；依据截图与未发出下载请求的日志修复后，重新验证了完整 JSON 下载、训练 ZIP、重新确认及旧包禁用。也未运行真实 GPU 推理或 Docker/Windows 部署，不能据此声称这些环境验收完成。此前每阶段的验证保留在 [历史目录](archive/README.md)。
+更早的环境、数量和故障过程集中保存在 [历史验证记录](archive/README.md#历史验证记录)，不作为本次修改自动通过的证明。

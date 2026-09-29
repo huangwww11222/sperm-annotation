@@ -1,6 +1,6 @@
 # 当前接口与数据契约
 
-基线：2026-09-27。本页是 API 地图与不变量，不复制全部类型定义。精确请求验证以已注册路由的 Pydantic 模型为准；开发时可读本地 FastAPI `/openapi.json`。旧原型中的示例接口不是活动接口。
+本页是 API 地图与不变量，不复制全部类型定义。精确请求验证以已注册路由的 Pydantic 模型为准；开发时可读本地 FastAPI `/openapi.json`。旧原型中的示例接口不是活动接口。
 
 ## 通用协议
 
@@ -20,6 +20,7 @@
 | --- | --- |
 | `POST /api/auth/register`、`/api/auth/login`；`GET /api/auth/me` | 真实账号与 JWT |
 | `POST /api/track/upload`；`GET /api/track/media` | 原视频上传、可用媒体 |
+| `DELETE /api/track/media/{mediaId}` | 删除未送审视频目录；需要登录。成功返回 `deleted: true, mediaId`；AI 运行、基准引用、新旧存储同名目录返回 409；文件系统失败返回 500 并记录日志，不能伪报成功 |
 | `GET /api/track/video/{mediaId}`、`/api/track/frame/{mediaId}/{fi}` | 原视频、真实指定帧 |
 | `GET / PUT /api/track/workspace/{mediaId}` | 可恢复工作区 |
 | `POST /api/annotation/annotations/manual` | 保存人工对象记录 |

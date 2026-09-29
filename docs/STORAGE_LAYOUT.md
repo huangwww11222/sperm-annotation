@@ -1,6 +1,6 @@
 # 存储、快照与迁移边界
 
-基线：2026-09-27。路径来自 [config.py](../backend/app/config.py)。
+路径来自 [config.py](../backend/app/config.py)。
 
 | 配置 | 默认 | 内容 |
 | --- | --- | --- |

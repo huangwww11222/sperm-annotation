@@ -1,10 +1,11 @@
+import { withRequestTimeout } from '../utils/browserCompat'
 import { notifyAuthExpired, tokenStore } from './http'
 import type { TrackingFrameResult } from '../types/annotation'
 
-const jsonRequest = async <T>(path: string, init: RequestInit = {}): Promise<T> => {
+const jsonRequest = async <T>(path: string, init: RequestInit = {}): Promise<T> => withRequestTimeout(30000, async (signal) => {
   const res = await fetch(`/api${path}`, {
-    signal: AbortSignal.timeout(30000),
     ...init,
+    signal,
     headers: {
       'Content-Type': 'application/json',
       ...(tokenStore.get() ? { Authorization: `Bearer ${tokenStore.get()}` } : {}),
@@ -17,7 +18,7 @@ const jsonRequest = async <T>(path: string, init: RequestInit = {}): Promise<T> 
     throw new Error((data as any)?.message || (data as any)?.detail || `请求失败 (${res.status})`)
   }
   return data as T
-}
+}, init.signal)
 
 export interface TrackUploadResponse {
   mediaId: string
@@ -188,11 +189,12 @@ export const trackApi = {
   },
 
   async getFrameBlob(mediaId: string, frameIndex: number): Promise<Blob> {
-    const res = await fetch(`/api/track/frame/${encodeURIComponent(mediaId)}/${encodeURIComponent(frameIndex)}`, {
-      signal: AbortSignal.timeout(20000),
-      headers: {
-        ...(tokenStore.get() ? { Authorization: `Bearer ${tokenStore.get()}` } : {}),
-      },
+    return withRequestTimeout(20000, async (signal) => {
+      const res = await fetch(`/api/track/frame/${encodeURIComponent(mediaId)}/${encodeURIComponent(frameIndex)}`, {
+        signal,
+        headers: {
+          ...(tokenStore.get() ? { Authorization: `Bearer ${tokenStore.get()}` } : {}),
+        },
     })
     if (!res.ok) {
       const data = await res.json().catch(() => ({}))
@@ -200,6 +202,7 @@ export const trackApi = {
       throw new Error((data as any)?.message || (data as any)?.detail || `读取第 ${frameIndex} 帧失败 (${res.status})`)
     }
     return res.blob()
+    })
   },
 
   async getResult(mediaId: string, frameIndex?: number) {
@@ -222,6 +225,10 @@ export const trackApi = {
       method: 'PUT',
       body: JSON.stringify(state),
     })
+  },
+
+  async deleteMedia(mediaId: string) {
+    return jsonRequest<{ deleted: boolean; mediaId: string }>(`/track/media/${encodeURIComponent(mediaId)}`, { method: 'DELETE' })
   },
 
   async listMedia() {

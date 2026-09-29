@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "test:review": "tsc src/review/geometry.ts --outDir ../work/review-geometry --target ES2022 --module ES2022 --skipLibCheck && node --test tests/review-geometry.test.mjs",
     "test:confirmation": "tsc src/confirmation/geometry.ts --outDir ../work/confirmation-geometry --target ES2022 --module ES2022 --skipLibCheck && node --test tests/confirmation-geometry.test.mjs",
-    "test:annotation": "tsc src/annotation/geometry.ts src/annotation/frameCache.ts --outDir ../work/annotation-helpers --target ES2022 --module ES2022 --skipLibCheck && node --test tests/annotation-geometry.test.mjs"
+    "test:annotation": "tsc src/annotation/geometry.ts src/annotation/frameCache.ts --outDir ../work/annotation-helpers --target ES2022 --module ES2022 --skipLibCheck && node --test tests/annotation-geometry.test.mjs",
+    "test:compatibility": "tsc src/utils/browserCompat.ts --outDir ../work/browser-compat --target ES2020 --module ES2020 --skipLibCheck && node --test tests/browser-compat.test.mjs"
   },
   "dependencies": {
     "vue": "^3.5.22"

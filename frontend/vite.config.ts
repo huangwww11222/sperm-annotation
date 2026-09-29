@@ -6,6 +6,9 @@ import vue from '@vitejs/plugin-vue'
  */
 export default defineConfig(({mode}) => ({
   plugins: [vue()],
+  // Hospital clients include Windows 7 with Chrome 93. Runtime APIs also need
+  // explicit compatibility helpers; transpilation alone cannot polyfill them.
+  build: { target: 'chrome93', cssTarget: 'chrome93' },
   server: {
     port: 5173,
     // ↓ 新增：所有 /api 请求转发到后端，前端不用写死地址，也没有跨域问题

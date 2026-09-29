@@ -23,3 +23,5 @@
 @media(max-width:1000px){.workbench-actions{gap:4px}.annotation-page.focused .workbench-title>div:first-child>span{display:none}.annotation-page.focused{padding:6px}}
 
 .annotation-page.focused .workbench-actions .save-indicator{display:flex}
+
+.asset-delete{position:absolute;right:2px;bottom:2px;width:24px;height:24px;color:var(--muted)}.asset-delete:hover{color:var(--danger);background:var(--surface)}.asset-card>div{padding-right:14px}

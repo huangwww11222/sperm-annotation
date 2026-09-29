@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { createRequestId } from '../utils/browserCompat'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { confirmationApi as api, type Change, type ConfirmationSession, type FrameContext, type Operation, type Action, type Choice, type Failure } from '../api/confirmationApi'
 import WorkflowProgress from '../components/WorkflowProgress.vue'
@@ -93,7 +94,7 @@ async function selectItem(id:string|null) {
 async function bookmark() {
   if(!session.value)return
   if(session.value.resume.lastViewedChangeId===selected.value)return
-  let op:Operation={action:'cursor',sid:session.value.id,changeId:selected.value||undefined,body:{changeId:selected.value,expectedCursorRevision:session.value.resume.cursorRevision},key:crypto.randomUUID()}
+  let op:Operation={action:'cursor',sid:session.value.id,changeId:selected.value||undefined,body:{changeId:selected.value,expectedCursorRevision:session.value.resume.cursorRevision},key:createRequestId()}
   try {
     let r
     try {r=await api.operate(op)}
@@ -101,7 +102,7 @@ async function bookmark() {
       if((e as Failure).code!=='CURSOR_REVISION_CONFLICT')throw e
       // A browsing position may follow this window after rebasing; it never writes decisions.
       const fresh=await api.session(op.sid)
-      op={...op,key:crypto.randomUUID(),body:{...op.body,expectedCursorRevision:fresh.resume.cursorRevision}}
+      op={...op,key:createRequestId(),body:{...op.body,expectedCursorRevision:fresh.resume.cursorRevision}}
       r=await api.operate(op)
     }
     update(r.session);items.value=r.items
@@ -109,7 +110,7 @@ async function bookmark() {
 }
 function operation(action:Action,body:Record<string,unknown>={},changeId?:string) {
   if(!session.value||blocked.value)return
-  pending.value={action,sid:session.value.id,changeId,body,key:crypto.randomUUID()};persistIntent()
+  pending.value={action,sid:session.value.id,changeId,body,key:createRequestId()};persistIntent()
   void retry()
 }
 async function retry():Promise<boolean> {

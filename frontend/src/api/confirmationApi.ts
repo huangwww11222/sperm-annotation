@@ -1,3 +1,4 @@
+import { withRequestTimeout } from '../utils/browserCompat'
 import { tokenStore } from './http'
 import type { Box, ReviewObject } from '../review/geometry'
 export type Choice = 'A' | 'B'
@@ -21,12 +22,14 @@ export interface Result { session:ConfirmationSession;items:Change[];selectedCha
 export interface Failure {message:string;status?:number;code?:string;requestId?:string}
 async function request<T>(path:string,method='GET',body?:unknown,key?:string,blob=false):Promise<T> {
   try {
-    const r=await fetch('/api'+path,{method,signal:AbortSignal.timeout(30000),headers:{Authorization:`Bearer ${tokenStore.get()}`,'Content-Type':'application/json',...(key?{'X-Review-Contract':'2','Idempotency-Key':key}:{})},body:body===undefined?undefined:JSON.stringify(body)})
-    if(!r.ok) {
-      const d=await r.json().catch(()=>({}))
-      throw {message:d.message||(typeof d.detail==='string'?d.detail:`请求失败（${r.status}）`),status:r.status,code:d.code,requestId:d.requestId||r.headers.get('X-Request-ID')}
-    }
-    return (blob ? await r.blob() : await r.json()) as T
+    return await withRequestTimeout(30000, async (signal) => {
+      const r=await fetch('/api'+path,{method,signal,headers:{Authorization:`Bearer ${tokenStore.get()}`,'Content-Type':'application/json',...(key?{'X-Review-Contract':'2','Idempotency-Key':key}:{})},body:body===undefined?undefined:JSON.stringify(body)})
+      if(!r.ok) {
+        const d=await r.json().catch(()=>({}))
+        throw {message:d.message||(typeof d.detail==='string'?d.detail:`请求失败（${r.status}）`),status:r.status,code:d.code,requestId:d.requestId||r.headers.get('X-Request-ID')}
+      }
+      return (blob ? await r.blob() : await r.json()) as T
+    })
   } catch(e) {
     const f=e as Failure
     const failure:Failure={...f,message:f.message||'连接中断或超时，请重试'}
