@@ -235,6 +235,21 @@ bash /新包目录/update-offline.sh /原部署目录 --status
 
 普通 Git push 只发布源码；每次医院升级仍需制作、传入并安装对应更新包。现有版本标签工作流发布镜像与此本地打包流程并行，不能把“仓库有工作流文件”视为医院自动升级或 GPU 已通过验收。
 
+### 服务器批量提取质量审计
+
+正常“导出训练数据集”自动固定审计，无需标注人员另点按钮。安装新完整更新包后，`export-audit.sh` 会随包校验并安装到原部署目录；原脚本也纳入升级备份/恢复。提取过程只读、无网络、无需停止服务。不要复制正在写入的 app.db 代替正式提取。
+
+```bash
+bash /opt/sperm-annotation/sperm-annotation-offline/export-audit.sh /opt/sperm-annotation/sperm-annotation-offline --list
+bash /opt/sperm-annotation/sperm-annotation-offline/export-audit.sh /opt/sperm-annotation/sperm-annotation-offline --output /tmp/quality-audit.zip
+bash /opt/sperm-annotation/sperm-annotation-offline/export-audit.sh /opt/sperm-annotation/sperm-annotation-offline --dataset-id train_xxx --output /tmp/one-dataset-audit.zip
+bash /opt/sperm-annotation/sperm-annotation-offline/export-audit.sh /opt/sperm-annotation/sperm-annotation-offline --lookup train_xxx__v000__frame_000123.jpg
+```
+
+`--media-id` 可筛选视频/媒体修订 ID；`--since/--until` 按数据集创建时间筛选，必须带时区，例如 `2026-09-30T00:00:00+08:00`，until 不含上界。默认成功包，`--include-failed` 另包含失败尝试；历史 F 的审计可提取，训练包下载仍遵守当前 F 门禁。目标文件存在时拒绝覆盖。旧任务缺快照时 list 显示未覆盖，lookup 可利用旧清单查来源，不伪造旧审计。
+
+将审计 ZIP 交给独立 [statistics_system](https://github.com/huangwww11222/statistics_system) 导入；需看图时，再绑定同一数据集训练 ZIP。完整人员/事件证据保留在服务端数据库，训练 ZIP 默认只带图片来源和审计摘要。
+
 ## 7. 迁移现有数据库和 Storage
 
 先停旧后端和新后端，完整备份，确认没有写入或 Tracking：

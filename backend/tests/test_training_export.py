@@ -119,7 +119,7 @@ def test_zip_contains_real_frames_and_final_labels(frozen, fmt):
         )
         assert len(set(images)) == 3
         decoded = cv2.imdecode(
-            np.frombuffer(z.read("images/train/v000_frame_000001.jpg"), np.uint8),
+            np.frombuffer(z.read(samples[1]["image"]), np.uint8),
             cv2.IMREAD_COLOR,
         )
         assert decoded.shape[:2] == (480, 640) and 75 <= decoded.mean() <= 85
@@ -133,7 +133,7 @@ def test_zip_contains_real_frames_and_final_labels(frozen, fmt):
             assert config["train"] == "images/train" and config["val"] == "images/val"
             assert config["names"] == {0: "CD4", 1: "rare: 'sperm' #α", 2: "sperm"}
             assert z.read(samples[2]["label"]) == b""
-            row = list(map(float, z.read("labels/train/v000_frame_000001.txt").split()))
+            row = list(map(float, z.read(samples[1]["label"]).split()))
             assert row == pytest.approx(
                 [0, 23.333 / 640, 30 / 480, 20 / 640, 20 / 480], abs=1e-10
             )
@@ -369,7 +369,7 @@ def test_multiple_video_versions_are_all_exported_without_filename_collisions(fr
     )
     with zipfile.ZipFile(export.download(job["exportId"], 3)) as z:
         assert len([x for x in z.namelist() if x.endswith(".jpg")]) == 5
-        row = list(map(float, z.read("labels/val/v001_frame_000001.txt").split()))
+        row = list(map(float, z.read(next(s["label"] for s in job["manifest"]["samples"] if s["finalVersionId"] == vid and s["frameIndex"] == 1)).split()))
         assert row[1:] == pytest.approx([6 / 120, 7 / 90, 10 / 120, 10 / 90], abs=1e-10)
 
 

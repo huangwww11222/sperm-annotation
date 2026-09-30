@@ -15,6 +15,9 @@ WORKDIR /app/backend
 
 COPY backend/requirements.txt ./requirements.txt
 
+ARG APP_RELEASE_REVISION=
+ENV APP_RELEASE_REVISION=${APP_RELEASE_REVISION}
+
 ARG PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
 RUN python -m pip install --upgrade pip \
     && python -m pip install \

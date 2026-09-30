@@ -36,3 +36,6 @@ backend/data/app.db-wal
 # Local offline upgrade state, private backups and incomplete package exports.
 /.offline/
 /.offline-partial-*/
+
+# Separate statistics repository checked out for coordinated development.
+/标注统计/

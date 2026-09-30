@@ -89,7 +89,7 @@ try {
     Invoke-PackageCommand -Program git -CommandArgs @('archive', '--format=zip', '--output', $archive, $revision)
     Expand-Archive -LiteralPath $archive -DestinationPath $source
 
-    $packageFiles = @('update-offline.sh', 'scripts/offline_update.py', 'scripts/offline_legacy.json', 'compose.yaml', 'compose.gpu.yaml', '.env.docker.example')
+    $packageFiles = @('update-offline.sh', 'export-audit.sh', 'scripts/offline_update.py', 'scripts/offline_legacy.json', 'compose.yaml', 'compose.gpu.yaml', '.env.docker.example')
     foreach ($relative in $packageFiles + @('backend/Dockerfile', 'frontend/Dockerfile', '.dockerignore')) {
         if (-not (Test-Path -LiteralPath (Join-Path $source $relative) -PathType Leaf)) {
             throw "Selected revision does not contain $relative. Choose a release that includes the offline update tools."
@@ -103,7 +103,7 @@ try {
         '--label', 'io.sperm-annotation.offline-contract=1', '--label', "io.sperm-annotation.mode=$Mode")
     $index = if ($Mode -eq 'gpu') { 'https://download.pytorch.org/whl/cu132' } else { 'https://download.pytorch.org/whl/cpu' }
     Invoke-PackageCommand -Program docker -CommandArgs (@('build', '--pull', '--platform', 'linux/amd64', '-f', (Join-Path $source 'backend/Dockerfile'),
-        '--build-arg', "PYTORCH_INDEX_URL=$index", '-t', $backendTag) + $labels + @($source))
+        '--build-arg', "PYTORCH_INDEX_URL=$index", '--build-arg', "APP_RELEASE_REVISION=$revision", '-t', $backendTag) + $labels + @($source))
     Invoke-PackageCommand -Program docker -CommandArgs (@('build', '--pull', '--platform', 'linux/amd64', '-f', (Join-Path $source 'frontend/Dockerfile'),
         '-t', $frontendTag) + $labels + @($source))
     $backend = Get-PackageImage -Tag $backendTag -Revision $revision -ImageVersion $Version -ImageMode $Mode

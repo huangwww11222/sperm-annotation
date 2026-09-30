@@ -14,6 +14,7 @@ import cv2
 import yaml
 
 from . import confirmation_workflow as confirmation
+from . import quality_audit as audit
 from .config import DATASET_EXPORT_DIR
 from .db import connect
 from .review_repository import compute_file_sha256
@@ -36,6 +37,7 @@ def migrate(c):
     );
     """)
     c.commit()
+    audit.migrate(c)
 
 
 def recover_interrupted():
@@ -223,7 +225,7 @@ def create(actor, key, body):
                 )
             log.info("dataset.replay export=%s actor=%s key=%s", old["id"], actor, key)
             return status(old["id"], actor)
-        _, summary = snapshots(c, body["finalVersionIds"])
+        versions, summary = snapshots(c, body["finalVersionIds"])
         eid = "train_" + uuid.uuid4().hex
         c.execute(
             "INSERT INTO training_exports(id,actor_id,request_key,request_hash,request_json,state,total_frames,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
@@ -239,6 +241,7 @@ def create(actor, key, body):
                 now(),
             ),
         )
+        audit.capture(c, eid, actor, body, versions)
     log.info(
         "dataset.queued export=%s actor=%s versions=%s key=%s",
         eid,
@@ -327,14 +330,16 @@ def split_samples(versions, ratio):
     }
 
 
-def build_package(eid, body, versions, summary, work):
+def build_package(eid, body, versions, summary, work, audit_snapshot, audit_sha):
     # Lazy import reuses the application's exact original-video resolver (never overlay/cached frames).
     from .main import find_video, media_dir
 
     class_ids = {name: i for i, name in enumerate(summary["classNames"])}
     assignments = split_samples(versions, body["splitRatio"])
     manifest = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
+        "sourceSystemId": audit_snapshot["sourceSystemId"],
+        "auditReference": audit.reference(audit_snapshot, audit_sha),
         "exportId": eid,
         "format": body["format"],
         "createdAt": now(),
@@ -375,6 +380,8 @@ def build_package(eid, body, versions, summary, work):
                 "baselineId": v["final"]["baseline_id"],
                 "reviewVersionId": v["final"]["review_version_id"],
                 "mediaId": m["media_id"],
+                "mediaRevisionId": m["id"],
+                "reviewSessionId": audit_snapshot["sources"][vi]["reviewSessionId"],
                 "sourceSha256": m["sha256"],
                 "width": m["width"],
                 "height": m["height"],
@@ -400,7 +407,7 @@ def build_package(eid, body, versions, summary, work):
                         "SOURCE_DIMENSIONS_CHANGED", "解码图像尺寸与最终版本不符"
                     )
                 split = assignments[vi, fi]
-                stem = f"v{vi:03d}_frame_{fi:06d}"
+                stem = f"{eid}__v{vi:03d}__frame_{fi:06d}"
                 rel = f"images/{split}/{stem}.jpg"
                 image_path = work / rel
                 image_path.parent.mkdir(parents=True, exist_ok=True)
@@ -419,6 +426,10 @@ def build_package(eid, body, versions, summary, work):
                 done += 1
                 manifest["counts"][split] += 1
                 sample = {
+                    "sampleId": stem,
+                    "mediaRevisionId": m["id"],
+                    "imageSha256": audit.sha(encoded.tobytes()),
+                    "objects": [],
                     "finalVersionId": v["final"]["id"],
                     "frameIndex": fi,
                     "split": split,
@@ -440,7 +451,16 @@ def build_package(eid, body, versions, summary, work):
                     }
                 )
                 lines = []
-                for obj in frame["objects"]:
+                for line_no, obj in enumerate(frame["objects"], 1):
+                    sample["objects"].append(
+                        {
+                            "objectId": obj["objectId"],
+                            "yoloLine": line_no if body["format"] != "coco" else None,
+                            "cocoAnnotationId": ann_id + 1
+                            if body["format"] != "yolo"
+                            else None,
+                        }
+                    )
                     x1, y1, x2, y2 = obj["bbox"]
                     bw, bh = x2 - x1, y2 - y1
                     cid = class_ids[obj["classKey"]]
@@ -526,7 +546,8 @@ YOLO 标签为 class_id cx cy w h，坐标按实际图像尺寸归一化，类�
 
 训练/验证按确定的帧序划分；必要时交换一帧，保证训练集包含目标，且有至少两张正样本时验证集也包含目标。两部分没有重复图片。
 同一视频内的帧相关性较高；需要独立视频评估时，请在训练前按采集批次重新组织验证集。
-manifest.json 记录实际划分、原视频摘要与最终版本。provenance/ 保留完整 A/B/最终框用于追溯。
+manifest.json 记录逐图片 sampleId、原始帧、视频、最终版本及 auditReference；文件名包含数据集身份。
+provenance/ 保留完整 A/B/最终框。完整人员与操作历史固定在服务端，通过运维审计导出命令获取。
 """,
         encoding="utf-8",
     )
@@ -561,7 +582,21 @@ def run(eid):
             row["actor_id"],
             summary["frameCount"],
         )
-        manifest = build_package(eid, body, versions, summary, work)
+        with closing(connect()) as c:
+            audit_snapshot, audit_sha = audit.load(c, eid)
+        expected = {
+            (v["final"]["id"], v["final"]["snapshot_hash"], v["media"]["sha256"])
+            for v in versions
+        }
+        recorded = {
+            (s["finalVersionId"], s["snapshotHash"], s["sourceSha256"])
+            for s in audit_snapshot["sources"]
+        }
+        if expected != recorded or body != audit_snapshot["dataset"]["settings"]:
+            raise ReviewError("AUDIT_SNAPSHOT_MISMATCH", "审计快照与训练来源不一致")
+        manifest = build_package(
+            eid, body, versions, summary, work, audit_snapshot, audit_sha
+        )
         with zipfile.ZipFile(partial, "w", zipfile.ZIP_DEFLATED) as archive:
             for path in sorted(work.rglob("*")):
                 if path.is_file():

@@ -22,6 +22,7 @@ Vue 3 + TypeScript + Vite；FastAPI + SQLite；SAM3 在后端按需加载。前�
 | 视频进度 | `components/WorkflowProgress.vue`，B/C 均使用工作区顶部横条；人工标注顶部展示帧位置、含标注帧数、保存与送审 |
 | 用户使用说明 | `components/UserGuide.vue`；`help/user-guide.md` 为页面阅读和下载的唯一内容源，`AppLayout.vue` 提供入口 |
 | 训练集导出 | `components/TrainingDatasetExport.vue`、`api/trainingExportApi.ts`、`backend/app/training_export.py` 与 `_routes.py` |
+| 自动质量审计与只读提取 | `backend/app/quality_audit.py` / `audit_export.py`、根 `export-audit.sh`；统计仓库单独检出到 `标注统计/`，不纳入主仓库或镜像 |
 | 记录查询 | `pages/ResultsPage.vue`、`backend/app/db.py` |
 | 媒体/工作区/Tracking API | `api/trackApi.ts`、`api/httpAnnotationApi.ts`、`backend/app/main.py` |
 | Tracking 编排 / 模型 / 异常 | `backend/app/tracker.py`、`services/sam3_engine.py`、`services/anomaly_detector.py`、`services/annotation_seed.py` |

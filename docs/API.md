@@ -98,3 +98,11 @@ Session 关键字段：`id, baselineId, revision, state, reviewerId, media, prog
 | `POST /api/export/dataset` | 旧入口拒绝，410 `FINAL_CONFIRMATION_REQUIRED` |
 
 创建请求幂等；任务生成状态与资格共同决定是否可下载，不得仅按 ZIP 文件存在就返回。资格与产物规则见 [WORKFLOW.md](WORKFLOW.md)。
+
+## 审计传输契约
+
+现有创建 API 和按钮不增加请求字段；任务与不可变审计同事务落库。训练 `manifest.json` 的 `schemaVersion` 为 **2**：顶层 `sourceSystemId`、`exportId`、`auditReference {auditId,sha256,schemaVersion:1,capturedAtUtc}`；`sources` 固定 mediaRevisionId/mediaId/sourceSha256/宽高/帧数/A/B/C/F/snapshotHash；`samples` 增加 sampleId、mediaRevisionId、imageSha256、objects[]。objects 项将稳定 objectId 对应到 1 基 yoloLine 或 cocoAnnotationId，空帧保留空列表。文件名包含 exportId；标签仍是标准格式。
+
+完整证据通过服务端 `python -m app.audit_export` 只读提取，或使用根 `export-audit.sh`。运维 ZIP 顶层 `format:'annotation-quality-audit',schemaVersion:1,extractedAtUtc,datasetCount,files[{name,sha256,size}]`；`datasets.jsonl` 含生成状态、创建时间、提取时 currentFinalAtRead、auditReference、snapshotFile、manifestFile。snapshots schemaVersion:1 保存 sourceSystemId/exportId/auditId/capturedAtUtc/sourceAppRevision、dataset 设置、sources、tables、completeness、坐标/责任约定。该 ZIP 的版本与训练 manifest 版本分别维护。
+
+提取记录“ready”只表示生成成功，不表示已下载或训练。currentFinalAtRead 只表示提取时的当前状态；导出的历史 F 选择取 F 的 decisionEventId 和冻结决定，不能用最新 head 替代。SHA 用于传输校验，发布方身份仍依赖可信交付渠道。读取/提取故障返回非零且不发布半个包。

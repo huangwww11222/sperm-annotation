@@ -34,7 +34,7 @@ npm run build --prefix frontend
 | 送审 | `test_review_completion.py` | `review-ingress-browser.mjs`（6） |
 | B 草稿/提交/恢复 | `test_review_workflow.py`、`test:review` | `review-browser.mjs`（27）、`review-failure-browser.mjs`（19） |
 | C 选择/恢复/最终版本 | `test_confirmation_workflow.py`、`test:confirmation` | `confirmation-browser.mjs`（40）、`confirmation-failure-browser.mjs`（34） |
-| 训练导出/门禁/版本 | `test_training_export.py` | `training-export-browser.mjs`（29） |
+| 训练导出/门禁/版本 | `test_training_export.py`、`test_quality_audit.py`、`test_export_audit_script.py` | `training-export-browser.mjs`（29） |
 | 全窗口专注、视频进度 | 上述对应页面回归、构建 | `workspace-layout-browser.mjs`（49） |
 | 三页工作台一致性、紧凑对象导航 | 上述对应页面回归、构建 | `workbench-consistency-browser.mjs`（124）；包含两尺寸浅深主题、跨页收起、专注、原生折叠、对象/修改项导航与保存 |
 | 数据库查询/升级、Docker 发布 | `test_annotation_result_dedupe.py`、`test_deployment_preflight.py`、`test_docker_deployment_contract.py`、`test_model_distribution.py` | 下方容器验收；不是只运行前端构建 |
@@ -192,6 +192,7 @@ python3 scripts/check_repository.py
 | `confirmation.committed/replay/rejected/storage_failed` | 选择、版本冲突、原键恢复、回滚堆栈 |
 | `dataset.queued/started/progress/ready/download` | 任务阶段与真实处理帧数 |
 | `dataset.failed/enqueue_failed/interrupted` | 提帧/写包/发布/重启失败 |
+| `audit.captured`、`audit.export_failed/uncovered/extracted` | 自动固定快照、只读提取失败、旧包覆盖范围与提取数量；CLI 诊断在 stderr，不混入 ZIP |
 | `annotation.frame_slow/frame_failed/prefetch_failed` | 媒体、目标帧、耗时；慢阈值 250ms |
 | `annotation.workspace_save_failed/tracking_load_failed` | 媒体、保存序号与实际读取异常 |
 | `media.deleted/delete_failed/delete_rejected`、`annotation.media_deleted/media_delete_failed/media_list_failed` | 删除结果、媒体 ID、操作者、文件系统异常；前端网络失败不得当删除成功 |
@@ -216,3 +217,20 @@ python3 scripts/check_repository.py
 模型交付的专项验收：2026-09-28 部署测试 18 项通过，完整模型包校验、下载续传与缓存复用、处理器加载及公开 Release 附件检查完成；未运行真实 GPU 推理。固定模型信息以 `model-distribution/manifest.json` 为准。
 
 更早的环境、数量和故障过程集中保存在 [历史验证记录](archive/README.md#历史验证记录)，不作为本次修改自动通过的证明。
+
+### 自动审计与统计仓库联调
+
+新增审计、脚本与离线升级用例：
+
+```bash
+AUDIT_INTEROP_DIR="$PWD/work/audit-tests/interop" \
+APP_DATA_DIR="$PWD/work/audit-tests/data" APP_DB_FILE="$PWD/work/audit-tests/data/app.db" \
+APP_STORAGE_DIR="$PWD/work/audit-tests/storage" PYTHONPATH=backend \
+work/review-venv/bin/python -m pytest backend/tests/test_quality_audit.py backend/tests/test_export_audit_script.py backend/tests/test_training_export.py backend/tests/test_offline_update.py -q
+```
+
+interop 夹具生成真实 YOLO/COCO/双格式、多视频及重新确认前后的完整训练包和一份运维审计包。独立统计仓库检出到 `标注统计/` 时，将 `ANNOTATION_AUDIT_INTEROP_DIR` 指向该绝对目录，在统计仓库的 PYTHONPATH 下运行它的 pytest；两个进程不共用名为 app 的模块。没有设置联调路径时用例明确跳过。统计真实浏览器入口及运行方式见该仓库当前说明。
+
+容器 smoke 可设置 `SMOKE_STATE_FILE` 指向本次隔离 work 目录，避免覆盖其他测试的令牌文件。CPU 容器生成训练集后，用 `export-audit.sh` 实际提取，再让统计 CLI 导入；测试包含只读连接、输出拒绝覆盖、失败无半包，以及升级/恢复时运维脚本一起还原。
+
+2026-09-30 自动审计交付：主仓库完整后端 **333 项通过**（包含真实视频联调产物、审计事务/幂等/不可变、只读提取和脚本/恢复）；统计仓库 **23 项通过**，真实浏览器 **21 项通过**，两边类型检查/生产构建通过。PowerShell 打包 **19 组**模拟 Git/Docker 场景通过（本机 PowerShell 7.4 容器，非 Windows 5.1 实机）。隔离 CPU Compose 完成真实上传→A/B/C→训练 ZIP，`export-audit.sh` 从运行 DB 提取后由统计 CLI 在 Python 3.12 CPU 容器导入。该容器复用已有 CPU 依赖镜像并覆盖完整应用代码，未执行新 GPU 镜像构建或医院 L20 验收。npm 安装在本机遇到 CA 错误，前端构建复用了项目已安装、与锁文件一致的依赖；没有关闭 TLS 校验。证据位于 `work/audit-tests/`、`output/playwright/statistics-audit.png`。

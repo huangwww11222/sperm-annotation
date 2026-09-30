@@ -364,7 +364,7 @@ class Updater:
             self.note('尚未建立版本记录；--check 将核对旧代码指纹。')
 
     def snapshot_files(self, backup):
-        for name in ('.env', 'deploy-offline.sh', 'manage-offline.sh', '.offline/current-compose.json', '.offline/state.json'):
+        for name in ('.env', 'deploy-offline.sh', 'manage-offline.sh', 'export-audit.sh', '.offline/current-compose.json', '.offline/state.json'):
             source = self.deployment / name
             if source.exists():
                 dest = backup / 'config' / name
@@ -375,7 +375,7 @@ class Updater:
         shutil.copy2(Path(__file__), backup / 'offline_update.py')
 
     def restore_files(self, backup):
-        for name in ('.env', 'deploy-offline.sh', 'manage-offline.sh', '.offline/current-compose.json', '.offline/state.json'):
+        for name in ('.env', 'deploy-offline.sh', 'manage-offline.sh', 'export-audit.sh', '.offline/current-compose.json', '.offline/state.json'):
             source, dest = backup / 'config' / name, self.deployment / name
             if source.exists():
                 atomic_write(dest, source.read_text(encoding='utf-8'))
@@ -547,6 +547,8 @@ class Updater:
                        'exec docker compose -p ' + shlex.quote(candidate['name']) +
                        ' --project-directory "$PWD" --env-file .env -f .offline/current-compose.json "${@:-ps}"\n')
             atomic_write(self.deployment / 'manage-offline.sh', manager)
+            if 'export-audit.sh' in manifest['files']:
+                atomic_write(self.deployment / 'export-audit.sh', (self.bundle / 'export-audit.sh').read_text(encoding='utf-8'))
             if (self.deployment / 'deploy-offline.sh').exists():
                 atomic_write(self.deployment / 'deploy-offline.sh', '#!/usr/bin/env bash\nset -euo pipefail\ncd -- "$(dirname -- "${BASH_SOURCE[0]}")"\nexec bash manage-offline.sh up -d --no-build --pull never --wait\n')
             self.start(self.root / 'current-compose.json', 'frontend')

@@ -84,7 +84,7 @@ try {
         # Sentinels in checkout must never enter the archived build context/package.
         [IO.File]::WriteAllText((Join-Path $checkout '.env'), 'JWT_SECRET=do-not-package')
         [IO.File]::WriteAllText((Join-Path $checkout 'private-video.mp4'), 'do-not-package')
-        foreach ($relative in @('update-offline.sh', 'scripts/offline_update.py', 'scripts/offline_legacy.json', 'compose.yaml', 'compose.gpu.yaml', '.env.docker.example', 'backend/Dockerfile', 'frontend/Dockerfile', '.dockerignore')) {
+        foreach ($relative in @('update-offline.sh', 'export-audit.sh', 'scripts/offline_update.py', 'scripts/offline_legacy.json', 'compose.yaml', 'compose.gpu.yaml', '.env.docker.example', 'backend/Dockerfile', 'frontend/Dockerfile', '.dockerignore')) {
             if ($case -eq 'missing-source' -and $relative -eq 'scripts/offline_update.py') { continue }
             $file = Join-Path $global:packageSource $relative
             New-Item -ItemType Directory -Path (Split-Path $file -Parent) -Force | Out-Null

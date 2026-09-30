@@ -636,3 +636,22 @@ def test_mountpoint_data_directory_is_rejected_before_upgrade(updater, runtime, 
     monkeypatch.setattr(updater.os.path, "ismount", lambda p: str(p) == paths["database"])
     with pytest.raises(updater.UpdateError, match="挂载点"):
         updater.validate_runtime(config, backend, frontend)
+
+
+def test_audit_operations_script_is_restored_with_config(updater, tmp_path):
+    deployment = tmp_path / "deployment"
+    deployment.mkdir()
+    (deployment / ".env").write_text("COMPOSE_FILE=compose.yaml\n")
+    old = "#!/usr/bin/env bash\necho old\n"
+    (deployment / "export-audit.sh").write_text(old)
+    tool = updater.Updater(deployment, tmp_path / "bundle")
+    backup = tmp_path / "backup"
+    backup.mkdir()
+    try:
+        tool.snapshot_files(backup)
+        (deployment / "export-audit.sh").write_text("new")
+        tool.restore_files(backup)
+        assert (deployment / "export-audit.sh").read_text() == old
+    finally:
+        tool.log.close()
+        tool.lock.close()

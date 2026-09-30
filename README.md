@@ -86,3 +86,5 @@ runtime/ / models/ / work/ / output/   本机数据、模型与测试产物，�
 开发者先读 [AGENTS.md](AGENTS.md) 和 [当前文档索引](docs/README.md)。Python 基线为 **3.12**，Node 为 **22**；测试方法见 [TESTING.md](docs/TESTING.md)。合并前运行 `python3 scripts/check_repository.py`，避免重复定义、冲突标记及业务数据再次进入仓库。
 
 维护者推送 `vX.Y.Z` 标签后，镜像发布工作流会先验证再构建 Linux amd64 的 CPU/GPU 后端和前端镜像。**工作流文件不代表镜像已经发布**；以 GitHub Actions / Packages 的实际结果为准。首次发布后确认 Packages 可见性，第三方才可免构建拉取；具体流程见部署文档。发布前还需由代码所有者明确项目 LICENSE；本次不擅自选择授权协议，随项目提供的 SAM3 模型遵循其独立 SAM License。
+
+生成训练数据集时自动留存版本、人员与审查/确认历史的审计关联，医院人员无需增加操作。运维批量提取命令及图片追溯见 [Docker 部署说明](docs/DOCKER_DEPLOYMENT.md#服务器批量提取质量审计)，独立分析工具见 [statistics_system](https://github.com/huangwww11222/statistics_system)。

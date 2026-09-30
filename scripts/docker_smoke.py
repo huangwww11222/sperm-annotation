@@ -21,7 +21,8 @@ data_root = Path(os.environ['APP_DATA_ROOT']).resolve()
 assert data_root.is_relative_to(root/'work'), 'Use isolated work/ data'
 origin = os.environ.get('SMOKE_ORIGIN', 'http://127.0.0.1:18080')
 assert urlparse(origin).hostname in {'127.0.0.1', 'localhost'}
-state = root/'work/docker-smoke-state.json'
+state = Path(os.environ.get('SMOKE_STATE_FILE', root/'work/docker-smoke-state.json')).resolve()
+assert state.is_relative_to(root/'work'), 'Keep smoke credentials in isolated work/'
 token = ''
 
 
