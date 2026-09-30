@@ -142,3 +142,118 @@ def test_overlay_applies_same_global_and_single_frame_deletion_rules(tmp_path, m
     rows = [{"source_frame_index": frame, "objects": [{"object_id": oid, "bbox": [10, 10, 20, 20]} for oid in [7, 12]]} for frame in range(3)]
     _render_overlay_video(tmp_path / "video.avi", tmp_path / "overlay.mp4", {"width": 64, "height": 48, "fps": 30}, rows)
     assert seen == [[7], [], [7]]
+
+
+def _geometry_segment(tmp_path, monkeypatch, seed_frame, seed_box, boxes):
+    """Real tracker orchestration with a fresh fake model session per resume."""
+    seed = tmp_path / f"annotations_frame_{seed_frame:06d}.json"
+    seed.write_text(json.dumps({"frame": {"frameIndex": seed_frame}, "annotations": [
+        {"object_id": 7, "name": "sperm7", "bbox": seed_box, "source": "manual" if seed_frame == 0 else "ai"},
+        {"object_id": 12, "name": "sperm12", "bbox": [100, 200, 140, 220], "source": "manual" if seed_frame == 0 else "ai"},
+    ]}))
+    engine = FakeEngine(boxes)
+    meta = {"width": 696, "height": 512, "fps": 4, "frameCount": 8, "source_frame_indices": list(range(8))}
+    monkeypatch.setattr("app.tracker._probe_video", lambda path: meta)
+    monkeypatch.setattr("app.tracker.read_video", lambda *a, **kw: ([object()] * 8, meta))
+    monkeypatch.setattr("app.tracker.get_sam3_engine", lambda *a: engine)
+    monkeypatch.setattr("app.tracker._render_overlay_video", lambda *a, **kw: None)
+    return track_video(str(tmp_path / "video.avi"), str(seed), str(tmp_path / "tracker_results.json"), 8, start_frame=seed_frame)
+
+
+def _confirmed_shape_workspace(tmp_path, monkeypatch):
+    from app import annotation_state
+
+    manual = [100, 100, 140, 120]
+    accepted = [100, 100, 144.4, 111.8]
+    other = [100, 200, 140, 220]
+    first = _geometry_segment(tmp_path, monkeypatch, 0, manual, {1: {7: accepted, 12: other}})
+    assert first["anomaly_paused"]["frame_index"] == 1
+    reasons = first["anomaly_paused"]["reasons"]
+    assert reasons[0]["type"] == "size_shrink"
+    workspace = {"manualBaselines": [{"objectId": 7, "frameIndex": 0, "bbox": manual, "source": "manual"}],
+                 "lastPausedContext": {"frameIndex": 1}, "pausedAnomalies": reasons}
+    (tmp_path / "workspace_state.json").write_text(json.dumps(workspace))
+    payload = {"expectedRevision": 0, "objectId": 7, "frameIndex": 1, "decision": "normal", "calibrate": False}
+    response = annotation_state.write_state(tmp_path, "test-shape", 1, "accept-shape", payload, "feedback",
+                                           lambda previous: annotation_state.feedback_state(previous, tmp_path, payload, 1))
+    assert response["normalMotionSamples"] == []
+    assert response["pausedAnomalies"] == []
+    assert response["trackingFeedbackEvents"][-1]["geometryReference"]["bbox"] == accepted
+    return manual, accepted, other
+
+
+def test_normal_shape_confirmation_resumes_after_restart_without_redrawing(tmp_path, monkeypatch, caplog):
+    caplog.set_level("INFO", logger="review.tracking")
+    manual, accepted, other = _confirmed_shape_workspace(tmp_path, monkeypatch)
+    # Alternating both human-approved shapes must not force a redraw or teach
+    # any additional AI-derived reference. A fresh detector simulates restart.
+    boxes = {frame: {7: accepted if frame % 2 else manual, 12: other} for frame in range(2, 7)}
+    result = _geometry_segment(tmp_path, monkeypatch, 1, accepted, boxes)
+    assert result["anomaly_paused"] is None
+    assert result["lastProcessedFrame"] == 6
+    accepted_row = next(row for row in result["frames"] if row["frame_index"] == 3)
+    details = accepted_row["objects"][0]["anomaly_details"]
+    assert details["manual_baseline_bbox"] == manual
+    assert details["manual_baseline_frame"] == 0
+    assert details["geometry_reference_bbox"] == accepted
+    assert details["geometry_reference_source"] == "confirmed-normal"
+    assert details["geometry_reference_frame"] == 1
+    assert details["feedback_sample_count"] == 0
+    assert "geometry_references={7: 1}" in caplog.text
+    assert 'geometry_reference_frame' in caplog.text
+
+
+def test_shape_confirmation_does_not_hide_further_shrink_or_other_objects(tmp_path, monkeypatch):
+    _, accepted, other = _confirmed_shape_workspace(tmp_path, monkeypatch)
+    shrink = [100, 100, 120, 105]
+    result = _geometry_segment(tmp_path, monkeypatch, 1, accepted, {2: {7: shrink, 12: other}})
+    pause = result["anomaly_paused"]["reasons"][0]
+    assert pause["object_id"] == 7
+    assert pause["type"] == "size_shrink"
+    assert pause["geometryReferenceSource"] == "confirmed-normal"
+    assert pause["geometryReferenceFrame"] == 1
+    result = _geometry_segment(tmp_path, monkeypatch, 1, accepted,
+                               {2: {7: accepted, 12: [100, 200, 120, 210]}})
+    assert [item["object_id"] for item in result["anomaly_paused"]["reasons"]] == [12]
+
+
+def test_new_manual_reference_supersedes_accepted_shape(tmp_path, monkeypatch):
+    manual, accepted, other = _confirmed_shape_workspace(tmp_path, monkeypatch)
+    state_path = tmp_path / "workspace_state.json"
+    workspace = json.loads(state_path.read_text())
+    workspace["manualBaselines"] = [{"objectId": 7, "frameIndex": 1, "bbox": manual, "source": "manual"}]
+    state_path.write_text(json.dumps(workspace))
+    result = _geometry_segment(tmp_path, monkeypatch, 1, accepted, {2: {7: accepted, 12: other}})
+    pause = result["anomaly_paused"]["reasons"][0]
+    assert pause["manualBaselineFrame"] == 1
+    assert pause["geometryReferenceSource"] == "manual"
+
+
+def test_geometry_restore_respects_frame_reset_correction_and_deletion():
+    from app.services.anomaly_detector import ManualBaseline
+    from app.tracker import _load_confirmed_geometry_references
+
+    event = {"objectId": 7, "frameIndex": 2, "decision": "normal", "geometryReference": {
+        "objectId": 7, "frameIndex": 2, "bbox": [100, 100, 144, 112], "source": "confirmed-normal"}}
+    workspace = {"trackingFeedbackEvents": [event]}
+    manual = {7: ManualBaseline([100, 100, 140, 120], 0)}
+    assert not _load_confirmed_geometry_references(workspace, 1, manual)
+    assert _load_confirmed_geometry_references(workspace, 2, manual)[7].frame_index == 2
+    for tombstone in ({"deletedObjectIds": [7]}, {"deletedFrameObjects": [{"objectId": 7, "frameIndex": 2}]}):
+        assert not _load_confirmed_geometry_references({**workspace, **tombstone}, 3, manual)
+    for decision in ("reset", "corrected"):
+        revised = {"trackingFeedbackEvents": [event, {"objectId": 7, "frameIndex": 3, "decision": decision}]}
+        assert not _load_confirmed_geometry_references(revised, 3, manual)
+    future_correction = {"trackingFeedbackEvents": [event, {"objectId": 7, "frameIndex": 4, "decision": "corrected"}]}
+    assert 7 in _load_confirmed_geometry_references(future_correction, 3, manual)
+    future_reset = {"trackingFeedbackEvents": [event, {"objectId": 7, "frameIndex": 4, "decision": "reset"}]}
+    assert not _load_confirmed_geometry_references(future_reset, 3, manual)
+
+
+@pytest.mark.parametrize("bbox", ([100, 100, float("nan"), 112], [100, 100, 99, 112], [100, 100, 144], None))
+def test_invalid_geometry_reference_is_not_restored(bbox):
+    from app.tracker import _load_confirmed_geometry_references
+
+    event = {"objectId": 7, "frameIndex": 2, "decision": "normal", "geometryReference": {
+        "objectId": 7, "frameIndex": 2, "bbox": bbox, "source": "confirmed-normal"}}
+    assert not _load_confirmed_geometry_references({"trackingFeedbackEvents": [event]}, 2, {})

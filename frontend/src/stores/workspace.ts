@@ -5,7 +5,7 @@ import { hitHandle, moveBox, resizeBox, type Box } from '../annotation/geometry'
 import type { AnnotationObject, AnnotationTool, EffectResult, MediaAsset, SavedAnnotationFile } from '../types/annotation'
 // 登录、人工标注、视频目录、SAM3 Tracking 均走真实后端
 import { httpAnnotationApi } from '../api/httpAnnotationApi'
-import { trackApi, type ObjectDeletionSummary, type NormalMotionSample, type TrackingWarningSummary, type TrackingFeedbackResponse, type TrackingFeedbackInput } from '../api/trackApi'
+import { trackApi, type ObjectDeletionSummary, type NormalMotionSample, type TrackingWarningSummary, type TrackingFeedbackEvent, type TrackingFeedbackResponse, type TrackingFeedbackInput } from '../api/trackApi'
 import { WorkspaceWrites, type WorkspaceDraft } from '../annotation/workspaceWrites'
 import { useAuth } from './auth'
 import type { TrackingFrameObject, TrackingFrameResult } from '../types/annotation'
@@ -209,6 +209,7 @@ const createWorkspace = () => {
   const deletedObjectIds = ref<Record<string, number[]>>({})
   const deletedFrameObjects = ref<Record<string, FrameDeletion[]>>({})
   const normalMotionSamples = ref<Record<string, NormalMotionSample[]>>({})
+  const trackingFeedbackEvents = ref<Record<string, TrackingFeedbackEvent[]>>({})
   const trackingWarningSummary = ref<TrackingWarningSummary[]>([])
   const objectDeletionBusy = ref(false)
   const objectDeletionError = ref('')
@@ -228,7 +229,16 @@ const createWorkspace = () => {
   const trackingCalibrationSummary = computed(() => {
     const counts = new Map<number, number>()
     for (const sample of normalMotionSamples.value[currentMediaId.value] ?? []) counts.set(sample.objectId, (counts.get(sample.objectId) || 0) + 1)
-    return [...counts].map(([objectId, sampleCount]) => ({ objectId, sampleCount }))
+    const shapes = new Map<number, number>()
+    for (const event of trackingFeedbackEvents.value[currentMediaId.value] ?? []) {
+      if (event.decision === 'reset' || event.decision === 'corrected') shapes.delete(event.objectId)
+      else if (event.geometryReference) shapes.set(event.objectId, event.geometryReference.frameIndex)
+    }
+    // These are stored human confirmations; a newer manual frame can supersede
+    // their use during tracking. Keep the reset control available either way.
+    return [...new Set([...counts.keys(), ...shapes.keys()])]
+      .filter(objectId => !deletedObjectIds.value[currentMediaId.value]?.includes(objectId))
+      .map(objectId => ({ objectId, sampleCount: counts.get(objectId) ?? 0, geometryFrame: shapes.get(objectId) }))
   })
   const isObjectDeleted = (mediaId: string, objectId: number | undefined, frameIndex: number) => objectId != null && (
     deletedObjectIds.value[mediaId]?.includes(objectId) || deletedFrameObjects.value[mediaId]?.some(d => d.objectId === objectId && d.frameIndex === frameIndex)
@@ -246,6 +256,9 @@ const createWorkspace = () => {
     summary: string
     metrics: string[]
     baselineFrame?: number
+    geometryReferenceFrame?: number
+    geometryReferenceSource?: 'manual' | 'confirmed-normal'
+    acceptsGeometry: boolean
     reviewRange?: string
     reviewNotice?: string
     suggestion: string
@@ -876,8 +889,9 @@ const createWorkspace = () => {
     try {
       const response = await workspaceWrites.write(intent.serverMediaId, 'feedback', intent.body, intent.key) as unknown as TrackingFeedbackResponse
       normalMotionSamples.value[intent.mediaId] = response.normalMotionSamples
+      trackingFeedbackEvents.value[intent.mediaId] = response.trackingFeedbackEvents ?? []
       if (intent.mediaId === currentMediaId.value) {
-        pausedAnomalies.value = response.pausedAnomalies as typeof pausedAnomalies.value
+        pausedAnomalies.value = (response.pausedAnomalies as typeof pausedAnomalies.value).map(normalizePauseNotice)
         lastPausedContext.value = response.lastPausedContext ? { mediaId: intent.mediaId, frameIndex: response.lastPausedContext.frameIndex } : null
         anomalyObjectIds.value = pausedAnomalies.value.map(item => item.objectId)
         anomalyPanelVisible.value = pausedAnomalies.value.length > 0
@@ -1013,6 +1027,7 @@ const createWorkspace = () => {
       deletedObjectIds.value[mediaId] = state.deletedObjectIds ?? []
       deletedFrameObjects.value[mediaId] = state.deletedFrameObjects ?? []
       normalMotionSamples.value[mediaId] = state.normalMotionSamples ?? []
+      trackingFeedbackEvents.value[mediaId] = state.trackingFeedbackEvents ?? []
       if (pendingDeletion.value?.mediaId === mediaId) {
         const intent = pendingDeletion.value
         const deleted = state.deletedObjectIds?.includes(intent.record.objectId)
@@ -1034,7 +1049,7 @@ const createWorkspace = () => {
       deletedTrackingIds.value[mediaId] = new Set((state.deletedTrackingIds ?? []).map(String))
       anomalyFrames.value = Array.isArray(state.anomalyFrames) ? state.anomalyFrames : []
       pausedAnomalies.value = Array.isArray(state.pausedAnomalies)
-        ? (state.pausedAnomalies as typeof pausedAnomalies.value).map(item => ({ ...item, canLearn: !!item.canLearn, rawReasons: item.rawReasons ?? [] }))
+        ? (state.pausedAnomalies as typeof pausedAnomalies.value).map(normalizePauseNotice)
         : []
       lastPausedContext.value = state.lastPausedContext
         ? { mediaId, frameIndex: Number(state.lastPausedContext.frameIndex) }
@@ -1808,12 +1823,38 @@ const createWorkspace = () => {
     return local?.name?.trim() || `object-${objectId}`
   }
 
+  const isGeometryReason = (reason: string) => /^(?:manual|geometry)_(?:area_ratio|width_ratio|height_ratio|aspect_change)=/.test(reason)
+  const canLearnNormalMotion = (reasons: string[]) => reasons.some(reason => reason.startsWith('adjacent_center_shift='))
+    && reasons.every(reason => reason.startsWith('adjacent_center_shift=') || reason.startsWith('motion_') || isGeometryReason(reason))
+
+  const normalizePauseNotice = (item: typeof pausedAnomalies.value[number]) => {
+    // Older saved pauses have only the displayed title and canLearn flag.
+    // This restores their explanation; the server validates the real evidence.
+    const acceptsGeometry = !!item.acceptsGeometry || (item.rawReasons ?? []).some(isGeometryReason)
+      || ['框相对最近人工标注明显缩小', '框相对最近人工标注明显扩大或变形'].includes(item.title)
+    return {
+      ...item,
+      canLearn: item.rawReasons?.length ? canLearnNormalMotion(item.rawReasons) : !!item.canLearn,
+      acceptsGeometry,
+      geometryReferenceFrame: item.geometryReferenceFrame ?? (acceptsGeometry ? item.baselineFrame : undefined),
+      geometryReferenceSource: item.geometryReferenceSource ?? (acceptsGeometry ? 'manual' as const : undefined),
+      rawReasons: item.rawReasons ?? [],
+    }
+  }
+
   const explainPausedObject = (item: NonNullable<Awaited<ReturnType<typeof trackApi.getStatus>>['pausedObjects']>[number]) => {
     const details = item.details ?? {}
     const reasons = item.reasons ?? []
     const type = item.type
     const displayName = objectDisplayName(item.object_id, item.display_name || item.name)
-    const baselineFrame = Number(item.manualBaselineFrame ?? details.manual_baseline_frame)
+    const baselineFrame = Number(item.manualBaselineFrame ?? details.manual_baseline_frame ?? NaN)
+    const geometryReferenceFrame = Number(details.geometry_reference_frame ?? item.manualBaselineFrame ?? details.manual_baseline_frame ?? NaN)
+    const geometryReferenceSource = details.geometry_reference_source === 'confirmed-normal' ? 'confirmed-normal' as const : 'manual' as const
+    const referenceName = geometryReferenceSource === 'confirmed-normal' ? '已确认正常的框' : '最近人工标注'
+    const geometryReference = {
+      geometryReferenceFrame: Number.isFinite(geometryReferenceFrame) ? geometryReferenceFrame : undefined,
+      geometryReferenceSource,
+    }
     const reviewStart = Number(item.reviewStartFrame ?? details.review_start_frame)
     const reviewEnd = Number(item.reviewEndFrame ?? details.review_end_frame)
     const lookback = Number(item.reviewLookbackFrames ?? details.review_lookback_frames ?? 5)
@@ -1848,26 +1889,28 @@ const createWorkspace = () => {
       return {
         objectId: item.object_id,
         displayName,
-        title: '框相对最近人工标注明显缩小',
-        summary: `${displayName} 的框相对最近人工标注明显缩小，可能已经丢失精子尾部。`,
+        title: `框相对${referenceName}明显缩小`,
+        ...geometryReference,
+        summary: `${displayName} 的框相对${referenceName}明显缩小，可能已经丢失精子尾部。`,
         metrics,
         baselineFrame: Number.isFinite(baselineFrame) ? baselineFrame : undefined,
         reviewRange,
         reviewNotice,
-        suggestion: '检查当前帧与前几帧；重新框住完整的精子头部和尾部后再继续追踪。',
+        suggestion: '检查当前帧与前几帧；框准确时可直接确认无异常，有误时先重新框住完整目标再确认。',
       }
     }
     if (type === 'size_growth' || type === 'shape_change') {
       return {
         objectId: item.object_id,
         displayName,
-        title: '框相对最近人工标注明显扩大或变形',
-        summary: `${displayName} 的框相对最近人工标注明显扩大，可能框入了杂质或其他精子。`,
+        title: `框相对${referenceName}明显扩大或变形`,
+        ...geometryReference,
+        summary: `${displayName} 的框相对${referenceName}明显扩大或变形，可能框入了杂质或其他精子。`,
         metrics,
         baselineFrame: Number.isFinite(baselineFrame) ? baselineFrame : undefined,
         reviewRange,
         reviewNotice,
-        suggestion: '将框修正为只覆盖当前精子；若对象已分离，请分别确认框和 ID 后再续追。',
+        suggestion: '框准确时可直接确认无异常；若框入其他对象，先修正为只覆盖当前目标，再确认。',
       }
     }
     if (type === 'disappearance' || reasons.some((reason) => reason.includes('disappearance'))) {
@@ -2059,7 +2102,12 @@ const createWorkspace = () => {
               .filter(([, v]) => v !== 'normal')
               .map(([k]) => Number(k))
             const pausedObjs = status.pausedObjects || []
-            pausedAnomalies.value = pausedObjs.map(item => ({ ...explainPausedObject(item), rawReasons: item.reasons ?? [], canLearn: (item.reasons ?? []).some(reason => reason.startsWith('adjacent_center_shift=')) && !(item.reasons ?? []).some(reason => !reason.startsWith('adjacent_center_shift=') && !reason.startsWith('motion_')) }))
+            pausedAnomalies.value = pausedObjs.map(item => ({
+              ...explainPausedObject(item),
+              rawReasons: item.reasons ?? [],
+              canLearn: canLearnNormalMotion(item.reasons ?? []),
+              acceptsGeometry: ['size_shrink', 'size_growth', 'shape_change'].includes(item.type ?? '') || (item.reasons ?? []).some(isGeometryReason),
+            }))
             lastPausedContext.value = { mediaId, frameIndex: pauseFrame }
             anomalyPanelVisible.value = true
             const reasons = pausedAnomalies.value.map((item) => `${item.displayName}：${item.title}`)

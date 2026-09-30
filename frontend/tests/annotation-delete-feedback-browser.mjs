@@ -15,6 +15,21 @@ fs.mkdirSync('output/playwright', { recursive: true })
 page.on('pageerror', error => errors.push(String(error)))
 page.on('console', message => consoleLog.push({ type: message.type(), text: message.text() }))
 const check = (value, message) => { assert(value, message); checks.push(message); console.log('PASS', checks.length, message) }
+function sameManualRecords(actual, expected) {
+  // Percent-to-pixel round trips can turn 100 into 99.99999999999999.
+  // Keep identity, source, frame, and every non-coordinate field exact.
+  assert.deepEqual(actual.map(({ bbox, ...metadata }) => metadata), expected.map(({ bbox, ...metadata }) => metadata))
+  actual.forEach((record, index) => {
+    const before = expected[index].bbox, after = record.bbox
+    assert.equal(Array.isArray(after), Array.isArray(before))
+    assert.deepEqual(Object.keys(after).sort(), Object.keys(before).sort())
+    for (const [coordinate, value] of Object.entries(after)) {
+      assert(Number.isFinite(value) && Number.isFinite(before[coordinate]) && Math.abs(value - before[coordinate]) <= 1e-9,
+        `manual record ${index} bbox.${coordinate} changed: ${before[coordinate]} -> ${value}`)
+    }
+  })
+  return true
+}
 const button = name => page.getByRole('button', { name, exact: true })
 const ids = () => page.evaluate(() => window.ws.currentObjects.value.map(object => object.objectId).sort((a, b) => a - b))
 const idle = () => page.waitForFunction(() => window.ws && !window.ws.workspaceRestoring.value && !window.ws.exactFrameLoading.value && !window.ws.isAiBusy.value)
@@ -43,7 +58,7 @@ async function go(frame) {
   const input = page.getByRole('spinbutton', { name: '跳转帧号' })
   await input.fill(String(frame + 1)); await input.press('Enter')
   await page.waitForFunction(value => window.ws.currentFrame.value === value && !window.ws.exactFrameLoading.value, frame)
-  await page.locator('.annotation-heading h2').click()
+  await page.getByTestId('workbench-heading').locator('h2').click()
 }
 async function media(mid) {
   await page.locator('.asset-card').filter({ hasText: mid + '.avi' }).click()
@@ -94,10 +109,13 @@ try {
     trackStarts.push(request)
     await route.fulfill({ json: { taskId: 'controls-simulated-' + request.mediaId, status: 'queued', maxFrames: 2 } })
   })
-  await page.route('**/api/track/status/controls-simulated-*', route => route.fulfill({ json: {
-    status: 'success', lastProcessedFrame: 4, reachedVideoEnd: false,
-    warningSummary: [{ objectId: 7, reason: 'motion', count: 1, firstFrame: 4, lastFrame: 4, calibrated: true }],
-  } }))
+  await page.route('**/api/track/status/controls-simulated-*', route => {
+    const shape = route.request().url().endsWith('controls-shape')
+    return route.fulfill({ json: {
+      status: 'success', lastProcessedFrame: shape ? fixture.shapePausedFrame + 1 : 4, reachedVideoEnd: false,
+      warningSummary: shape ? [] : [{ objectId: 7, reason: 'motion', count: 1, firstFrame: 4, lastFrame: 4, calibrated: true }],
+    } })
+  })
 
   await page.goto(origin + '/annotate'); await attachStore(); await idle()
   await media('controls-delete'); await go(0)
@@ -170,7 +188,7 @@ try {
   check(JSON.stringify(await ids()) === '[12]', 'whole-video deletion survives browser refresh and tracking reload')
   await page.locator('.object-deletion-feedback').getByRole('button', { name: '撤销', exact: true }).click(); await saved()
   check((await ids()).includes(7) && countObject(await resultRows('controls-delete'), 7) === 23, 'whole-video undo survives same-tab refresh and still preserves preexisting single-frame deletion')
-  await select(7); await page.locator('.annotation-heading h2').click()
+  await select(7); await page.getByTestId('workbench-heading').locator('h2').click()
   const restoredX = await page.evaluate(() => window.ws.selectedObject.value.bbox.x)
   await page.keyboard.press('Alt+ArrowRight'); await saved()
   const editedX = await page.evaluate(() => window.ws.selectedObject.value.bbox.x)
@@ -225,6 +243,35 @@ try {
   durable = await workspace('controls-feedback-once')
   check(durable.normalMotionSamples.length === 0 && durable.trackingFeedbackEvents[0].decision === 'normal', 'unchecking calibration accepts only this event without creating a normal sample')
 
+  await media('controls-shape'); await go(fixture.shapePausedFrame)
+  await page.getByTestId('tracking-feedback').waitFor()
+  const beforeShape = await workspace('controls-shape')
+  const geometryNote = await page.getByTestId('tracking-geometry-acceptance').innerText()
+  check(geometryNote.includes('尺寸和形状') && geometryNote.includes('无需重画'), 'restored shape pause explains that normal confirmation records geometry without redrawing')
+  check(geometryNote.includes('丢失') && geometryNote.includes('重叠') && geometryNote.includes('仍会检查'), 'shape confirmation note retains future loss, overlap, and geometry checks')
+  check(await page.locator('.tracking-learn input').count() === 0, 'pure shape feedback does not present unrelated motion-learning controls')
+  await page.screenshot({ path: 'output/playwright/annotation-controls-shape.png', animations: 'disabled' })
+  const beforeShapeStarts = trackStarts.length
+  await page.getByTestId('confirm-tracking-normal').click()
+  await waitApi(async () => (await workspace('controls-shape')).trackingFeedbackEvents.some(event => event.geometryReference))
+  await page.waitForFunction(frame => !window.ws.isAiBusy.value && !window.ws.trackingFeedbackBusy.value && window.ws.currentFrame.value === frame + 1, fixture.shapePausedFrame)
+  durable = await workspace('controls-shape')
+  const geometryEvent = durable.trackingFeedbackEvents.find(event => event.geometryReference)
+  check(JSON.stringify(geometryEvent.geometryReference) === JSON.stringify({ objectId: 7, frameIndex: fixture.shapePausedFrame, bbox: fixture.shapeBox, source: 'confirmed-normal' }), 'server records the exact confirmed shape, object, and source frame as a separate reference')
+  check(durable.normalMotionSamples.length === 0, 'shape acceptance does not create motion samples even after normal-motion checkbox was previously unchecked')
+  check(sameManualRecords(durable.manualAnnotations, beforeShape.manualAnnotations) && sameManualRecords(durable.manualBaselines, beforeShape.manualBaselines), 'accepting a correct shape leaves frame-18 manual annotations and manual baselines unchanged')
+  check(trackStarts.length === beforeShapeStarts + 1 && trackStarts.at(-1).startFrame === fixture.shapePausedFrame, 'shape confirmation saves the reference before resuming from the accepted pause frame')
+  await saved(); await reload(); await media('controls-shape')
+  durable = await workspace('controls-shape')
+  check(durable.trackingFeedbackEvents.filter(event => event.geometryReference).length === 1 && JSON.stringify(durable.trackingFeedbackEvents.find(event => event.geometryReference).geometryReference) === JSON.stringify(geometryEvent.geometryReference), 'confirmed geometry reference survives reload exactly once')
+  check(sameManualRecords(durable.manualAnnotations, beforeShape.manualAnnotations) && sameManualRecords(durable.manualBaselines, beforeShape.manualBaselines) && durable.normalMotionSamples.length === 0, 'reloading accepted shape preserves manual provenance and keeps motion calibration empty')
+  check((await page.locator('.tracking-calibration').innerText()).includes('第 23 帧尺寸已确认') && await button('恢复默认判断').isVisible(), 'shape-only accepted reference remains visible with a reset action even without motion samples')
+  await button('恢复默认判断').click()
+  await waitApi(async () => (await workspace('controls-shape')).trackingFeedbackEvents.some(event => event.decision === 'reset'))
+  await saved(); await reload(); await media('controls-shape')
+  durable = await workspace('controls-shape')
+  check(await page.locator('.tracking-calibration').count() === 0 && durable.trackingFeedbackEvents.some(event => event.geometryReference) && durable.trackingFeedbackEvents.at(-1).decision === 'reset', 'shape reset survives reload, removes the active reference indicator, and preserves original acceptance history')
+
   await media('controls-feedback-failure'); await go(3)
   const beforeFailure = trackStarts.length
   loseFeedbackResponse = true
@@ -241,7 +288,7 @@ try {
   check(durable.normalMotionSamples.length === 1 && durable.trackingFeedbackEvents.filter(event => event.decision === 'normal').length === 1, 'lost-response replay does not duplicate samples or audit events')
 
   await media('controls-feedback-corrected'); await go(3); await select(7)
-  await page.locator('.annotation-heading h2').click(); await page.keyboard.press('Alt+ArrowRight'); await saved()
+  await page.getByTestId('workbench-heading').locator('h2').click(); await page.keyboard.press('Alt+ArrowRight'); await saved()
   await page.getByTestId('confirm-tracking-corrected').click()
   await waitApi(async () => (await workspace('controls-feedback-corrected')).trackingFeedbackEvents.length === 1)
   await idle()

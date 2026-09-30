@@ -66,6 +66,57 @@ def test_normal_size_jitter_does_not_pause() -> None:
         assert detector.push(frame, {1: _box(width=width, height=height, x=100 + frame * 3)}).should_pause is False
 
 
+def test_confirmed_geometry_requires_one_complete_shape_match() -> None:
+    from app.services.anomaly_detector import ConfirmedGeometryReference
+
+    manual = _box(width=40, height=20)
+    confirmed = _box(width=20, height=40)
+    detector = _detector(manual)
+    detector.geometry_references = {1: ConfirmedGeometryReference(confirmed, 1)}
+    detector.initialize_seed(1, {1: confirmed})
+    # Width matches manual and height matches confirmation, but neither
+    # complete human-approved shape is 40x40. Do not merge dimension ranges.
+    report = detector.push(2, {1: _box(width=40, height=40)})
+    assert report.should_pause
+    assert report.frames[0].details["geometry_reference_source"] == "confirmed-normal"
+
+
+@pytest.mark.parametrize("scenario", ["motion", "overlap", "loss"])
+def test_geometry_confirmation_preserves_independent_checks(scenario) -> None:
+    from app.services.anomaly_detector import ConfirmedGeometryReference
+
+    manual = _box(width=40, height=20)
+    confirmed = _box(width=44.4, height=11.8)
+    detector = _detector(manual)
+    detector.geometry_references = {1: ConfirmedGeometryReference(confirmed, 1)}
+    seed = {1: confirmed}
+    if scenario == "overlap":
+        seed[2] = _box(x=200)
+    detector.initialize_seed(1, seed)
+    if scenario == "motion":
+        current = {1: _box(width=44.4, height=11.8, x=400)}
+        reason = "adjacent_center_shift="
+    elif scenario == "overlap":
+        current = {1: confirmed, 2: confirmed}
+        reason = "bbox_overlap_with="
+    else:
+        current = {}
+        reason = "unexpected_disappearance"
+    report = detector.push(2, current)
+    assert report.should_pause
+    assert any(item.object_id == 1 and any(value.startswith(reason) for value in item.reasons) for item in report.frames)
+    assert detector.states[1].manual_baseline.bbox == manual
+
+
+def test_future_confirmation_is_not_applied_to_earlier_predictions() -> None:
+    from app.services.anomaly_detector import ConfirmedGeometryReference
+
+    detector = _detector(_box(width=40, height=20))
+    confirmed = _box(width=44.4, height=11.8)
+    detector.geometry_references = {1: ConfirmedGeometryReference(confirmed, 8)}
+    assert detector.push(1, {1: confirmed}).should_pause
+
+
 def test_normal_motion_is_not_compared_with_manual_center() -> None:
     detector = _detector()
     for frame in range(1, 15):

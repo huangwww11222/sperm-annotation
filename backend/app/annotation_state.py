@@ -134,7 +134,7 @@ def write_state(directory: Path, media_id: str, uid: int, key: str,
         log.info("annotation.deletion_changed media=%s user=%s revision=%s global_ids=%s frame_rules=%s key=%s", media_id, uid, revision + 1, clean.get("deletedObjectIds", []), len(clean.get("deletedFrameObjects", [])), key)
     if operation == "feedback":
         event = clean["trackingFeedbackEvents"][-1]
-        log.info("annotation.feedback_saved media=%s user=%s object=%s frame=%s decision=%s calibrated=%s revision=%s key=%s", media_id, uid, event["objectId"], event.get("frameIndex"), event["decision"], "sample" in event, revision + 1, key)
+        log.info("annotation.feedback_saved media=%s user=%s object=%s frame=%s decision=%s calibrated=%s geometry_reference_frame=%s reasons=%s revision=%s key=%s", media_id, uid, event["objectId"], event.get("frameIndex"), event["decision"], "sample" in event, event.get("geometryReference", {}).get("frameIndex"), event.get("reasons", []), revision + 1, key)
     return response
 
 
@@ -231,8 +231,22 @@ def feedback_state(previous: dict[str, Any], directory: Path, body: dict[str, An
             except (KeyError, TypeError, ValueError) as exc:
                 raise HTTPException(422, "人工修正框无效") from exc
         else:
-            # Human acceptance affects motion only; shape/identity/loss never
-            # gain an exemption through a movement feedback sample.
+            # Accepting a size/shape warning is an explicit human geometry
+            # judgement, even without redrawing. Keep its server-side snapshot
+            # separate from manual annotations and optional movement learning.
+            geometry_reason = any(str(reason).startswith(("manual_area_ratio=", "manual_width_ratio=", "manual_height_ratio=", "manual_aspect_change=")) for reason in reasons)
+            if geometry_reason:
+                try:
+                    raw_box = (obj or {}).get("bbox")
+                    if not isinstance(raw_box, list) or len(raw_box) != 4:
+                        raise ValueError("missing confirmed bbox")
+                    box = [float(value) for value in raw_box]
+                    if not all(math.isfinite(value) for value in box) or box[2] <= box[0] or box[3] <= box[1]:
+                        raise ValueError("invalid confirmed bbox")
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise HTTPException(422, "追踪框无效，不能保存正常尺寸参照；请重新读取或修正该对象") from exc
+                event["geometryReference"] = {"objectId": object_id, "frameIndex": frame, "bbox": box, "source": "confirmed-normal"}
+            # A motion sample never exempts shape, identity, overlap or loss.
             value = details.get("motion_normalized")
             motion_reason = any(str(reason).startswith(("adjacent_center_shift", "center_displacement", "motion_", "normalized_motion", "tracking_motion")) for reason in reasons)
             if bool(body.get("calibrate", False)) and motion_reason and isinstance(value, (int, float)) and math.isfinite(value) and value >= 0:

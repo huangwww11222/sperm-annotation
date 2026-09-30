@@ -114,11 +114,24 @@ export interface TrackingFeedbackInput {
   calibrate: boolean
 }
 
+export interface TrackingFeedbackEvent {
+  objectId: number
+  frameIndex: number
+  decision: 'normal' | 'corrected' | 'reset'
+  geometryReference?: {
+    objectId: number
+    frameIndex: number
+    bbox: [number, number, number, number]
+    source: 'confirmed-normal'
+  }
+}
+
 export interface TrackingFeedbackResponse {
   ok: boolean
   mediaId: string
   revision: number
   normalMotionSamples: NormalMotionSample[]
+  trackingFeedbackEvents?: TrackingFeedbackEvent[]
   pausedAnomalies: unknown[]
   lastPausedContext: { mediaId: string; frameIndex: number } | null
 }
@@ -167,6 +180,7 @@ export interface TrackWorkspaceState {
   deletedObjectIds?: number[]
   deletedFrameObjects?: Array<{ objectId: number; frameIndex: number }>
   normalMotionSamples?: NormalMotionSample[]
+  trackingFeedbackEvents?: TrackingFeedbackEvent[]
   anomalyFrames?: Array<{ frame_index: number; level: string; reasons: string[] }>
   pausedAnomalies?: unknown[]
   lastPausedContext?: { mediaId: string; frameIndex: number } | null

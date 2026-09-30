@@ -17,7 +17,7 @@ def test_anomaly_panel_contract_keeps_markers_and_uses_real_names() -> None:
     panel = (ROOT / "frontend/src/components/AnnotationTrackingFeedback.vue").read_text(encoding="utf-8")
     store = (ROOT / "frontend/src/stores/workspace.ts").read_text(encoding="utf-8")
     assert "AnnotationTrackingFeedback" in page
-    assert "item.displayName" in panel and "最近人工基准" in panel
+    assert "item.displayName" in panel and "最近人工标注" in panel and "尺寸 / 形状判断参考" in panel
     assert "该错误可能在触发暂停前已经逐渐出现" in store
     close_panel_block = store[store.index("const closeAnomalyPanel"):store.index("const lastPausedContext")]
     assert "anomalyFrames.value = []" not in close_panel_block
@@ -38,7 +38,8 @@ def test_tracking_requires_explicit_per_object_feedback_before_resume() -> None:
     assert "const retryTrackingAnomalyFeedback" in store
     assert "submitFeedback" in api and "Idempotency-Key" in api
     assert "所有对象确认后才继续追踪" in panel
-    assert "取消勾选只确认本次" in panel
+    assert "取消勾选不调整运动范围" in panel
+    assert "tracking-geometry-acceptance" in panel and "无需重画" in panel
 
 
 def test_track_api_401_expires_session_and_login_route_is_available() -> None:

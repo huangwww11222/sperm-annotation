@@ -147,8 +147,10 @@ def test_corrected_feedback_requires_an_actual_geometry_change_and_never_calibra
 def test_tampered_workspace_cannot_inject_calibration(controls):
     client, root, state = controls
     state["normalMotionSamples"] = [{"features": {"motionNormalized": 999}}]
+    state["trackingFeedbackEvents"] = [{"objectId": 7, "decision": "normal", "geometryReference": {"bbox": [0, 0, 999, 999]}}]
     assert save(client, state).status_code == 200
     assert not annotation_state.read_state(root).get("normalMotionSamples")
+    assert not annotation_state.read_state(root).get("trackingFeedbackEvents")
 
 
 def test_failed_atomic_replace_keeps_prior_state_and_same_request_retries(controls, monkeypatch, caplog):
@@ -281,3 +283,82 @@ def test_resolved_legacy_pause_item_is_not_a_pending_anomaly(controls):
     state["pausedAnomalies"] = [{"objectId": 7, "resolved": True}]
     assert save(client, state).status_code == 200
     assert feedback(client, expectedRevision=1).status_code == 409
+
+
+def shape_pause(root):
+    """The screenshot case: same accepted shape would fail every resumed frame."""
+    rows = annotation_state.read_rows(root)
+    obj = rows[1]["objects"][0]
+    obj.update(bbox=[10, 10, 32.2, 21.8],
+               anomaly_reasons=["manual_height_ratio=0.590 HARD", "manual_aspect_change=1.881 HARD"],
+               anomaly_details={"current_bbox": [10, 10, 32.2, 21.8], "manual_baseline_frame": 0})
+    (root / "tracker_results.json").write_text("\n".join(map(json.dumps, rows)))
+    return obj["bbox"]
+
+
+def test_normal_size_confirmation_saves_server_reference_without_redrawing(controls, caplog):
+    client, root, state = controls
+    expected_box = shape_pause(root)
+    with caplog.at_level(logging.INFO, logger="review.annotation"):
+        response = feedback(client, calibrate=False, geometryReference={"bbox": [0, 0, 999, 999]})
+    assert response.status_code == 200
+    body = response.json()
+    event = body["trackingFeedbackEvents"][-1]
+    assert event["geometryReference"] == {"objectId": 7, "frameIndex": 1, "bbox": expected_box, "source": "confirmed-normal"}
+    assert body["normalMotionSamples"] == []
+    stored = annotation_state.read_state(root)
+    assert stored["manualAnnotations"] == state["manualAnnotations"]
+    assert stored["manualBaselines"] == state["manualBaselines"]
+    assert body["pausedAnomalies"] == [{"object_id": 9}]
+    assert "geometry_reference_frame=1" in caplog.text
+    assert feedback(client, calibrate=False, geometryReference={"bbox": [0, 0, 999, 999]}).json() == body
+    # Stale clients cannot overwrite this server-owned audit/reference.
+    assert client.put("/api/track/workspace/control-video", json={"trackingFeedbackEvents": [], "manualAnnotations": state["manualAnnotations"]}).status_code == 200
+    assert annotation_state.read_state(root)["trackingFeedbackEvents"][-1] == event
+
+
+def test_size_confirmation_atomic_failure_keeps_pause_and_retry_creates_one_reference(controls, monkeypatch):
+    client, root, state = controls
+    shape_pause(root)
+    original = (root / "workspace_state.json").read_bytes()
+    with monkeypatch.context() as patch:
+        def fail(*args, **kwargs):
+            raise OSError("injected geometry feedback replacement failure")
+        patch.setattr(Path, "replace", fail)
+        assert feedback(client).status_code == 500
+    assert (root / "workspace_state.json").read_bytes() == original
+    assert feedback(client).status_code == 200
+    assert feedback(client).status_code == 200
+    events = annotation_state.read_state(root)["trackingFeedbackEvents"]
+    assert len(events) == 1 and "geometryReference" in events[0]
+
+
+@pytest.mark.parametrize("box", [None, [1, 2, 3], [1, 2, 1, 10], [1, 2, "invalid", 10]])
+def test_size_confirmation_rejects_invalid_server_geometry(controls, box):
+    client, root, state = controls
+    shape_pause(root)
+    rows = annotation_state.read_rows(root)
+    rows[1]["objects"][0]["bbox"] = box
+    (root / "tracker_results.json").write_text("\n".join(map(json.dumps, rows)))
+    assert feedback(client).status_code == 422
+    assert annotation_state.read_state(root)["revision"] == 0
+
+
+def test_normal_motion_feedback_does_not_rebase_shape(controls):
+    client, root, state = controls
+    assert "geometryReference" not in feedback(client).json()["trackingFeedbackEvents"][-1]
+
+
+def test_combined_shape_and_motion_confirmation_records_independent_evidence(controls):
+    client, root, state = controls
+    shape_pause(root)
+    rows = annotation_state.read_rows(root)
+    obj = rows[1]["objects"][0]
+    obj["anomaly_reasons"].append("adjacent_center_shift=45 normalized=1.4 sustained_motion HARD")
+    obj["anomaly_details"]["motion_normalized"] = 1.4
+    (root / "tracker_results.json").write_text("\n".join(map(json.dumps, rows)))
+    result = feedback(client, calibrate=True).json()
+    event = result["trackingFeedbackEvents"][-1]
+    assert event["sample"]["features"]["motionNormalized"] == 1.4
+    assert event["geometryReference"]["bbox"] == obj["bbox"]
+    assert result["normalMotionSamples"][0] == event["sample"]

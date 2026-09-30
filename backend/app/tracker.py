@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ from .services.anomaly_detector import (
     AnomalyConfig,
     AnomalyDetector,
     AnomalyLevel,
+    ConfirmedGeometryReference,
     ManualBaseline,
 )
 from .services.sam3_engine import get_sam3_engine, read_video
@@ -247,6 +249,57 @@ def _load_latest_manual_baselines(
     return latest
 
 
+def _load_confirmed_geometry_references(
+    workspace: dict[str, Any],
+    seed_source_frame: int,
+    manual_baselines: dict[int, ManualBaseline],
+) -> dict[int, ConfirmedGeometryReference]:
+    """Restore explicit shape acceptance without changing manual provenance.
+
+    Events are append-only server records. Reset/correction ends the previous
+    acceptance, and neither future feedback nor a newer manual box may supply
+    the geometry reference for this tracking branch.
+    """
+    latest: dict[int, ConfirmedGeometryReference] = {}
+    for event in workspace.get("trackingFeedbackEvents", []):
+        if not isinstance(event, dict):
+            continue
+        oid = event.get("objectId")
+        if type(oid) is not int or oid <= 0:
+            continue
+        if event.get("decision") == "reset":
+            latest.pop(oid, None)
+            continue
+        frame = event.get("frameIndex")
+        if type(frame) is not int or not 0 <= frame <= seed_source_frame:
+            continue
+        if event.get("decision") == "corrected":
+            latest.pop(oid, None)
+            continue
+        reference = event.get("geometryReference")
+        if event.get("decision") != "normal" or not isinstance(reference, dict):
+            continue
+        if reference.get("source") != "confirmed-normal" or reference.get("objectId") != oid or reference.get("frameIndex") != frame:
+            continue
+        if is_deleted(workspace, frame, oid) or is_deleted(workspace, seed_source_frame, oid):
+            continue
+        raw_bbox = reference.get("bbox")
+        if not isinstance(raw_bbox, list) or len(raw_bbox) != 4:
+            continue
+        try:
+            bbox = [float(value) for value in raw_bbox]
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not all(math.isfinite(value) for value in bbox) or bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+            continue
+        manual = manual_baselines.get(oid)
+        if manual and manual.frame_index >= frame:
+            continue
+        if oid not in latest or frame >= latest[oid].frame_index:
+            latest[oid] = ConfirmedGeometryReference(bbox, frame)
+    return latest
+
+
 def rewind_tracking_results(
     path: Path,
     video_file: Path,
@@ -376,7 +429,7 @@ def track_video(
     engine.add_manual_boxes(session, seed_frame, objects)
 
     # Restore explicit human decisions for this media. AI history supplies
-    # motion context only; it cannot expand accepted size or motion ranges.
+    # motion context only; accepted geometry comes solely from feedback.
     active_object_ids = {int(o["object_id"]) for o in objects}
     manual_baselines = {
         object_id: baseline
@@ -391,6 +444,7 @@ def track_video(
         all_object_ids=active_object_ids,
         manual_baselines=manual_baselines,
         normal_feedback=normal_feedback if normal_feedback is not None else workspace.get("normalMotionSamples", []),
+        geometry_references=_load_confirmed_geometry_references(workspace, seed_source_frame, manual_baselines),
     )
     detector.prime_history(_clean_history_before_seed(Path(output_json), seed_source_frame))
 
@@ -529,19 +583,20 @@ def track_video(
                     area_ratio = details.get("area_ratio")
                     width_ratio = details.get("width_ratio")
                     height_ratio = details.get("height_ratio")
-                    is_shrink = (
+                    size_hard = any(r.startswith(("manual_area_ratio=", "manual_width_ratio=", "manual_height_ratio=")) and r.endswith(" HARD") for r in af.reasons)
+                    is_shrink = size_hard and ((
                         isinstance(area_ratio, (int, float)) and area_ratio < detector.config.MANUAL_AREA_RATIO_MIN_HARD
                     ) or (
                         isinstance(width_ratio, (int, float)) and width_ratio < detector.config.MANUAL_WIDTH_RATIO_MIN_HARD
                     ) or (
                         isinstance(height_ratio, (int, float)) and height_ratio < detector.config.MANUAL_HEIGHT_RATIO_MIN_HARD
-                    )
+                    ))
                     pause_type = (
                         "disappearance" if af.level == AnomalyLevel.DISAPPEARED
                         else "overlap" if any("bbox_overlap_with=" in r for r in af.reasons)
                         else "size_shrink" if is_shrink
-                        else "size_growth" if any(r.startswith(("manual_area_ratio=", "manual_width_ratio=", "manual_height_ratio=")) for r in af.reasons)
-                        else "shape_change" if any(r.startswith("manual_aspect_change=") for r in af.reasons)
+                        else "size_growth" if size_hard
+                        else "shape_change" if any(r.startswith("manual_aspect_change=") and r.endswith(" HARD") for r in af.reasons)
                         else "tracking_motion"
                     )
                     other_id = details.get("other_object_id")
@@ -556,6 +611,9 @@ def track_video(
                         "currentBox": details.get("current_bbox"),
                         "manualBaselineBox": details.get("manual_baseline_bbox"),
                         "manualBaselineFrame": details.get("manual_baseline_frame"),
+                        "geometryReferenceBox": details.get("geometry_reference_bbox"),
+                        "geometryReferenceFrame": details.get("geometry_reference_frame"),
+                        "geometryReferenceSource": details.get("geometry_reference_source"),
                         "metrics": {
                             "areaRatio": area_ratio,
                             "widthRatio": width_ratio,
@@ -616,9 +674,10 @@ def track_video(
         "warningSummary": list(warning_summary.values()),
     }
     logging.getLogger("review.tracking").info(
-        "tracking.completed media=%s start=%s last=%s paused=%s feedback_objects=%s warnings=%s",
+        "tracking.completed media=%s start=%s last=%s paused=%s feedback_objects=%s geometry_references=%s warnings=%s",
         video_file.parent.name, seed_source_frame, last_processed_frame, result_anomaly_paused is not None,
-        sorted(detector.normal_motion_samples), list(warning_summary.values()),
+        sorted(detector.normal_motion_samples),
+        {oid: ref.frame_index for oid, ref in detector.geometry_references.items()}, list(warning_summary.values()),
     )
     print(f"[sam3] result jsonl: {output_json}")
     print(f"[sam3] overlay mp4: {overlay_path}")

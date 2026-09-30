@@ -1,8 +1,8 @@
 """Stateful anomaly detection for SAM3 object tracking.
 
-Size and shape are always compared with the most recent *manual* annotation.
-AI predictions are retained only as short-term motion history, so a slowly
-shrinking or growing prediction can never teach the detector a new normal.
+Size and shape use the latest manual annotation and, when present, one shape
+explicitly confirmed as normal by the user. Predictions cannot add references
+or change the manual annotation, so gradual AI drift does not teach itself.
 """
 
 from __future__ import annotations
@@ -108,6 +108,12 @@ class ManualBaseline:
     name: str | None = None
 
 
+@dataclass(frozen=True)
+class ConfirmedGeometryReference:
+    bbox: list[float]
+    frame_index: int
+
+
 @dataclass
 class _ObjectState:
     level: AnomalyLevel = AnomalyLevel.NORMAL
@@ -154,6 +160,7 @@ class AnomalyDetector:
         all_object_ids: Iterable[int] | None = None,
         manual_baselines: dict[int, ManualBaseline | dict[str, Any]] | None = None,
         normal_feedback: Iterable[dict[str, Any]] | None = None,
+        geometry_references: dict[int, ConfirmedGeometryReference] | None = None,
     ) -> None:
         self.config = config or AnomalyConfig()
         self.frame_width = int(frame_width)
@@ -164,6 +171,7 @@ class AnomalyDetector:
         self.reports: list[AnomalyReport] = []
         self.current_frame_index = -1
         self.normal_motion_samples: dict[int, list[float]] = {}
+        self.geometry_references = dict(geometry_references or {})
         self.prime_normal_feedback(normal_feedback or [])
         if manual_baselines:
             self.prime_manual_baselines(manual_baselines)
@@ -352,6 +360,71 @@ class AnomalyDetector:
         reasons = [f"adjacent_center_shift={shift:.1f}px normalized={normalized:.3f} {reason} {'HARD' if hard else 'SOFT'}"] if hard or warning else []
         return hard, warning, reasons, details
 
+    def _geometry_check(self, bbox: list[float], baseline: ManualBaseline | ConfirmedGeometryReference,
+                        source: str) -> tuple[bool, bool, list[str], dict[str, Any]]:
+        """Evaluate one complete reference; never combine ratios across shapes."""
+        cfg = self.config
+        hard = warning = False
+        reasons: list[str] = []
+        details: dict[str, Any] = {}
+        base_width, base_height = _bbox_wh(baseline.bbox)
+        cur_width, cur_height = _bbox_wh(bbox)
+        base_area, cur_area = _bbox_area(baseline.bbox), _bbox_area(bbox)
+        base_aspect, cur_aspect = _bbox_aspect(baseline.bbox), _bbox_aspect(bbox)
+        area_ratio = cur_area / base_area if base_area else 0.0
+        width_ratio = cur_width / base_width if base_width else 0.0
+        height_ratio = cur_height / base_height if base_height else 0.0
+        aspect_ratio_ratio = cur_aspect / base_aspect if base_aspect else 0.0
+        aspect_change = max(aspect_ratio_ratio, 1.0 / aspect_ratio_ratio) if aspect_ratio_ratio > 0 else float("inf")
+        near_side_edge = self._is_near_side_boundary(bbox)
+        side_exit_shrink = near_side_edge and (
+            area_ratio < cfg.MANUAL_AREA_RATIO_MIN_WARN
+            or width_ratio < cfg.MANUAL_DIMENSION_RATIO_MIN_WARN
+            or height_ratio < cfg.MANUAL_DIMENSION_RATIO_MIN_WARN
+        )
+        details.update({
+            "geometry_reference_bbox": list(baseline.bbox),
+            "geometry_reference_frame": baseline.frame_index,
+            "geometry_reference_source": source,
+            "baseline_area": base_area,
+            "current_area": cur_area,
+            "area_ratio": area_ratio,
+            "width_ratio": width_ratio,
+            "height_ratio": height_ratio,
+            "aspect_ratio_ratio": aspect_ratio_ratio,
+            "aspect_ratio_change": aspect_change,
+            "near_side_edge": near_side_edge,
+            "side_exit_shrink_ignored": side_exit_shrink,
+        })
+        ratios = (
+            ("manual_area_ratio", area_ratio, cfg.MANUAL_AREA_RATIO_MIN_HARD, cfg.MANUAL_AREA_RATIO_MAX_HARD, cfg.MANUAL_AREA_RATIO_MIN_WARN, cfg.MANUAL_AREA_RATIO_MAX_WARN),
+            ("manual_width_ratio", width_ratio, cfg.MANUAL_WIDTH_RATIO_MIN_HARD, cfg.MANUAL_WIDTH_RATIO_MAX_HARD, cfg.MANUAL_DIMENSION_RATIO_MIN_WARN, cfg.MANUAL_DIMENSION_RATIO_MAX_WARN),
+            ("manual_height_ratio", height_ratio, cfg.MANUAL_HEIGHT_RATIO_MIN_HARD, cfg.MANUAL_HEIGHT_RATIO_MAX_HARD, cfg.MANUAL_DIMENSION_RATIO_MIN_WARN, cfg.MANUAL_DIMENSION_RATIO_MAX_WARN),
+        )
+        for label, ratio, hard_min, hard_max, warn_min, warn_max in ratios:
+            # When the current box is clipped by the left/right edge,
+            # a low ratio is expected while the object leaves view.
+            # Upper bounds remain active so edge-adjacent growth is
+            # still reported as contamination/merged-object tracking.
+            below_hard = ratio < hard_min and not side_exit_shrink
+            below_warn = ratio < warn_min and not side_exit_shrink
+            if below_hard or ratio > hard_max:
+                hard = True
+                reasons.append(f"{label}={ratio:.3f} HARD")
+            elif below_warn or ratio > warn_max:
+                warning = True
+                reasons.append(f"{label}={ratio:.3f} SOFT")
+        # Horizontal clipping can also create an extreme aspect ratio;
+        # suppress that derivative signal together with shrink only.
+        if not side_exit_shrink and aspect_change >= cfg.MANUAL_ASPECT_CHANGE_HARD:
+            hard = True
+            reasons.append(f"manual_aspect_change={aspect_change:.3f} HARD")
+        elif not side_exit_shrink and aspect_change >= cfg.MANUAL_ASPECT_CHANGE_WARN:
+            warning = True
+            reasons.append(f"manual_aspect_change={aspect_change:.3f} SOFT")
+
+        return hard, warning, reasons, details
+
     def push(self, frame_index: int, frame_objects: dict[int, list[float]], *, ignored_object_ids: Iterable[int] | None = None) -> AnomalyReport:
         cfg = self.config
         frame_index = int(frame_index)
@@ -411,62 +484,31 @@ class AnomalyDetector:
             warning = False
 
             baseline = state.manual_baseline
+            details.update({
+                "manual_baseline_bbox": list(baseline.bbox) if baseline else None,
+                "manual_baseline_frame": baseline.frame_index if baseline else None,
+                "manual_baseline_name": baseline.name if baseline else None,
+            })
+            references: list[tuple[ManualBaseline | ConfirmedGeometryReference, str]] = []
             if baseline is not None:
-                base_width, base_height = _bbox_wh(baseline.bbox)
-                cur_width, cur_height = _bbox_wh(bbox)
-                base_area, cur_area = _bbox_area(baseline.bbox), _bbox_area(bbox)
-                base_aspect, cur_aspect = _bbox_aspect(baseline.bbox), _bbox_aspect(bbox)
-                area_ratio = cur_area / base_area if base_area else 0.0
-                width_ratio = cur_width / base_width if base_width else 0.0
-                height_ratio = cur_height / base_height if base_height else 0.0
-                aspect_ratio_ratio = cur_aspect / base_aspect if base_aspect else 0.0
-                aspect_change = max(aspect_ratio_ratio, 1.0 / aspect_ratio_ratio) if aspect_ratio_ratio > 0 else float("inf")
-                near_side_edge = self._is_near_side_boundary(bbox)
-                side_exit_shrink = near_side_edge and (
-                    area_ratio < cfg.MANUAL_AREA_RATIO_MIN_WARN
-                    or width_ratio < cfg.MANUAL_DIMENSION_RATIO_MIN_WARN
-                    or height_ratio < cfg.MANUAL_DIMENSION_RATIO_MIN_WARN
+                references.append((baseline, "manual"))
+            confirmed = self.geometry_references.get(oid)
+            # A newer manual correction supersedes prior accepted shapes. The
+            # frame check also protects direct detector/scan callers from
+            # applying a future confirmation to earlier predictions.
+            if confirmed and confirmed.frame_index <= frame_index and (baseline is None or confirmed.frame_index > baseline.frame_index):
+                references.append((confirmed, "confirmed-normal"))
+            if references:
+                checks = [self._geometry_check(bbox, reference, source) for reference, source in references]
+                # Accept a coherent match to either known shape. Prefer the
+                # latest confirmation on ties, including a genuinely new
+                # anomaly, so its diagnostics describe the current reference.
+                hard, warning, geometry_reasons, geometry_details = min(
+                    reversed(checks), key=lambda check: 2 if check[0] else 1 if check[1] else 0,
                 )
-                details.update({
-                    "manual_baseline_bbox": list(baseline.bbox),
-                    "manual_baseline_frame": baseline.frame_index,
-                    "manual_baseline_name": baseline.name,
-                    "baseline_area": base_area,
-                    "current_area": cur_area,
-                    "area_ratio": area_ratio,
-                    "width_ratio": width_ratio,
-                    "height_ratio": height_ratio,
-                    "aspect_ratio_ratio": aspect_ratio_ratio,
-                    "aspect_ratio_change": aspect_change,
-                    "near_side_edge": near_side_edge,
-                    "side_exit_shrink_ignored": side_exit_shrink,
-                })
-                ratios = (
-                    ("manual_area_ratio", area_ratio, cfg.MANUAL_AREA_RATIO_MIN_HARD, cfg.MANUAL_AREA_RATIO_MAX_HARD, cfg.MANUAL_AREA_RATIO_MIN_WARN, cfg.MANUAL_AREA_RATIO_MAX_WARN),
-                    ("manual_width_ratio", width_ratio, cfg.MANUAL_WIDTH_RATIO_MIN_HARD, cfg.MANUAL_WIDTH_RATIO_MAX_HARD, cfg.MANUAL_DIMENSION_RATIO_MIN_WARN, cfg.MANUAL_DIMENSION_RATIO_MAX_WARN),
-                    ("manual_height_ratio", height_ratio, cfg.MANUAL_HEIGHT_RATIO_MIN_HARD, cfg.MANUAL_HEIGHT_RATIO_MAX_HARD, cfg.MANUAL_DIMENSION_RATIO_MIN_WARN, cfg.MANUAL_DIMENSION_RATIO_MAX_WARN),
-                )
-                for label, ratio, hard_min, hard_max, warn_min, warn_max in ratios:
-                    # When the current box is clipped by the left/right edge,
-                    # a low ratio is expected while the object leaves view.
-                    # Upper bounds remain active so edge-adjacent growth is
-                    # still reported as contamination/merged-object tracking.
-                    below_hard = ratio < hard_min and not side_exit_shrink
-                    below_warn = ratio < warn_min and not side_exit_shrink
-                    if below_hard or ratio > hard_max:
-                        hard = True
-                        reasons.append(f"{label}={ratio:.3f} HARD")
-                    elif below_warn or ratio > warn_max:
-                        warning = True
-                        reasons.append(f"{label}={ratio:.3f} SOFT")
-                # Horizontal clipping can also create an extreme aspect ratio;
-                # suppress that derivative signal together with shrink only.
-                if not side_exit_shrink and aspect_change >= cfg.MANUAL_ASPECT_CHANGE_HARD:
-                    hard = True
-                    reasons.append(f"manual_aspect_change={aspect_change:.3f} HARD")
-                elif not side_exit_shrink and aspect_change >= cfg.MANUAL_ASPECT_CHANGE_WARN:
-                    warning = True
-                    reasons.append(f"manual_aspect_change={aspect_change:.3f} SOFT")
+                reasons.extend(geometry_reasons)
+                details.update(geometry_details)
+                details["confirmed_geometry_frame"] = confirmed.frame_index if any(source == "confirmed-normal" for _, source in references) else None
 
             motion_hard, motion_warning, motion_reasons, motion_details = self._motion_check(oid, state, frame_index, bbox)
             hard = hard or motion_hard
@@ -506,7 +548,7 @@ class AnomalyDetector:
         if report.should_pause:
             logging.getLogger("review.tracking").info(
                 "tracking.anomaly_pause frame=%s objects=%s", frame_index,
-                [{"objectId": item.object_id, "reasons": item.reasons, "motion": item.details.get("motion_normalized"), "threshold": item.details.get("motion_pause_threshold"), "samples": item.details.get("feedback_sample_count", 0)} for item in report.frames if item.level in (AnomalyLevel.ANOMALY, AnomalyLevel.DISAPPEARED)],
+                [{"objectId": item.object_id, "reasons": item.reasons, "motion": item.details.get("motion_normalized"), "threshold": item.details.get("motion_pause_threshold"), "samples": item.details.get("feedback_sample_count", 0), "geometry_reference_source": item.details.get("geometry_reference_source"), "geometry_reference_frame": item.details.get("geometry_reference_frame"), "confirmed_geometry_frame": item.details.get("confirmed_geometry_frame")} for item in report.frames if item.level in (AnomalyLevel.ANOMALY, AnomalyLevel.DISAPPEARED)],
             )
         return report
 
