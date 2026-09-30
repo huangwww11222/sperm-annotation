@@ -35,6 +35,10 @@ export interface TrackUploadResponse {
   videoMimeType?: string
 }
 
+export interface DuplicateVideo {
+  mediaId:string;videoName:string;canOverwrite:boolean;reason:string;workspaceRevision:number;media:TrackUploadResponse
+}
+
 export interface TrackRunResponse {
   taskId: string
   status: 'queued' | 'running' | 'success' | 'failed'
@@ -167,6 +171,7 @@ export interface TrackWorkspaceState {
   updatedAt?: string
   revision?: number
   expectedRevision?: number
+  generationId?: string
   currentFrame?: number
   manualAnnotations?: unknown[]
   manualBaselines?: Array<{
@@ -206,13 +211,14 @@ export const trackApi = {
     const data = await res.json().catch(() => ({}))
     if (!res.ok) {
       if (res.status === 401) notifyAuthExpired()
-      throw new Error((data as any)?.message || (data as any)?.detail || `视频上传失败 (${res.status})`)
+      throw Object.assign(new Error((data as any)?.message || (data as any)?.detail || `视频上传失败 (${res.status})`), {status:res.status,code:data.code,duplicate:data.duplicate as DuplicateVideo|undefined})
     }
     return data as TrackUploadResponse
   },
 
   async saveFrameAnnotations(input: {
     mediaId: string
+    generationId?: string
     mediaName: string
     mediaWidth: number
     mediaHeight: number
@@ -226,7 +232,7 @@ export const trackApi = {
   },
 
 
-  async rewind(input: { mediaId: string; startFrame: number }) {
+  async rewind(input: { mediaId: string; startFrame: number; generationId?: string }) {
     return jsonRequest<{
       ok: boolean
       mediaId: string
@@ -243,6 +249,7 @@ export const trackApi = {
 
   async run(input: {
     mediaId: string
+    generationId?: string
     mediaName: string
     mediaWidth: number
     mediaHeight: number

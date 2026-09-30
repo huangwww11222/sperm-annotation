@@ -53,17 +53,20 @@ def test_track_api_401_expires_session_and_login_route_is_available() -> None:
     assert "if (!isAuthenticated.value) return '/login'" in app
 
 
-def test_loading_backend_annotation_folder_reuses_media_id_and_switches_existing_video() -> None:
+def test_removed_annotation_folder_entry_retains_server_media_restore() -> None:
     store = (ROOT / "frontend/src/stores/workspace.ts").read_text(encoding="utf-8")
     api = (ROOT / "frontend/src/api/trackApi.ts").read_text(encoding="utf-8")
     backend = (ROOT / "backend/app/main.py").read_text(encoding="utf-8")
-
-    assert "openExistingBackendMedia" in store
-    assert "item.serverMediaId === serverItem.mediaId" in store
-    assert "if (sourceFolderName && await openExistingBackendMedia(sourceFolderName, videoFile)) return" in store
-    load_folder = store[store.index("const loadTrackerFolder"):store.index("const openAnnotationFolderPicker")]
-    assert load_folder.index("openExistingBackendMedia(sourceFolderName, videoFile)") < load_folder.index("trackApi.uploadVideo(videoFile)")
-    assert "该视频已经打开，已切换到" in store
+    page = (ROOT / "frontend/src/pages/AnnotatePage.vue").read_text(encoding="utf-8")
+    # The user removed the manual folder importer. Existing server workspaces
+    # must still reconnect through the normal media list and stable IDs.
+    assert "加载标注" not in page
+    assert "annotationFolderInputRef" not in page
+    assert "openAnnotationFolderPicker" not in store
+    assert "loadTrackerFolder" not in store
+    assert "loadServerMedia" in store
+    assert "const existing = byServerId.get(item.mediaId)" in store
+    assert "restoreWorkspaceState(mediaId)" in store
     assert '"directoryName": entry.name' in backend
     assert '"sourceVideoName": base_name' in backend
     assert "directoryName: string" in api
@@ -83,7 +86,7 @@ def test_media_deletion_requires_confirmation_and_retains_legacy_identity() -> N
     assert "电脑原文件和已保存到服务器的标注记录会保留" in delete_block
     # Older clients may have closed a media item under a different frontend ID.
     # Keep that mapping readable so its saved annotations still reconnect.
-    assert "closedMediaFrontendIds[serverItem.mediaId] || `server-${serverItem.mediaId}`" in store
+    assert "closedMediaFrontendIds[item.mediaId] || `server-${item.mediaId}`" in store
 
 
 def test_workspace_state_is_restored_before_tracking_results_and_uses_canonical_media_id() -> None:

@@ -70,6 +70,23 @@ def migrate(conn):
       frame_index INTEGER NOT NULL, revision INTEGER NOT NULL,
       updated_at TEXT NOT NULL, PRIMARY KEY(user_id, session_id)
     );
+    CREATE TABLE IF NOT EXISTS review_withdrawals (
+      id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES review_sessions(id),
+      actor_id INTEGER NOT NULL REFERENCES users(id), created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS review_return_events (
+      id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES review_sessions(id),
+      confirmation_id TEXT NOT NULL REFERENCES confirmation_sessions(id),
+      change_id TEXT NOT NULL REFERENCES review_changes(id), frame_index INTEGER NOT NULL,
+      actor_id INTEGER NOT NULL REFERENCES users(id), reason TEXT NOT NULL, created_at TEXT NOT NULL,
+      resolved_review_version_id TEXT REFERENCES review_versions(id),
+      next_confirmation_id TEXT REFERENCES confirmation_sessions(id)
+    );
+    CREATE TABLE IF NOT EXISTS confirmation_decision_carries (
+      event_id TEXT PRIMARY KEY REFERENCES decision_events(id),
+      source_event_id TEXT NOT NULL REFERENCES decision_events(id),
+      return_event_id TEXT NOT NULL REFERENCES review_return_events(id)
+    );
     """)
     # Only a current submitted legacy row is reconstructable. Never invent an
     # older committed baseline from an already edited draft.
@@ -288,10 +305,30 @@ def session_data(c, s, uid):
             canClaim=can_claim,
             canEdit=active and own,
             canComplete=active and own and p["unsubmittedFrames"] == 0,
+            canWithdraw=can_withdraw(c, s, uid),
         ),
+        returnRequests=[dict(frameIndex=r["frame_index"], reason=r["reason"], confirmationId=r["confirmation_id"])
+                        for r in c.execute("SELECT * FROM review_return_events WHERE session_id=? AND resolved_review_version_id IS NULL", (s["id"],))],
         readOnlyReason=reason,
         completedReviewVersionId=rv["id"] if rv else None,
     )
+
+
+def can_withdraw(c, s, uid):
+    # Claiming, saving even a no-change draft, or a successful submission is a
+    # start of review. A later discard cannot erase that fact.
+    return (s["submitted_by"] == uid and s["state"] == "pending"
+            and s["reviewer_id"] is None
+            and not c.execute("SELECT 1 FROM review_frames WHERE session_id=? AND frame_revision>0 LIMIT 1", (s["id"],)).fetchone())
+
+
+def submission_status(media_id, uid):
+    with closing(connect()) as c:
+        ids = [r[0] for r in c.execute("""SELECT s.id FROM review_sessions s
+            JOIN annotation_baselines a ON a.id=s.baseline_id
+            JOIN media_revisions m ON m.id=a.media_revision_id
+            WHERE m.media_id=? AND s.state!='withdrawn' ORDER BY s.rowid DESC""", (media_id,))]
+        return {"items": [session_data(c, session_row(c, sid), uid) for sid in ids]}
 
 
 def get_session(sid, uid):
@@ -405,7 +442,17 @@ def write(action, sid, uid, key, body, fi=None):
                 )
                 return json.loads(prior["response_json"])
             s = session_row(c, sid)
-            if action == "claim":
+            if action == "withdraw":
+                if body["expectedSessionRevision"] != s["revision"]:
+                    raise ReviewError("SESSION_REVISION_CONFLICT", "任务已更新，请刷新后撤回")
+                if s["submitted_by"] != uid:
+                    raise ReviewError("NOT_SUBMITTER", "只有送审者可以撤回", 403)
+                if not can_withdraw(c, s, uid):
+                    raise ReviewError("REVIEW_ALREADY_STARTED", "审查已开始，无法撤回送审")
+                c.execute("INSERT INTO review_withdrawals VALUES (?,?,?,?)", ("withdraw_" + uuid.uuid4().hex, sid, uid, now()))
+                c.execute("UPDATE review_sessions SET state='withdrawn',revision=revision+1 WHERE id=?", (sid,))
+                result = {"session": session_data(c, session_row(c, sid), uid)}
+            elif action == "claim":
                 if s["reviewer_id"] not in (None, uid):
                     raise ReviewError(
                         "SESSION_ALREADY_CLAIMED", "任务已由其他审查员领取"
@@ -478,6 +525,10 @@ def write(action, sid, uid, key, body, fi=None):
                             if patch == committed
                             else "draft"
                         )
+                    recheck = c.execute("SELECT 1 FROM review_return_events WHERE session_id=? AND frame_index=? AND resolved_review_version_id IS NULL", (sid, fi)).fetchone()
+                    if recheck and action != "submit" and f["state"] != "submitted":
+                        # Restoring prior geometry still requires explicit submission.
+                        new_state = "draft" if patch != committed else "unreviewed"
                     sub_id = f["submission_id"]
                     if action == "submit" and not (
                         f["state"] == "submitted" and patch == committed
@@ -643,6 +694,7 @@ def finish(c, s, uid):
         "UPDATE review_sessions SET state='reviewed',revision=revision+1,changed_count=? WHERE id=?",
         (len({x[2] for x in changes}), sid),
     )
+    carry_confirmations(c, sid, vid, cid)
     return dict(
         session=session_data(c, session_row(c, sid), uid),
         reviewVersionId=vid,
@@ -650,6 +702,31 @@ def finish(c, s, uid):
         totalChanges=len(changes),
         snapshotHash=sh,
     )
+
+
+def carry_confirmations(c, sid, vid, cid):
+    requests = c.execute("SELECT * FROM review_return_events WHERE session_id=? AND resolved_review_version_id IS NULL ORDER BY rowid", (sid,)).fetchall()
+    if not requests:
+        return
+    from . import confirmation_workflow as confirmation
+    previous = confirmation.session_row(c, requests[-1]["confirmation_id"])
+    returned_frames = {r["frame_index"] for r in requests}
+    c.execute("UPDATE confirmation_sessions SET confirmer_id=? WHERE id=?", (previous["confirmer_id"], cid))
+    new_session = confirmation.session_row(c, cid)
+    candidates = c.execute("""SELECT n.id, e.id AS source_event_id, e.actor_id,h.choice
+        FROM review_changes n JOIN review_changes old ON old.review_version_id=?
+        AND old.frame_index=n.frame_index AND old.object_id=n.object_id
+        AND old.before_bbox=n.before_bbox AND old.after_bbox=n.after_bbox
+        JOIN decision_heads h ON h.change_id=old.id AND h.confirmation_id=?
+        JOIN decision_events e ON e.id=h.event_id WHERE n.review_version_id=?""",
+        (previous["review_version_id"], previous["id"], vid)).fetchall()
+    for row in candidates:
+        fi = c.execute("SELECT frame_index FROM review_changes WHERE id=?", (row["id"],)).fetchone()[0]
+        if fi in returned_frames:
+            continue
+        event = confirmation.append_decision(c, new_session, row["id"], row["choice"], row["actor_id"], "carried:" + row["source_event_id"])
+        c.execute("INSERT INTO confirmation_decision_carries VALUES (?,?,?)", (event, row["source_event_id"], requests[-1]["id"]))
+    c.execute("UPDATE review_return_events SET resolved_review_version_id=?,next_confirmation_id=? WHERE session_id=? AND resolved_review_version_id IS NULL", (vid, cid, sid))
 
 
 def ensure_session(bid, uid, key):

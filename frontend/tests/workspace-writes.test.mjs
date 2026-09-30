@@ -130,6 +130,21 @@ test('409 blocks subsequent writes until an explicit reload supplies a fresh rev
   assert.equal((await writer.write('m', 'workspace', workspace(3), 'reviewed-reload')).revision, 5)
 })
 
+test('confirmed generation reset drops old ambiguous request without replaying discarded boxes', async () => {
+  const h = harness(), writer = new h.Writer()
+  writer.setRevision('m', 0)
+  h.hooks.write = async () => { throw new Error('response lost') }
+  await assert.rejects(writer.write('m', 'workspace', workspace(1), 'old-boxes'))
+  assert(h.sessionStorage.getItem('annotation-write:A:m'))
+  h.revisions.set('m', 7)
+  await writer.discardForReset('m', 7)
+  h.hooks.write = null
+  await writer.replay('m')
+  assert.equal(h.sessionStorage.getItem('annotation-write:A:m'), null)
+  assert.equal(writes(h).length, 1, 'discarded branch is never sent again')
+  assert.equal((await writer.write('m', 'workspace', workspace(0), 'new-branch')).revision, 8)
+})
+
 test('definite 422 failure permits a corrected new request without replaying invalid input', async () => {
   const h = harness(), writer = new h.Writer()
   writer.setRevision('m', 0)

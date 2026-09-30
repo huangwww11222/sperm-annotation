@@ -12,22 +12,25 @@ import { useWorkspace } from '../stores/workspace'
 import { addLeaveGuard } from '../router'
 import '../annotation/annotation.css'
 const {
-  mediaAssets, selectedMediaId, activeTool, objectNameInput, selectedObjectId, currentFrame, currentTime, videoDuration, videoFps, frameInput, isPlaying,
-  isAiBusy, statusMessage, toastMessage, imageRef, videoRef, exactFrameImageRef, exactFrameUrl, exactFrameLoading, videoPlaybackFallback, annotationHitRef, fileInputRef, videoInputRef, annotationFolderInputRef,
+  mediaAssets, selectedMediaId, submissionBusy, mediaImportBusy, importError, duplicateImport, reimportSaving, cancelDuplicateImport, confirmDuplicateImport, restoreImportIntent, activeTool, objectNameInput, selectedObjectId, currentFrame, currentTime, videoDuration, videoFps, frameInput, isPlaying,
+  isAiBusy, statusMessage, toastMessage, imageRef, videoRef, exactFrameImageRef, exactFrameUrl, exactFrameLoading, videoPlaybackFallback, annotationHitRef, fileInputRef, videoInputRef,
   annotationsByMedia, selectedMedia, isVideo, maxFrameIndex, currentMediaId, currentObjects, selectedObject, displayObjects, editingBlocked, workspaceRestoring,
   anomalyFrames, pausedAnomalies, trackingPausedFrame, formatTime, selectTool, onStageClick, tempBbox, onBboxDown, onBboxMove, onBboxUp,
   selectObject, removeObject, renameObject, undo, redo, canUndo, canRedo, copyPreviousFrame, brightness, contrast, mediaFilterStyle, resetMediaFilter, annotatedFrameCount,
   clearSelection, openFilePicker, handleFiles, onImageLoaded, onVideoLoaded, onVideoTimeUpdate, onVideoError, seekToInputFrame, togglePlayback, onVideoEnded,
-  onTimelineClick, runAiTrack, resetAnnotationViewForMedia, seekByFrame, zoom, zoomIn, zoomOut, zoomReset, openAnnotationFolderPicker, handleAnnotationFolderFiles,
+  onTimelineClick, runAiTrack, resetAnnotationViewForMedia, seekByFrame, zoom, zoomIn, zoomOut, zoomReset,
   deleteMedia, deletingMediaId, mediaDeleteError, nudgeSelected, cancelAnnotationGesture, frameError, retryExactFrame, saveState, saveError, persistWorkspaceState, playbackRate, pausePlayback,
   getObjectDeletionSummary, removeObjectAcrossVideo, undoVideoObjectDeletion, canUndoVideoDeletion, lastVideoObjectDeletion,
   objectDeletionBusy, objectDeletionError, objectDeletionPendingAction, retryObjectDeletion,
   confirmTrackingAnomaly, trackingFeedbackBusy, trackingFeedbackError, trackingFeedbackPending, trackingFeedbackPendingAction, retryTrackingAnomalyFeedback,
   trackingCalibrationSummary, resetTrackingCalibration, trackingWarningSummary,
 } = useWorkspace()
+const importDialog=ref<HTMLElement|null>(null)
+watch(duplicateImport,async value=>{if(value){await nextTick();importDialog.value?.querySelector<HTMLElement>('button:not(:disabled)')?.focus()}})
+function importDialogKeys(e:KeyboardEvent){if(e.key==='Escape'){e.preventDefault();cancelDuplicateImport()}if(e.key==='Tab'){const nodes=Array.from(importDialog.value?.querySelectorAll<HTMLElement>('button:not(:disabled)')||[]);if(nodes.length){e.preventDefault();const i=nodes.indexOf(document.activeElement as HTMLElement);nodes[(i+(e.shiftKey?-1:1)+nodes.length)%nodes.length]?.focus()}}}
 const scrollContainerRef = ref<HTMLDivElement | null>(null), stageRef = ref<HTMLDivElement | null>(null), loupe = ref<HTMLCanvasElement | null>(null)
 const help = ref(false), helpDialog = ref<HTMLElement | null>(null), focused = ref(false), labels = ref(true), hiddenBoxes = ref(false), magnifier = ref(false), inverted = ref(false), enhancing = ref(false), spaceHeld = ref(false)
-const mediaBusy = computed(() => isAiBusy.value || !!deletingMediaId.value || objectDeletionBusy.value || trackingFeedbackBusy.value || !!objectDeletionPendingAction.value || trackingFeedbackPending.value)
+const mediaBusy = computed(() => submissionBusy.value || mediaImportBusy.value || !!duplicateImport.value || isAiBusy.value || !!deletingMediaId.value || objectDeletionBusy.value || trackingFeedbackBusy.value || !!objectDeletionPendingAction.value || trackingFeedbackPending.value)
 const search = ref(''), objectSearch = ref(''), jumpFrame = ref(1)
 const size = ref({ w: 0, h: 0 }), base = ref({ w: 800, h: 450 })
 const mousePixel = ref<{ x: number; y: number } | null>(null)
@@ -250,7 +253,7 @@ async function jump(){frameInput.value=Math.max(0,Math.min(maxFrameIndex.value,M
 async function retrySave(){try{await persistWorkspaceState(currentMediaId.value,true)}catch{/* The store logs and exposes the failure. */}}
 function enhancement(preset:string){if(preset==='原图'){resetMediaFilter();inverted.value=false}else if(preset==='暗场'){brightness.value=150;contrast.value=125}else{brightness.value=100;contrast.value=160}}
 function keys(e:KeyboardEvent){
-  if(document.querySelector('[data-user-guide][open], [data-object-delete-dialog][open]'))return
+  if(document.querySelector('[data-user-guide][open], [data-object-delete-dialog][open], [data-reimport-dialog]'))return
 
   if(e.isComposing||document.querySelector('[data-completion-dialog]'))return
   if(help.value){if(e.key==='Escape'){help.value=false;e.preventDefault()}if(e.key==='Tab'){const nodes=Array.from(helpDialog.value?.querySelectorAll<HTMLElement>('button,input,[tabindex="0"]')||[]);if(nodes.length){e.preventDefault();const i=nodes.indexOf(document.activeElement as HTMLElement);nodes[(i+(e.shiftKey?-1:1)+nodes.length)%nodes.length]?.focus()}}return}
@@ -277,7 +280,7 @@ function keys(e:KeyboardEvent){
 }
 function keyup(e:KeyboardEvent){if(e.key===' ')spaceHeld.value=false}
 function blur(){spaceHeld.value=false;cancelPointer()}
-function beforeUnload(e:BeforeUnloadEvent){if(saveState.value==='saving'||saveState.value==='error'||objectDeletionBusy.value||trackingFeedbackBusy.value||objectDeletionPendingAction.value||trackingFeedbackPending.value){e.preventDefault();e.returnValue=''}}
+function beforeUnload(e:BeforeUnloadEvent){if(mediaImportBusy.value||duplicateImport.value||saveState.value==='saving'||saveState.value==='error'||objectDeletionBusy.value||trackingFeedbackBusy.value||objectDeletionPendingAction.value||trackingFeedbackPending.value){e.preventDefault();e.returnValue=''}}
 watch(help,async value=>{if(value){helpPriorFocus=document.activeElement as HTMLElement;await nextTick();helpDialog.value?.querySelector<HTMLElement>('button')?.focus()}else helpPriorFocus?.focus()})
 watch(()=>selectedObject.value?.id,()=>{if(selectedObject.value)objectNameInput.value=selectedObject.value.name})
 watch(selectedObjectId,()=>{if(!trackingFeedbackPending.value&&selectedObject.value?.objectId!=null)feedbackTargetId.value=selectedObject.value.objectId})
@@ -287,6 +290,7 @@ watch(currentFrame,value=>{jumpFrame.value=value+1;mousePixel.value=null})
 watch(selectedMediaId,async id=>{cancelPointer();objectSearch.value='';mousePixel.value=null;fit();await nextTick();await resetAnnotationViewForMedia(id);scrollContainerRef.value?.scrollTo(0,0)})
 watch(()=>[selectedMedia.value?.width,selectedMedia.value?.height],fit)
 onMounted(()=>{
+  restoreImportIntent()
   observer=new ResizeObserver(()=>{const scroller=scrollContainerRef.value;if(scroller)size.value={w:scroller.clientWidth,h:scroller.clientHeight};if(zoom.value===1)fit()})
   if(scrollContainerRef.value)observer.observe(scrollContainerRef.value)
   window.addEventListener('keydown',keys);window.addEventListener('keyup',keyup);window.addEventListener('blur',blur);window.addEventListener('beforeunload',beforeUnload)
@@ -299,7 +303,16 @@ onUnmounted(()=>{if(deleteDialog.value?.open){deleteDialog.value.close();documen
   <section class="annotation-page workbench-page" :class="{focused}" data-testid="annotation-page">
     <input ref="fileInputRef" type="file" accept="image/*" multiple hidden @change="handleFiles(($event.target as HTMLInputElement).files,'image')" />
     <input ref="videoInputRef" type="file" accept="video/*" multiple hidden @change="handleFiles(($event.target as HTMLInputElement).files,'video')" />
-    <input ref="annotationFolderInputRef" type="file" webkitdirectory directory multiple hidden @change="handleAnnotationFolderFiles(($event.target as HTMLInputElement).files)" />
+    <Teleport to="body"><div v-if="duplicateImport" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6" data-reimport-dialog @keydown.esc.prevent="cancelDuplicateImport">
+      <section ref="importDialog" role="dialog" aria-modal="true" aria-label="视频已存在" @keydown="importDialogKeys" class="app-dialog w-[520px]">
+        <h2 class="mb-4 text-lg font-semibold">该视频已存在，是否覆盖重新标注？</h2>
+        <p>「{{ duplicateImport.videoName }}」与本次导入的视频内容相同。</p>
+        <p v-if="duplicateImport.canOverwrite" class="my-3">覆盖将舍弃该视频的旧人工标注、AI 追踪、删除规则、校准与撤销记录，从第 1 帧重新标注。此操作不能撤销。已撤回的送审快照留作历史记录。</p>
+        <p v-else class="my-3" role="alert">{{ duplicateImport.reason||'当前工作区或送审状态已变化，请关闭后重新导入。' }}</p>
+        <p v-if="duplicateImport.error" class="my-3 text-[var(--danger)]" role="alert">{{ duplicateImport.error }}</p>
+        <div class="mt-5 flex justify-end gap-3"><button class="btn-secondary" :disabled="reimportSaving||duplicateImport.pending" @click="cancelDuplicateImport">取消导入</button><button v-if="duplicateImport.canOverwrite" class="btn-primary" :disabled="reimportSaving" @click="confirmDuplicateImport">{{ reimportSaving?'正在覆盖…':duplicateImport.pending?'重试覆盖':'覆盖并重新标注' }}</button></div>
+      </section>
+    </div></Teleport>
     <WorkbenchHeader v-if="!focused" class="annotation-heading" title="人工标注" description="绘制与调整对象 · AI 辅助追踪">
       <button class="quiet-button" @click="help=true"><AppIcon name="help" :size="16" />快捷键</button>
     </WorkbenchHeader>
@@ -308,6 +321,7 @@ onUnmounted(()=>{if(deleteDialog.value?.open){deleteDialog.value.close();documen
       <small v-if="isVideo" class="annotation-coverage-note">送审时校验全视频覆盖</small>
       <span class="save-indicator" :class="saveState" role="status"><i />{{ saveLabel }}</span><SendToReview />
     </section>
+    <div v-if="importError" class="error-banner" role="alert">{{ importError }}</div>
     <div v-if="saveError" class="error-banner" role="alert">{{ saveError }} <button class="quiet-button" @click="retrySave">重试保存</button></div>
     <div v-if="mediaDeleteError" class="error-banner" role="alert">{{ mediaDeleteError }}</div>
     <div v-if="objectDeletionError && !deletionDialogOpen" class="error-banner" role="alert">{{ objectDeletionError }} <button class="quiet-button" :disabled="objectDeletionBusy" @click="objectDeletionPendingAction?.action==='delete'?openVideoDeletion():retryObjectDeletion()">重试本次{{ objectDeletionPendingAction?.action==='undo'?'撤销':objectDeletionPendingAction?.action==='redo'?'重做':'删除' }}</button></div>
@@ -318,7 +332,6 @@ onUnmounted(()=>{if(deleteDialog.value?.open){deleteDialog.value.close();documen
         <div class="asset-list"><div v-for="media in visibleMedia" :key="media.id" class="asset-card" :class="{selected:selectedMediaId===media.id}" role="button" :tabindex="mediaBusy?-1:0" :aria-disabled="mediaBusy" @click="!mediaBusy&&(selectedMediaId=media.id)" @keydown.enter="!mediaBusy&&(selectedMediaId=media.id)" @keydown.space.prevent.stop="!mediaBusy&&(selectedMediaId=media.id)">
           <span class="asset-type">{{ media.type==='video'?'VID':'IMG' }}</span><div><strong :title="media.name">{{ media.name }}</strong><small>{{ media.type==='video'?`${media.frameCount || '—'} 帧 · ${media.fps?.toFixed(1) || 30} fps`:`${media.width || '—'} × ${media.height || '—'}` }}</small></div><button class="asset-delete icon-button" :disabled="mediaBusy||workspaceRestoring" :title="media.serverMediaId?'删除素材（从服务器删除，不能撤销）':'删除素材（清除本机工作区内容，保留电脑原文件）'" :aria-label="`删除素材 ${media.name}`" @click.stop="deleteMedia(media.id)" @keydown.enter.stop @keydown.space.stop><AppIcon name="trash" :size="14" /></button>
         </div><p v-if="!visibleMedia.length" class="sidebar-empty">{{ search?'没有匹配素材':'导入视频或图片开始标注' }}</p></div>
-        <button class="asset-import quiet-button" :disabled="mediaBusy" @click="openAnnotationFolderPicker"><AppIcon name="folder" :size="16" />加载标注</button>
       </aside></template>
       <template #canvas><section class="panel annotation-workbench">
         <div class="workbench-title"><div><strong :title="selectedMedia?.name">{{ selectedMedia?.name || '开始一个新的标注' }}</strong><span>{{ selectedMedia?.width || '—' }} × {{ selectedMedia?.height || '—' }}<template v-if="isVideo"> · {{ videoFps.toFixed(1) }} fps</template></span></div><div class="workbench-actions"><template v-if="focused"><span class="save-indicator" :class="saveState" role="status"><i />{{ saveLabel }}</span><button class="quiet-button" :disabled="editingBlocked||hasPausedTracking||trackingFeedbackPending||!!objectDeletionPendingAction||!isVideo||!currentObjects.some(o=>o.bbox)" @click="runAiTrack">{{ isAiBusy?'正在追踪…':'AI Tracking' }}</button><UserGuide page="/annotate" /><button class="quiet-button" @click="help=true" aria-label="快捷键"><AppIcon name="help" :size="16" /></button><SendToReview /></template><button ref="focusButton" class="quiet-button" :aria-pressed="focused" :title="focused?'退出专注模式 (F / Esc)':'专注模式 (F)'" @click="toggleFocus"><AppIcon name="fit" :size="16" />{{ focused?'退出专注':'专注' }}<kbd v-if="focused">Esc</kbd></button></div></div>

@@ -446,7 +446,15 @@ def track_video(
         normal_feedback=normal_feedback if normal_feedback is not None else workspace.get("normalMotionSamples", []),
         geometry_references=_load_confirmed_geometry_references(workspace, seed_source_frame, manual_baselines),
     )
-    detector.prime_history(_clean_history_before_seed(Path(output_json), seed_source_frame))
+    # Old JSONL deliberately retains deleted boxes for undo. Only identities
+    # in this run's seed may contribute history or disappearance expectations.
+    detector.prime_history(
+        (fi, {oid: box for oid, box in history.items()
+              if oid in active_object_ids and not is_deleted(workspace, fi, oid)})
+        for fi, history in _clean_history_before_seed(Path(output_json), seed_source_frame)
+    )
+    logging.getLogger("review.tracking").info("tracking.active_objects seed_frame=%s active_ids=%s deleted_ids=%s",
+             seed_source_frame, sorted(active_object_ids), workspace.get("deletedObjectIds", []))
 
     # object_id → name 映射，让 tracking 结果继承用户标注的名字
     object_names: dict[int, str] = {int(o["object_id"]): o.get("name") or f"object-{o['object_id']}" for o in objects}

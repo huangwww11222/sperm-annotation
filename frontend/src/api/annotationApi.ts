@@ -15,6 +15,7 @@ export interface UploadMediaResponse {
 
 export interface SaveManualAnnotationRequest {
   mediaId: string
+  generationId?: string
   mediaType: MediaType
   /** 视频保存请求字段是兼容兜底；逐对象 frameIndex/timestampMs 优先。 */
   mediaName?: string      // ← 加这行

@@ -177,6 +177,7 @@ def session_data(c, s, uid):
         (s["id"],),
     ).fetchone()
     action = last_action(c, s)
+    returned = c.execute("SELECT * FROM review_return_events WHERE confirmation_id=? ORDER BY rowid DESC LIMIT 1", (s["id"],)).fetchone()
     return dict(
         id=s["id"],
         baselineId=s["baseline_id"],
@@ -211,7 +212,10 @@ def session_data(c, s, uid):
             canComplete=active and own and decided == len(items),
             canReopen=s["state"] == "confirmed" and own and not reason,
             canExport=fv is not None and s["state"] == "confirmed",
+            canReturn=active and own and bool(items),
         ),
+        returnedReview=dict(frameIndex=returned["frame_index"], reason=returned["reason"],
+                           reviewSessionId=returned["session_id"], nextConfirmationId=returned["next_confirmation_id"]) if returned else None,
         resume=dict(
             lastViewedChangeId=bookmark["change_id"] if bookmark else None,
             cursorRevision=bookmark["revision"] if bookmark else 0,
@@ -439,6 +443,8 @@ def write(action, sid, uid, key, body, change_id=None):
                     )
                 elif action == "finish":
                     finalize(c, s, uid)
+                elif action == "return":
+                    return_frame(c, s, uid, body)
                 elif action == "reopen":
                     fv = c.execute(
                         "SELECT id FROM final_versions WHERE confirmation_id=? ORDER BY rowid DESC LIMIT 1",
@@ -518,6 +524,26 @@ def write(action, sid, uid, key, body, change_id=None):
         raise ReviewError(
             "STORAGE_UNAVAILABLE", "保存失败，当前选择已保留，请使用原请求重试", 503
         ) from e
+
+
+def return_frame(c, s, uid, body):
+    item = c.execute("SELECT * FROM review_changes WHERE id=? AND review_version_id=?", (body["changeId"], s["review_version_id"])).fetchone()
+    if not item:
+        raise ReviewError("CHANGE_NOT_FOUND", "修改项不属于此任务", 404)
+    reason = body["reason"].strip()
+    if not reason or len(reason) > 1000:
+        raise ReviewError("INVALID_RETURN_REASON", "请填写退回原因（最多 1000 字）", 422)
+    rs = c.execute("SELECT * FROM review_sessions WHERE id=?", (s["review_session_id"],)).fetchone()
+    latest = c.execute("SELECT id FROM review_versions WHERE session_id=? ORDER BY rowid DESC LIMIT 1", (rs["id"],)).fetchone()
+    if rs["state"] != "reviewed" or not latest or latest[0] != s["review_version_id"]:
+        raise ReviewError("REVIEW_VERSION_CHANGED", "审查版本已变化，请刷新后重试")
+    c.execute("INSERT INTO review_return_events(id,session_id,confirmation_id,change_id,frame_index,actor_id,reason,created_at) VALUES (?,?,?,?,?,?,?,?)",
+              ("return_" + uuid.uuid4().hex, rs["id"], s["id"], item["id"], item["frame_index"], uid, reason, now()))
+    # Retain immutable evidence and the last B geometry as the starting point.
+    c.execute("UPDATE review_frames SET state='unreviewed',frame_revision=frame_revision+1 WHERE session_id=? AND frame_index=?", (rs["id"], item["frame_index"]))
+    c.execute("UPDATE review_sessions SET state='in_progress',revision=revision+1 WHERE id=?", (rs["id"],))
+    c.execute("UPDATE confirmation_sessions SET state='returned',revision=revision+1 WHERE id=?", (s["id"],))
+    log.info("confirmation.frame_returned confirmation=%s review=%s frame=%s actor=%s", s["id"], rs["id"], item["frame_index"], uid)
 
 
 def finalize(c, s, uid):

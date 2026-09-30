@@ -132,6 +132,11 @@ class Complete(Model):
     expectedSessionRevision: int = Field(ge=0)
 
 
+class ResetAnnotations(Model):
+    expectedRevision: int = Field(strict=True, ge=0)
+    confirmDiscard: bool
+
+
 class Cursor(Model):
     sessionId: str
     frameIndex: int = Field(ge=0)
@@ -145,6 +150,29 @@ class SessionIn(Model):
 @router.get("/sessions")
 def sessions(user: User):
     return {"items": workflow.list_sessions(user["uid"])}
+
+
+@router.get("/media/{media_id}/submission-status")
+def submission_status(media_id: str, user: User):
+    return workflow.submission_status(media_id, user["uid"])
+
+
+@router.post("/media/{media_id}/reset-annotations")
+def reset_annotations(media_id: str, body: ResetAnnotations, user: User, key: Key):
+    from . import main, media_reimport
+    from .review_source_lock import source_write
+    @source_write
+    def run():
+        directory = main.media_dir(media_id)
+        if not directory.is_dir() or not main.find_video(directory):
+            raise workflow.ReviewError("MEDIA_NOT_FOUND", "素材不存在", 404)
+        return media_reimport.reset(directory, user["uid"], key, body.model_dump(), main.tracking_is_busy)
+    return run()
+
+
+@router.post("/sessions/{sid}/withdraw")
+def withdraw(sid: str, body: Complete, user: User, key: Key):
+    return workflow.write("withdraw", sid, user["uid"], key, body.model_dump())
 
 
 @router.get("/sessions/{sid}")

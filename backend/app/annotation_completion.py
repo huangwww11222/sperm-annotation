@@ -238,7 +238,7 @@ def complete(directory, video, media_id, uid, key, body, info):
         snapshot = w.digest(frozen)
         existing = c.execute(
             """SELECT s.id FROM review_sessions s JOIN annotation_baselines a ON a.id=s.baseline_id
-            WHERE a.media_revision_id=? AND a.submitted_by=? AND a.snapshot_hash=? ORDER BY a.created_at DESC LIMIT 1""",
+            WHERE a.media_revision_id=? AND a.submitted_by=? AND a.snapshot_hash=? AND s.state!='withdrawn' ORDER BY a.created_at DESC LIMIT 1""",
             (mid, uid, snapshot),
         ).fetchone()
         if existing:

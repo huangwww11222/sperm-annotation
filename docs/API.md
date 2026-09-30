@@ -53,6 +53,9 @@
 | `POST /media/{mediaId}/complete` | `expectedSourceRevision`、`confirmComplete`、`explicitEmptyFrameRanges:[{start,end}]`（0 起，含端点） |
 | `GET /sessions`、`/sessions/{sid}` | 任务列表、详情 |
 | `POST /sessions/{sid}/claim` | 原子领取，可自审 |
+| `GET /media/{mediaId}/submission-status` | 活动送审任务及 `canWithdraw`，不包含已撤回任务 |
+| `POST /sessions/{sid}/withdraw` | `expectedSessionRevision`；仅送审者且审查尚未领取/编辑，保留 A、任务置 `withdrawn` |
+| `POST /media/{mediaId}/reset-annotations` | `expectedRevision`、`confirmDiscard:true`；覆盖重新标注，已送审活动任务或 AI 运行时拒绝，返回工作区新 revision / generationId |
 | `GET /sessions/{sid}/frames/{fi}` | A、当前有效框、草稿、上次成功提交、帧版本/权限 |
 | `PUT /sessions/{sid}/frames/{fi}/draft` | `expectedFrameRevision`、`patch` |
 | `POST /sessions/{sid}/frames/{fi}/submit` | `expectedFrameRevision`、`patch` |
@@ -63,6 +66,10 @@
 `patch` 是当前帧相对 A 的完整净差量列表 `{objectId,bbox}`；不是新增框列表，也不是屏幕坐标。服务端拒绝未知/重复身份、非法坐标和不合法几何。
 
 Session 关键字段：`id, baselineId, revision, state, reviewerId, media, progress, resume, permissions, readOnlyReason, completedReviewVersionId`。`progress` 含 `submittedFrames/unsubmittedFrames/draftFrames/modifiedFrames/modifiedBoxes/percent`；`resume` 含最后浏览、首个未提交、草稿索引及游标版本。Frame 关键字段：`frameRevision/state/hasDraft/baselineObjects/effectiveObjects/patch/lastSubmission/permissions`。不要用 `lastSubmission != null` 推断当前已提交。
+
+上传相同内容返回 409 `DUPLICATE_VIDEO`，正文 `{message,code,duplicate:{mediaId,videoName,canOverwrite,reason,workspaceRevision,media}}`；`media` 是现存源视频元信息，不会保存第二份上传。覆盖通过上表 reset 接口完成，使用原键原正文重试；目录与未撤回 A 的关联在服务端再次校验。已覆盖工作区 GET 带 generationId；旧无版本保存返回 428。该视频之后的人工记录、seed、rewind 和 Tracking 写请求携带当前 generationId，缺失或旧值返回 409，在修改文件/DB或清未来分支之前拒绝。尚未覆盖的旧工作区保持兼容。
+
+Session 另带 `returnRequests:[{frameIndex,reason,confirmationId}]`，仅未解决的本帧重审请求。撤回后再次送审创建新 A/任务，不复用 `withdrawn`；领取与撤回使用同一 SQL 事务竞争。
 
 旧上传任意 frames 冻结 A 的路由不用于新流程；历史不完整来源只读，不能在前端填充假帧修复。
 
@@ -79,9 +86,12 @@ Session 关键字段：`id, baselineId, revision, state, reviewerId, media, prog
 | `PUT /sessions/{sid}/changes/{changeId}/decision` | `choice:'A'|'B'`、`expectedDecisionRevision` |
 | `POST /sessions/{sid}/undo` | `actionId`、`expectedSessionRevision` |
 | `POST /sessions/{sid}/finalize`、`/reopen` | `expectedSessionRevision` |
+| `POST /sessions/{sid}/return` | `expectedSessionRevision`、`changeId`、`reason`（1–1000 字）；当前确认人将该项所在整帧退回原 B 重审 |
 | `PUT /sessions/{sid}/cursor` | `changeId`、`expectedCursorRevision` |
 
 `Change` 含 `changeId/frameIndex/objectId/annotationId/beforeBbox/afterBbox/metrics/decisionRevision/decision`。C 不能上传任意新 bbox 或改变类别/对象集合。`progress` 含 `totalChanges/decided/pending/keptA/adoptedB/percent`，零修改百分比不替代显式完成。
+
+C 权限另带 `canReturn`；返回状态为 `returned`，`returnedReview:{frameIndex,reason,reviewSessionId,nextConfirmationId}|null` 指向原 B 及重审后新 C。旧 C 不再可编辑或完成。B 仅取消被退回帧的有效提交，保留旧 submission 与起始 B 几何；草稿/恢复不能代替重新显式提交。再次 freeze 固定新 B/C，其他帧几何未变且已有决定的项以带来源关联的新事件继承，退回帧不继承决定；新 C 保留原确认人。
 
 `GET /api/final-versions/{id}` 和 `/{id}/download` 提供完整 JSON。每帧存在，包括空 `objects:[]`；对象保留稳定身份、类别、最终框、A/B 框及 `choice/resolution/changeId/decisionEventId`。未改对象 `choice:null`、`resolution:'unchanged'`，来源 A。完整帧表不能用仅有对象的表代替，否则会丢空帧。
 

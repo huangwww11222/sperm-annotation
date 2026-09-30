@@ -18,7 +18,7 @@ from fastapi import HTTPException
 
 log = logging.getLogger("review.annotation")
 FILE_NAME = "workspace_state.json"
-SERVER_FIELDS = {"normalMotionSamples", "trackingFeedbackEvents", "_writeReceipts", "revision", "deletedAnnotationFrames"}
+SERVER_FIELDS = {"normalMotionSamples", "trackingFeedbackEvents", "_writeReceipts", "revision", "deletedAnnotationFrames", "generationId"}
 
 
 def read_state(directory: Path) -> dict[str, Any]:
@@ -37,6 +37,12 @@ def read_state(directory: Path) -> dict[str, Any]:
 
 def public_state(state: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in state.items() if not k.startswith("_")}
+
+
+def require_generation(state: dict[str, Any], generation: str | None):
+    if state.get("generationId") and generation != state["generationId"]:
+        log.warning("annotation.generation_conflict media=%s", state.get("mediaId"))
+        raise HTTPException(409, "视频已覆盖重新标注，请重新读取工作区；不能写回旧标注或追踪分支")
 
 
 def is_deleted(workspace: dict[str, Any], frame_index: int, object_id: int) -> bool:
@@ -76,6 +82,8 @@ def write_state(directory: Path, media_id: str, uid: int, key: str,
     expected = body.get("expectedRevision")
     legacy = expected is None and operation == "workspace"
     if legacy:
+        if previous.get("generationId"):
+            raise HTTPException(428, "视频已覆盖重新标注，请刷新页面后使用新版客户端保存")
         # Legacy clients can still save ordinary edits, but main preserves all
         # server control fields. They cannot add/remove deletion tombstones.
         key = "legacy-" + uuid.uuid4().hex

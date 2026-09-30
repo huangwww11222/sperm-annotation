@@ -32,6 +32,11 @@ class Undo(Version):
     actionId: str
 
 
+class ReturnFrame(Version):
+    changeId: str
+    reason: str = Field(min_length=1, max_length=1000)
+
+
 class Cursor(Model):
     changeId: str | None = None
     expectedCursorRevision: int = Field(strict=True, ge=0)
@@ -80,6 +85,11 @@ def finish(sid: str, body: Version, user: User, key: Key):
 @router.post("/sessions/{sid}/reopen")
 def reopen(sid: str, body: Version, user: User, key: Key):
     return flow.write("reopen", sid, user["uid"], key, body.model_dump())
+
+
+@router.post("/sessions/{sid}/return")
+def return_frame(sid: str, body: ReturnFrame, user: User, key: Key):
+    return flow.write("return", sid, user["uid"], key, body.model_dump())
 
 
 @router.put("/sessions/{sid}/cursor")

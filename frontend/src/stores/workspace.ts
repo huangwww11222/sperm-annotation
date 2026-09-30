@@ -5,9 +5,10 @@ import { hitHandle, moveBox, resizeBox, type Box } from '../annotation/geometry'
 import type { AnnotationObject, AnnotationTool, EffectResult, MediaAsset, SavedAnnotationFile } from '../types/annotation'
 // 登录、人工标注、视频目录、SAM3 Tracking 均走真实后端
 import { httpAnnotationApi } from '../api/httpAnnotationApi'
-import { trackApi, type ObjectDeletionSummary, type NormalMotionSample, type TrackingWarningSummary, type TrackingFeedbackEvent, type TrackingFeedbackResponse, type TrackingFeedbackInput } from '../api/trackApi'
+import { trackApi, type DuplicateVideo, type TrackUploadResponse, type ObjectDeletionSummary, type NormalMotionSample, type TrackingWarningSummary, type TrackingFeedbackEvent, type TrackingFeedbackResponse, type TrackingFeedbackInput } from '../api/trackApi'
 import { WorkspaceWrites, type WorkspaceDraft } from '../annotation/workspaceWrites'
 import { useAuth } from './auth'
+import { reviewWorkflowApi } from '../api/reviewWorkflowApi'
 import type { TrackingFrameObject, TrackingFrameResult } from '../types/annotation'
 
 const createWorkspace = () => {
@@ -16,7 +17,6 @@ const createWorkspace = () => {
     '.ts', '.m2ts', '.mts', '.3gp', '.ogv', '.ogg', '.asf', '.vob', '.divx', '.xvid',
   ])
   const isVideoFile = (file: File) => file.type.startsWith('video/') || VIDEO_EXTENSIONS.has(`.${file.name.split('.').pop()?.toLowerCase() || ''}`)
-  const isVideoName = (name: string) => VIDEO_EXTENSIONS.has(`.${name.split('.').pop()?.toLowerCase() || ''}`)
   const api = httpAnnotationApi
 
   // ── mediaAssets 持久化：刷新后 id 不变，annotationsByMedia 才能匹配 ──
@@ -119,7 +119,6 @@ const createWorkspace = () => {
   const annotationHitRef = ref<HTMLDivElement | null>(null)
   const fileInputRef = ref<HTMLInputElement | null>(null)
   const videoInputRef = ref<HTMLInputElement | null>(null)
-  const annotationFolderInputRef = ref<HTMLInputElement | null>(null)
   const effectFolderInputRef = ref<HTMLInputElement | null>(null)
 
   // 从 localStorage 恢复标注数据
@@ -134,6 +133,7 @@ const createWorkspace = () => {
     }
   }
   const annotationsByMedia = ref<Record<string, AnnotationObject[]>>(loadAnnotations())
+  const workspaceGenerations = new Map<string,string|undefined>()
 
   // 自动持久化到 localStorage（debounce 300ms）
   let saveTimer: ReturnType<typeof setTimeout> | null = null
@@ -338,7 +338,13 @@ const createWorkspace = () => {
   const displayObjects = computed(() => dragPreview.value
     ? currentObjects.value.map(o => o.id === dragPreview.value!.id ? { ...o, bbox: dragPreview.value!.bbox } : o)
     : currentObjects.value)
-  const editingBlocked = computed(() => objectDeletionBusy.value || trackingFeedbackBusy.value || !!pendingDeletion.value || !!pendingFeedback.value || !!workspaceReadError.value || isAiBusy.value || !!deletingMediaId.value || exactFrameLoading.value || isPlaying.value || workspaceRestoring.value || !!frameError.value)
+  const submissionLocks=ref(new Set<string>())
+  const submissionBusy=computed(()=>submissionLocks.value.size>0)
+  const mediaImportBusy = ref(false)
+  const duplicateImport = ref<(DuplicateVideo & {key:string;pending:boolean;error:string})|null>(null)
+  const importError = ref('')
+  let finishDuplicate: ((result:TrackUploadResponse|null)=>void)|null=null
+  const editingBlocked = computed(() => submissionBusy.value || mediaImportBusy.value || !!duplicateImport.value || objectDeletionBusy.value || trackingFeedbackBusy.value || !!pendingDeletion.value || !!pendingFeedback.value || !!workspaceReadError.value || isAiBusy.value || !!deletingMediaId.value || exactFrameLoading.value || isPlaying.value || workspaceRestoring.value || !!frameError.value)
   const workspaceRestoring = ref(false)
   const selectedObject = computed(() => currentObjects.value.find((item) => item.id === selectedObjectId.value) ?? null)
   const selectedEffect = computed(() => effectResults.value.find((item) => item.id === selectedEffectId.value) ?? effectResults.value[0] ?? null)
@@ -753,7 +759,7 @@ const createWorkspace = () => {
   }
 
   scheduleWorkspaceStateSave = (mediaId: string) => {
-    if (deletingMediaId.value === mediaId || pendingDeletion.value || pendingFeedback.value || objectDeletionBusy.value || trackingFeedbackBusy.value || workspaceReadError.value) return
+    if (mediaImportBusy.value || duplicateImport.value || deletingMediaId.value === mediaId || pendingDeletion.value || pendingFeedback.value || objectDeletionBusy.value || trackingFeedbackBusy.value || workspaceReadError.value) return
     if (!mediaId || workspaceRestoreInProgress || workspaceRestoring.value || !mediaAssets.value.find(m => m.id === mediaId)?.serverMediaId) return
     if (mediaId === currentMediaId.value) saveState.value = 'saving'
     const previous = workspaceSaveTimers.get(mediaId)
@@ -1020,8 +1026,20 @@ const createWorkspace = () => {
         if (controls?.feedback) pendingFeedback.value = { ...controls.feedback, mediaId }
       } catch (error) { console.warn('[annotation.controls_restore_failed]', { mediaId, error }) }
       await saveQueues.get(mediaId)?.catch(() => {})
-      await workspaceWrites.replay(media.serverMediaId)
-      const state = await trackApi.getWorkspaceState(media.serverMediaId)
+      let state = await trackApi.getWorkspaceState(media.serverMediaId)
+      const generationKey=`annotation-generation:${media.serverMediaId}`
+      if(state.generationId&&localStorage.getItem(generationKey)!==state.generationId){
+        await workspaceWrites.discardForReset(media.serverMediaId,state.revision||0)
+        clearResetCache(media.serverMediaId,state.revision||0)
+        if(pendingDeletion.value?.mediaId===mediaId)pendingDeletion.value=null
+        if(pendingFeedback.value?.mediaId===mediaId)pendingFeedback.value=null
+        localStorage.setItem(generationKey,state.generationId)
+        showToast('视频已覆盖重新标注，已清除旧工作区缓存')
+      }else{
+        await workspaceWrites.replay(media.serverMediaId)
+        state = await trackApi.getWorkspaceState(media.serverMediaId)
+      }
+      workspaceGenerations.set(mediaId,state.generationId)
       workspaceWrites.setRevision(media.serverMediaId, state.revision || 0)
       workspaceReadError.value = ''
       deletedObjectIds.value[mediaId] = state.deletedObjectIds ?? []
@@ -1094,257 +1112,91 @@ const createWorkspace = () => {
     else videoInputRef.value?.click()
   }
 
+  const clearResetCache = (serverId:string, revision:number) => {
+    const media=mediaAssets.value.find(m=>m.serverMediaId===serverId)
+    if(!media)return
+    const mid=media.id
+    cancelScheduledSave(mid)
+    annotationsByMedia.value[mid]=[];trackingFramesByMedia.value[mid]=[]
+    deletedTrackingIds.value[mid]=new Set();deletedObjectIds.value[mid]=[];deletedFrameObjects.value[mid]=[]
+    normalMotionSamples.value[mid]=[];trackingFeedbackEvents.value[mid]=[]
+    savedResults.value=savedResults.value.filter(item=>item.mediaId!==mid&&item.mediaId!==serverId)
+    loadedRemoteResultKeys.clear()
+    delete videoDeletionHistory.value[mid]
+    workspaceViews.delete(mid);frameCache.clear()
+    for(const key of histories.keys())if(key.startsWith(`${mid}:`))histories.delete(key)
+    workspaceWrites.setRevision(serverId,revision)
+    try{sessionStorage.removeItem(controlsCacheKey(serverId))}catch{}
+    selectedObjectId.value=null
+  }
+  const importJournalKey=()=>`annotation-reimport:${useAuth().user.value?.id}`
+  const cancelDuplicateImport=()=>{
+    if(duplicateImport.value?.pending)return
+    duplicateImport.value=null;finishDuplicate?.(null);finishDuplicate=null
+  }
+  const reimportSaving=ref(false)
+  const confirmDuplicateImport=async()=>{
+    const intent=duplicateImport.value
+    if(!intent||!intent.canOverwrite||reimportSaving.value)return
+    reimportSaving.value=true
+    intent.error='';intent.pending=true
+    let dispatched=false
+    try{
+      sessionStorage.setItem(importJournalKey(),JSON.stringify(intent))
+      dispatched=true
+      const result=await reviewWorkflowApi.resetAnnotations(intent.mediaId,intent.workspaceRevision,intent.key)
+      if(!result.ok||result.mediaId!==intent.mediaId)throw new Error('服务器未确认覆盖')
+      clearResetCache(intent.mediaId,result.revision)
+      sessionStorage.removeItem(importJournalKey())
+      duplicateImport.value=null
+      const resolve=finishDuplicate;finishDuplicate=null
+      if(resolve)resolve(intent.media)
+      else{await loadServerMedia();const media=mediaAssets.value.find(m=>m.serverMediaId===intent.mediaId);if(media){selectedMediaId.value=media.id;await nextTick();await resetAnnotationViewForMedia(media.id)}}
+      showToast('旧工作区标注已清空，可以从第 1 帧重新标注')
+    }catch(e:any){
+      intent.error=e.message||'覆盖结果尚未确认，请重试原请求';console.error('[annotation.reimport_failed]',e)
+      if(e.status&&e.status<500){intent.pending=false;intent.canOverwrite=false;sessionStorage.removeItem(importJournalKey())}
+      if(!dispatched)intent.pending=false
+    }finally{reimportSaving.value=false}
+  }
+  const restoreImportIntent=()=>{
+    try{const intent=JSON.parse(sessionStorage.getItem(importJournalKey())||'null');if(intent?.pending&&intent.mediaId)duplicateImport.value={...intent,error:'上次覆盖结果尚未确认，请重试原请求。'}}catch(e){console.warn('[annotation.reimport_restore_failed]',e)}
+  }
   const handleFiles = async (files: FileList | null, type: 'image' | 'video') => {
-    if (!files?.length) return
-    let lastAddedId: string | null = null
-
-    for (const file of Array.from(files)) {
-      if (type === 'image' && !file.type.startsWith('image/')) continue
-      if (type === 'video' && !isVideoFile(file)) continue
-
-      const media: MediaAsset = {
-        id: `local-${createRequestId()}`,
-        name: file.name,
-        type,
-        url: URL.createObjectURL(file),
-        fps: type === 'video' ? 30 : undefined,
-        sizeBytes: file.size,
-      }
-
-      // 每个导入素材都创建独立的标注容器，绝不复用示例素材的数组。
-      annotationsByMedia.value[media.id] = []
-      mediaAssets.value = [...mediaAssets.value, media]
-      lastAddedId = media.id
-
-      // 视频必须先落到后端；后端原样保存用户上传的源视频，后续 annotations / tracking JSON 都写入独立目录。
-      if (type === 'video') {
-        try {
-          const uploaded = await trackApi.uploadVideo(file)
-          media.serverMediaId = uploaded.mediaId
-          media.serverVideoName = uploaded.videoName
-          media.url = uploaded.videoUrl
-          if (uploaded.width) media.width = uploaded.width
-          if (uploaded.height) media.height = uploaded.height
-          if (uploaded.duration) media.duration = uploaded.duration
-          if (uploaded.fps) media.fps = uploaded.fps
-          if ((uploaded as any).frameCount) media.frameCount = (uploaded as any).frameCount
-          if (uploaded.duration) media.duration = uploaded.duration
-          trackingFramesByMedia.value[media.id] = []
-        } catch (error) {
-          console.error('视频上传到 Tracking 后端失败:', error)
-          statusMessage.value = error instanceof Error ? error.message : '视频上传到后端失败'
+    if (!files?.length||mediaImportBusy.value||duplicateImport.value||editingBlocked.value) return
+    mediaImportBusy.value=true;importError.value='';pausePlayback();cancelAnnotationGesture()
+    let lastAddedId:string|null=null
+    try{
+      await persistWorkspaceState(currentMediaId.value,true)
+      cancelScheduledSave(currentMediaId.value)
+      for(const file of Array.from(files)){
+        if(type==='image'&&!file.type.startsWith('image/'))continue
+        if(type==='video'&&!isVideoFile(file))continue
+        let uploaded:TrackUploadResponse|undefined
+        if(type==='video'){
+          try{uploaded=await trackApi.uploadVideo(file)}
+          catch(e:any){
+            if(e.code!=='DUPLICATE_VIDEO'||!e.duplicate)throw e
+            duplicateImport.value={...e.duplicate,key:createRequestId(),pending:false,error:''}
+            const existing=mediaAssets.value.find(m=>m.serverMediaId===e.duplicate.mediaId)
+            if(existing){cancelScheduledSave(existing.id);await saveQueues.get(existing.id)?.catch(()=>{});const state=await trackApi.getWorkspaceState(e.duplicate.mediaId);duplicateImport.value!.workspaceRevision=state.revision||0}
+            const replacement=await new Promise<TrackUploadResponse|null>(resolve=>{finishDuplicate=resolve})
+            if(!replacement)continue
+            uploaded=replacement
+          }
         }
-      } else {
-        void api.uploadMedia({ file })
-      }
-    }
-
-    if (lastAddedId) {
-      // 先切换素材 ID，再等待 DOM 根据 key 创建全新的媒体元素，避免旧视频的异步事件覆盖新视频状态。
-      selectedMediaId.value = lastAddedId
-      await nextTick()
-      await resetAnnotationViewForMedia(lastAddedId)
-      const name = mediaAssets.value.find((m) => m.id === lastAddedId)?.name || ''
-      statusMessage.value = `已导入并切换到新素材：${name}；已创建独立标注记录`
-      showToast(`已导入「${name}」，标注记录已独立创建`)
-    }
-    if (type === 'image' && fileInputRef.value) fileInputRef.value.value = ''
-    if (type === 'video' && videoInputRef.value) videoInputRef.value.value = ''
-  }
-
-  const parseTrackerResults = (text: string): { rows: any[]; meta: any } => {
-    const trimmed = text.trim()
-    if (!trimmed) return { rows: [], meta: {} }
-    try {
-      const parsed = JSON.parse(trimmed)
-      if (Array.isArray(parsed)) return { rows: parsed, meta: {} }
-      if (parsed?.frames && Array.isArray(parsed.frames)) return { rows: parsed.frames, meta: parsed }
-      if (parsed?.results && Array.isArray(parsed.results)) return { rows: parsed.results, meta: parsed }
-      if (parsed && typeof parsed === 'object' && 'frame_index' in parsed) return { rows: [parsed], meta: parsed }
-    } catch { /* JSONL */ }
-    const rows = trimmed.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).flatMap((line) => {
-      try {
-        const value = JSON.parse(line)
-        return value?.frame_index !== undefined || value?.frameIndex !== undefined ? [value] : []
-      } catch { return [] }
-    })
-    return { rows, meta: {} }
-  }
-
-  const openExistingBackendMedia = async (folderName: string, videoFile: File): Promise<boolean> => {
-    const normalizedFolderName = folderName.trim()
-    if (!normalizedFolderName) return false
-
-    const response = await trackApi.listMedia()
-    const serverItem = response.items.find((item) => {
-      const sameDirectory = item.mediaId === normalizedFolderName || item.directoryName === normalizedFolderName
-      const sameVideo = !item.sourceVideoName || item.sourceVideoName === videoFile.name
-      return sameDirectory && sameVideo
-    })
-    if (!serverItem) return false
-
-    let media = mediaAssets.value.find((item) => item.serverMediaId === serverItem.mediaId)
-    const alreadyOpen = !!media
-    if (!media) {
-      media = {
-        id: closedMediaFrontendIds[serverItem.mediaId] || `server-${serverItem.mediaId}`,
-        serverMediaId: serverItem.mediaId,
-        serverVideoName: serverItem.sourceVideoName || videoFile.name,
-        name: serverItem.videoName || serverItem.sourceVideoName || videoFile.name,
-        type: 'video',
-        url: serverItem.videoUrl,
-        fps: serverItem.fps || undefined,
-        width: serverItem.width || undefined,
-        height: serverItem.height || undefined,
-        duration: serverItem.duration || (serverItem.frameCount && serverItem.fps ? serverItem.frameCount / serverItem.fps : undefined),
-        frameCount: serverItem.frameCount || undefined,
-        sizeBytes: videoFile.size,
-      }
-      mediaAssets.value = [...mediaAssets.value, media]
-      trackingFramesByMedia.value[media.id] = []
-    } else {
-      media.url = serverItem.videoUrl
-      media.serverVideoName = serverItem.sourceVideoName || videoFile.name
-      if (serverItem.fps) media.fps = serverItem.fps
-      if (serverItem.width) media.width = serverItem.width
-      if (serverItem.height) media.height = serverItem.height
-      if (serverItem.frameCount) media.frameCount = serverItem.frameCount
-      if (serverItem.duration || (serverItem.frameCount && serverItem.fps)) {
-        media.duration = serverItem.duration || (serverItem.frameCount as number) / (serverItem.fps as number)
-      }
-    }
-
-    if (closedMediaFrontendIds[serverItem.mediaId]) {
-      delete closedMediaFrontendIds[serverItem.mediaId]
-      persistClosedMediaFrontendIds()
-    }
-
-    selectedMediaId.value = media.id
-    await nextTick()
-    await resetAnnotationViewForMedia(media.id)
-
-    if (alreadyOpen) {
-      statusMessage.value = `该视频已经打开，已切换到：${media.name}`
-      showToast(`「${media.name}」已经打开，已为你切换`)
-    } else {
-      statusMessage.value = `已加载现有标注目录：${serverItem.directoryName || serverItem.mediaId}（未新建目录）`
-      showToast(`已继续使用现有目录「${serverItem.directoryName || serverItem.mediaId}」`)
-    }
-    return true
-  }
-
-  const loadTrackerFolder = async (videoFile: File, trackerFile: File | null, sourceFolderName = '') => {
-    // 浏览器不会暴露绝对路径，但 directory picker / webkitRelativePath
-    // 都能提供顶层目录名；后端目录名本身就是稳定 mediaId。
-    if (sourceFolderName && await openExistingBackendMedia(sourceFolderName, videoFile)) return
-    if (!trackerFile) throw new Error('所选文件夹不是已有后端素材目录，且缺少 tracker_results.json')
-
-    const { rows, meta } = parseTrackerResults(await trackerFile.text())
-    if (!rows.length) throw new Error('tracker_results.json 中没有可用的逐帧标注')
-
-    const mediaId = `loaded-${createRequestId()}`
-    const safeMediaId = mediaId.trim()
-    const mediaMeta = meta?.media || {}
-    const trackingMeta = meta?.tracking || {}
-    // 文件夹导入也统一把原始视频送到后端：原格式原样保存，不转码；
-    // 这样 AVI/MKV 等浏览器不能直接播放的格式仍可通过逐帧预览和 Tracking 使用。
-    const uploaded = await trackApi.uploadVideo(videoFile)
-    const videoUrl = uploaded.videoUrl
-    const width = Number(mediaMeta.width || trackingMeta.width || rows.find((r: any) => r.width)?.width || uploaded.width || 0) || undefined
-    const height = Number(mediaMeta.height || trackingMeta.height || rows.find((r: any) => r.height)?.height || uploaded.height || 0) || undefined
-    const fps = Number(mediaMeta.fps || trackingMeta.fps || rows.find((r: any) => r.fps)?.fps || uploaded.fps || 15) || 15
-    const frames: TrackingFrameResult[] = []
-    const annotations: AnnotationObject[] = []
-    const usedObjectIds = new Set<number>()
-    let fallbackObjectId = 1
-
-    for (const row of rows) {
-      const frameIndex = Number(row.frame_index ?? row.frameIndex ?? 0)
-      const timestampMs = Number(row.timestamp_ms ?? row.timestampMs ?? Math.round(frameIndex * 1000 / fps))
-      const anns: TrackingFrameObject[] = []
-      for (const raw of (row.objects || row.annotations || [])) {
-        let objectId = Number(raw.object_id ?? raw.objectId)
-        if (!Number.isFinite(objectId)) {
-          while (usedObjectIds.has(fallbackObjectId)) fallbackObjectId += 1
-          objectId = fallbackObjectId++
+        let media=uploaded?mediaAssets.value.find(m=>m.serverMediaId===uploaded!.mediaId):undefined
+        if(!media){
+          media={id:`local-${createRequestId()}`,name:uploaded?.videoName||file.name,type,url:uploaded?.videoUrl||URL.createObjectURL(file),sizeBytes:file.size,
+            ...(uploaded?{serverMediaId:uploaded.mediaId,serverVideoName:uploaded.videoName,width:uploaded.width,height:uploaded.height,fps:uploaded.fps,duration:uploaded.duration,frameCount:uploaded.frameCount}:{})}
+          annotationsByMedia.value[media.id]=[];trackingFramesByMedia.value[media.id]=[];mediaAssets.value=[...mediaAssets.value,media]
         }
-        usedObjectIds.add(objectId)
-        const name = numberedObjectName(raw.name ?? raw.label ?? 'rare sperm', objectId)
-        const bboxPx = Array.isArray(raw.bbox) && raw.bbox.length === 4 ? raw.bbox.map(Number) : null
-        const hasDims = !!(width && height)
-        const bbox = bboxPx && hasDims ? {
-          x: Math.max(0, Math.min(100, bboxPx[0] / (width as number) * 100)),
-          y: Math.max(0, Math.min(100, bboxPx[1] / (height as number) * 100)),
-          width: Math.max(0, Math.min(100, (bboxPx[2] - bboxPx[0]) / (width as number) * 100)),
-          height: Math.max(0, Math.min(100, (bboxPx[3] - bboxPx[1]) / (height as number) * 100)),
-        } : undefined
-        anns.push({
-          id: `ai-${frameIndex}-${objectId}`, objectId, name, source: 'ai',
-          confidence: raw.score ?? raw.confidence,
-          bbox: bboxPx ? [bboxPx[0], bboxPx[1], bboxPx[2], bboxPx[3]] : undefined,
-          frameIndex, timestampMs,
-          anomaly: raw.anomaly,
-        })
-        annotations.push(normalizeAnnotationObject({
-          id: `ai-${frameIndex}-${objectId}`, objectId, name, source: 'ai',
-          confidence: raw.score ?? raw.confidence, bbox, frameIndex, timestampMs,
-          anomaly: raw.anomaly, anomaly_level: raw.anomaly_level,
-          anomaly_reasons: raw.anomaly_reasons, anomaly_details: raw.anomaly_details,
-        }, objectId))
+        lastAddedId=media.id
+        if(type==='image')void api.uploadMedia({file})
       }
-      frames.push({ frameIndex, timestampMs, annotations: anns })
-    }
-
-    const media: MediaAsset = {
-      id: safeMediaId, name: videoFile.name, type: 'video', url: videoUrl,
-      serverMediaId: uploaded.mediaId, serverVideoName: uploaded.videoName,
-      width, height, fps, duration: uploaded.duration || (uploaded.frameCount && fps ? uploaded.frameCount / fps : undefined), frameCount: uploaded.frameCount, sizeBytes: videoFile.size,
-    }
-    annotationsByMedia.value[safeMediaId] = annotations
-    trackingFramesByMedia.value[safeMediaId] = frames
-    mediaAssets.value = [...mediaAssets.value, media]
-    selectedMediaId.value = safeMediaId
-    await nextTick()
-    await resetAnnotationViewForMedia(safeMediaId)
-    statusMessage.value = `已加载文件夹：${videoFile.name} + tracker_results.json，共 ${frames.length} 帧标注`
-    showToast(`已加载 ${videoFile.name} 的 Tracking 标注`)
-  }
-
-  const openAnnotationFolderPicker = async () => {
-    const picker = (window as any).showDirectoryPicker
-    if (!picker) { annotationFolderInputRef.value?.click(); return }
-    try {
-      const dir = await picker({ mode: 'read' })
-      let videoFile: File | null = null
-      let trackerFile: File | null = null
-      for await (const entry of (dir as any).values()) {
-        if (entry.kind !== 'file') continue
-        if (!videoFile && isVideoName(entry.name) && !/_overlay\.[^.]+$/i.test(entry.name)) videoFile = await entry.getFile()
-        if (!trackerFile && entry.name.toLowerCase() === 'tracker_results.json') trackerFile = await entry.getFile()
-      }
-      if (!videoFile) throw new Error('所选文件夹中没有可识别的视频文件')
-      await loadTrackerFolder(videoFile, trackerFile, String(dir.name || ''))
-    } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') return
-      statusMessage.value = error instanceof Error ? error.message : '标注文件夹加载失败'
-      showToast(statusMessage.value)
-    }
-  }
-
-  const handleAnnotationFolderFiles = async (files: FileList | null) => {
-    if (!files?.length) return
-    const arr = Array.from(files)
-    const videoFile = arr.find((f) => isVideoFile(f) && !/_overlay\.[^.]+$/i.test(f.name))
-    const trackerFile = arr.find((f) => f.name.toLowerCase() === 'tracker_results.json')
-    if (!videoFile) {
-      statusMessage.value = '所选文件夹中没有可识别的视频文件'
-      showToast(statusMessage.value)
-      return
-    }
-    const sourceFolderName = arr.map((file) => file.webkitRelativePath).find(Boolean)?.split(/[\\/]/)[0] || ''
-    try { await loadTrackerFolder(videoFile, trackerFile || null, sourceFolderName) }
-    catch (error) { statusMessage.value = error instanceof Error ? error.message : '标注文件夹加载失败'; showToast(statusMessage.value) }
-    if (annotationFolderInputRef.value) annotationFolderInputRef.value.value = ''
+      if(lastAddedId){selectedMediaId.value=lastAddedId;await nextTick();await resetAnnotationViewForMedia(lastAddedId);statusMessage.value=`已导入：${selectedMedia.value?.name}`;showToast(statusMessage.value)}
+    }catch(e:any){importError.value=e.message||'导入失败，请重试';statusMessage.value=importError.value;console.error('[annotation.import_failed]',e)}
+    finally{mediaImportBusy.value=false;if(type==='image'&&fileInputRef.value)fileInputRef.value.value='';if(type==='video'&&videoInputRef.value)videoInputRef.value.value=''}
   }
 
   const onImageLoaded = () => {
@@ -1951,6 +1803,7 @@ const createWorkspace = () => {
     const canonicalMediaId = media.serverMediaId || mediaId
     const result = await api.saveManualAnnotation({
       mediaId: canonicalMediaId,
+      generationId: workspaceGenerations.get(mediaId),
       mediaType: media.type,
       mediaName: media.name,
       mediaWidth: pixel?.width ?? media.width,
@@ -2025,6 +1878,7 @@ const createWorkspace = () => {
       statusMessage.value = `①b 正在从第 ${startFrame + 1} 帧切断旧 Tracking 未来分支……`
       const rewind = await trackApi.rewind({
         mediaId: media.serverMediaId,
+        generationId: workspaceGenerations.get(mediaId),
         startFrame,
       })
       // The future branch is now replaced. Old AI snapshots can no longer be
@@ -2060,6 +1914,7 @@ const createWorkspace = () => {
       statusMessage.value = `② 正在生成第 ${startFrame + 1} 帧标注 JSON……`
       await trackApi.saveFrameAnnotations({
         mediaId: media.serverMediaId,
+        generationId: workspaceGenerations.get(mediaId),
         mediaName: media.name,
         mediaWidth: pixelSize.width,
         mediaHeight: pixelSize.height,
@@ -2072,6 +1927,7 @@ const createWorkspace = () => {
       statusMessage.value = `③ SAM3 将从第 ${startFrame + 1} 帧持续向后追踪，直到异常、单轮上限或视频末尾……`
       const task = await trackApi.run({
         mediaId: media.serverMediaId,
+        generationId: workspaceGenerations.get(mediaId),
         mediaName: media.name,
         mediaWidth: pixelSize.width,
         mediaHeight: pixelSize.height,
@@ -2221,6 +2077,7 @@ const createWorkspace = () => {
         statusMessage.value = `正在保存第 ${frameIndex + 1} 帧 annotations.json……`
         const result = await trackApi.saveFrameAnnotations({
           mediaId: media.serverMediaId,
+          generationId: workspaceGenerations.get(mediaId),
           mediaName: media.name,
           mediaWidth: width,
           mediaHeight: height,
@@ -2498,7 +2355,7 @@ const createWorkspace = () => {
   return {
     getObjectDeletionSummary, removeObjectAcrossVideo, undoVideoObjectDeletion, retryObjectDeletion, canUndoVideoDeletion, lastVideoObjectDeletion, objectDeletionBusy, objectDeletionError, objectDeletionPendingAction, confirmTrackingAnomaly, retryTrackingAnomalyFeedback, trackingFeedbackBusy, trackingFeedbackError, trackingFeedbackPending, trackingFeedbackPendingAction, trackingCalibrationSummary, resetTrackingCalibration, trackingWarningSummary,
     deleteMedia, deletingMediaId, mediaDeleteError, persistWorkspaceState, retryExactFrame, saveState, saveError, playbackRate, pausePlayback, displayObjects, editingBlocked, workspaceRestoring, frameError, loadExactFrame, nudgeSelected, cancelAnnotationGesture, canUndo, canRedo,
-    api, mediaAssets, selectedMediaId, activeTool, objectNameInput, selectedObjectId, currentFrame, currentTime, videoDuration, videoFps, frameInput, isPlaying, isAiBusy, trackingFrameCount, statusMessage, toastMessage, showToast, zoom, zoomIn, zoomOut, zoomReset, savedResults, loadedRemoteResultKeys, effectResults, selectedEffectId, effectTime, effectPlaying, effectVideoRef, imageRef, videoRef, exactFrameImageRef, exactFrameUrl, exactFrameLoading, videoPlaybackFallback, annotationHitRef, fileInputRef, videoInputRef, annotationFolderInputRef, effectFolderInputRef, annotationsByMedia, trackingFramesByMedia, anomalyObjectIds, anomalyFrames, pausedAnomalies, anomalyPanelVisible, trackingPausedFrame, closeAnomalyPanel, selectedMedia, isVideo, maxFrameIndex, currentMediaId, currentObjects, selectedObject, selectedEffect, formatTime, timeToFrame, frameToTime, getStagePoint, addObject, resetVideoViewToFirstFrame, ensureVideoFirstFrame, selectTool, onStageClick, tempBbox, onBboxDown, onBboxMove, onBboxUp, onObjectDropdownChange, selectObject, removeObject, renameObject, undo, redo, copyPreviousFrame, brightness, contrast, mediaFilterStyle, resetMediaFilter, annotatedFrameCount, clearSelection, openFilePicker, handleFiles, openAnnotationFolderPicker, handleAnnotationFolderFiles, onImageLoaded, onVideoLoaded, onVideoTimeUpdate, onVideoError, loadTrackingResult, seekVideo, seekToInputFrame, seekByFrame, togglePlayback, onVideoEnded, onTimelineClick, runAiSegment, runAiTrack, getMediaPixelSize, buildSam3AnnotationsJson, generateAnnotationsJson, loadSavedResults, openEffectFolderPicker, handleEffectFolder, loadEffects, onEffectTimeUpdate, toggleEffectPlayback, selectEffect, effectOverlayObjects, resetAnnotationViewForMedia, loadServerMedia
+    api, mediaAssets, selectedMediaId, submissionLocks, submissionBusy, mediaImportBusy, importError, duplicateImport, reimportSaving, cancelDuplicateImport, confirmDuplicateImport, restoreImportIntent, activeTool, objectNameInput, selectedObjectId, currentFrame, currentTime, videoDuration, videoFps, frameInput, isPlaying, isAiBusy, trackingFrameCount, statusMessage, toastMessage, showToast, zoom, zoomIn, zoomOut, zoomReset, savedResults, loadedRemoteResultKeys, effectResults, selectedEffectId, effectTime, effectPlaying, effectVideoRef, imageRef, videoRef, exactFrameImageRef, exactFrameUrl, exactFrameLoading, videoPlaybackFallback, annotationHitRef, fileInputRef, videoInputRef, effectFolderInputRef, annotationsByMedia, trackingFramesByMedia, anomalyObjectIds, anomalyFrames, pausedAnomalies, anomalyPanelVisible, trackingPausedFrame, closeAnomalyPanel, selectedMedia, isVideo, maxFrameIndex, currentMediaId, currentObjects, selectedObject, selectedEffect, formatTime, timeToFrame, frameToTime, getStagePoint, addObject, resetVideoViewToFirstFrame, ensureVideoFirstFrame, selectTool, onStageClick, tempBbox, onBboxDown, onBboxMove, onBboxUp, onObjectDropdownChange, selectObject, removeObject, renameObject, undo, redo, copyPreviousFrame, brightness, contrast, mediaFilterStyle, resetMediaFilter, annotatedFrameCount, clearSelection, openFilePicker, handleFiles, onImageLoaded, onVideoLoaded, onVideoTimeUpdate, onVideoError, loadTrackingResult, seekVideo, seekToInputFrame, seekByFrame, togglePlayback, onVideoEnded, onTimelineClick, runAiSegment, runAiTrack, getMediaPixelSize, buildSam3AnnotationsJson, generateAnnotationsJson, loadSavedResults, openEffectFolderPicker, handleEffectFolder, loadEffects, onEffectTimeUpdate, toggleEffectPlayback, selectEffect, effectOverlayObjects, resetAnnotationViewForMedia, loadServerMedia
   }
 }
 

@@ -156,6 +156,21 @@ def capture(c, eid, actor, body, versions):
     ]
     for table, column, ids in selectors:
         tables[table] = rows(c, table, column, ids)
+    # A re-review carries other frames' choices from an older frozen B/C. Keep
+    # the event lineage and original decisions so responsibility remains clear.
+    tables["review_withdrawals"] = rows(c, "review_withdrawals", "session_id", [s["reviewSessionId"] for s in sources])
+    tables["review_return_events"] = rows(c, "review_return_events", "session_id", [s["reviewSessionId"] for s in sources])
+    parent_ids = [r["confirmation_id"] for r in tables["review_return_events"]]
+    if parent_ids:
+        for table, column in [("confirmation_sessions", "id"), ("decision_events", "confirmation_id"), ("confirmation_actions", "confirmation_id")]:
+            extra = rows(c, table, column, parent_ids)
+            tables[table] = list({r["id"]: r for r in tables[table] + extra}.values())
+        prior_versions = [r["review_version_id"] for r in tables["confirmation_sessions"]]
+        for table, column, ids in [("review_versions", "id", prior_versions), ("review_changes", "review_version_id", prior_versions), ("final_versions", "confirmation_id", parent_ids)]:
+            tables[table] = list({r["id"]: r for r in tables[table] + rows(c, table, column, ids)}.values())
+        tables["review_version_frames"] = rows(c, "review_version_frames", "version_id", prior_versions)
+        tables["decision_heads"] = rows(c, "decision_heads", "confirmation_id", [r["id"] for r in tables["confirmation_sessions"]])
+    tables["confirmation_decision_carries"] = rows(c, "confirmation_decision_carries", "event_id", [r["id"] for r in tables["decision_events"]])
     tables["review_submission_payloads"] = rows(
         c,
         "review_submission_payloads",
@@ -177,6 +192,8 @@ def capture(c, eid, actor, body, versions):
         ("decision_events", "actor_id"),
         ("confirmation_actions", "actor_id"),
         ("confirmation_reopen_events", "actor_id"),
+        ("review_withdrawals", "actor_id"),
+        ("review_return_events", "actor_id"),
         ("final_versions", "confirmed_by"),
     ]:
         users.update(r[field] for r in tables[table] if r.get(field) is not None)

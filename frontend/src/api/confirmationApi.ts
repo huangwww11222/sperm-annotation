@@ -11,12 +11,13 @@ export interface ConfirmationSession {
   id:string;baselineId:string;reviewVersionId:string;state:string;revision:number;confirmerId:number|null
   media:{mediaId:string;name:string;width:number;height:number;fps:number;frameCount:number}
   progress:{totalChanges:number;decided:number;pending:number;keptA:number;adoptedB:number;percent:number}
-  permissions:{canClaim:boolean;canEdit:boolean;canUndo:boolean;canComplete:boolean;canReopen:boolean;canExport:boolean}
+  permissions:{canClaim:boolean;canEdit:boolean;canUndo:boolean;canComplete:boolean;canReopen:boolean;canExport:boolean;canReturn:boolean}
+  returnedReview?:{frameIndex:number;reason:string;reviewSessionId:string;nextConfirmationId:string|null}|null
   resume:{lastViewedChangeId:string|null;cursorRevision:number;firstPendingChangeId:string|null}
   undo:{actionId:string;changeId:string}|null;finalVersionId:string|null;readOnlyReason:string|null
 }
 export interface FrameContext { frameIndex:number;baselineObjects:ReviewObject[];reviewObjects:ReviewObject[] }
-export type Action = 'claim'|'decide'|'undo'|'finish'|'reopen'|'cursor'
+export type Action = 'claim'|'decide'|'undo'|'finish'|'reopen'|'return'|'cursor'
 export interface Operation { action:Action;sid:string;changeId?:string;body:Record<string,unknown>;key:string }
 export interface Result { session:ConfirmationSession;items:Change[];selectedChangeId:string|null;nextPendingChangeId:string|null;savedAt:string }
 export interface Failure {message:string;status?:number;code?:string;requestId?:string}

@@ -45,7 +45,7 @@ const total=computed(()=>session.value?.frameCount||0)
 const fi=computed(()=>frame.value?.frameIndex??0)
 const mac=/Mac|iPhone|iPad/.test(navigator.platform), primaryKey=mac?'⌘':'Ctrl+'
 const count=(state:string)=>state==='all'?filteredByText.value.length:filteredByText.value.filter(s=>s.state===state).length
-const status=(s:string)=>({pending:'待审查',in_progress:'审查中',reviewed:'已审查'}[s]||'历史只读任务')
+const status=(s:string)=>({pending:'待审查',in_progress:'审查中',reviewed:'已审查',withdrawn:'已撤回送审'}[s]||'历史只读任务')
 const number=(n:number,d=1)=>Number(n.toFixed(d)).toString()
 const signed=(n:number)=>(n>0?'+':'')+number(n,3)
 const coords=(b:Box)=>`${number(b[0],3)}, ${number(b[1],3)}, ${number(b[2]-b[0],3)} × ${number(b[3]-b[1],3)}`
@@ -317,6 +317,8 @@ onUnmounted(()=>{alive=false;stopPlayback();cancelGesture();removeGuard();resize
       <main class="review-center panel-r">
         <div class="section-head"><div><h2>{{ session?.media.name || '选择视频开始审查' }}</h2><small v-if="session">{{ session.media.width }} × {{ session.media.height }} · 第 {{ fi+1 }} / {{ total }} 帧 <span class="frame-status" data-testid="frame-state">{{ session.state==='reviewed'?'已完成 · 只读':frame?.state==='submitted'?'已提交':frame?.hasDraft?'未提交草稿':'未审查' }}</span></small></div><div class="toolbar"><label><input v-model="overlay" type="checkbox" /> 叠加原框</label></div></div>
         <div v-if="session?.readOnlyReason" class="review-notice">{{ session.readOnlyReason }}</div>
+        <div v-if="session?.returnRequests?.length" class="review-notice" data-testid="review-return-reason"><p v-for="request in session.returnRequests" :key="request.frameIndex">第 {{ request.frameIndex+1 }} 帧需重审：{{ request.reason }}。重新检查后请提交本帧，再完成视频审查。</p></div>
+        <div v-if="session?.state==='withdrawn'" class="review-notice">送审者已撤回此任务。原始快照保留为历史记录，当前任务不能继续审查。</div>
         <div v-else-if="isReadonly&&session?.state!=='reviewed'" class="review-notice">当前账号仅可查看。任务由已领取的审查员编辑；你也可以领取尚未分配的任务，检查自己的标注。</div>
         <div ref="viewport" class="review-viewport">
           <div v-if="session&&imageUrl&&frame" class="stage-holder">

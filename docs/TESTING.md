@@ -32,6 +32,7 @@ npm run build --prefix frontend
 | Tracking 调用/完成定位 | seed、rewind、timing、manual baseline、frontend tracking contract pytest | `annotation-tracking-ui.mjs`（14，模拟响应，无真实 GPU） |
 | Chrome 93 / HTTP、素材删除 | `test:compatibility`、`test_media_deletion.py` | `browser-compat-media.mjs`；下述旧 API 回归模式 |
 | 送审 | `test_review_completion.py` | `review-ingress-browser.mjs`（6） |
+| 撤回、重复视频覆盖、本帧重审 | `test_workflow_transitions.py`、`test_media_reimport.py`、`test_tracking_adaptive_feedback.py`；撤回/领取竞争、回滚/重放、导出门禁和审计继承 | `workflow-transitions-browser.mjs`（37；真实源视频/接口，覆盖成功响应丢失、旧窗口待重试草稿、新轮次人工记录/seed，两尺寸浅深主题） |
 | B 草稿/提交/恢复 | `test_review_workflow.py`、`test:review` | `review-browser.mjs`（27）、`review-failure-browser.mjs`（19） |
 | C 选择/恢复/最终版本 | `test_confirmation_workflow.py`、`test:confirmation` | `confirmation-browser.mjs`（40）、`confirmation-failure-browser.mjs`（34） |
 | 训练导出/门禁/版本 | `test_training_export.py`、`test_quality_audit.py`、`test_export_audit_script.py` | `training-export-browser.mjs`（29） |
@@ -63,6 +64,8 @@ work/review-venv/bin/python backend/tests/review_browser_fixture.py
 ```
 
 先生成 C 夹具建立固定测试用户 ID，再生成其他夹具。UX 脚本要求路径含 `/work/e2e-confirm-ux`，生成横/竖两个 60 帧真实 AVI，并**重置测试媒体工作区**。C 夹具生成 main、zero、failure、many、portrait 五个独立任务；many 含 45 个真实修改项，用于分页导航，portrait 是 450×800 真实竖向视频，用于检查全幅主图比例和可见边界。B 夹具生成一个三帧任务。token 在 `work/*fixture.json`，不要输出到报告。
+
+撤回/覆盖/本帧重审另运行 `work/review-venv/bin/python backend/tests/workflow_transitions_browser_fixture.py`，随后 `CONFIRMATION_ORIGIN=http://127.0.0.1:5373 node frontend/tests/workflow-transitions-browser.mjs`。使用上述同一隔离环境；夹具生成 free/pending/started/confirm 四个独立视频，每批内容含唯一标记，防止误撞上次夹具的真实 SHA。浏览器用例仅让这四个素材进入列表，消费本批任务，覆盖失败响应的原键重试会真实提交；重复运行应先生成新夹具。测试后端设 `SAM3_ENABLED=false`：只模拟 rewind 返回以检查新轮次输入，人工记录/seed 真实保存，Tracking 在 CPU 禁用边界返回 503，不执行模型。截图及 37 项结果保存在 `output/playwright/`。
 
 ### 2. 启动测试服务
 
@@ -202,6 +205,8 @@ python3 scripts/check_repository.py
 日志不记录 JWT/密码；不要记录每个鼠标移动。浏览器 route 注入的 503 不会出现在服务端日志；数据库触发器故障测试验证真实事务回滚与日志。
 
 ## 最近验证记录
+
+2026-09-30 撤回送审、重复视频覆盖与本帧重审：隔离后端全量 **351 项通过、1 项跳过**；前端几何/写入/兼容 **18+6+4+5 项通过**，类型检查和生产构建通过。专项浏览器 **37 项**、既有三页工作台 **124 项通过**，覆盖两尺寸浅深主题、覆盖取消/响应丢失后刷新重试、旧窗口请求拒绝与待重试草稿清理、当前轮次人工记录/seed，以及 C→B→C 完整重审和其他帧决定保留。删除后的异常回归使用模拟推理，未运行真实 GPU。日志位于 `work/workflow-*.log`，数据在 `work/e2e-confirm-transitions-*`，截图在 `output/playwright/transitions-*`。
 
 2026-09-30 通用离线发布与升级：新增升级器 **64 项**（真实隔离 SQLite/文件、模拟 Docker 边界）及相关部署回归合计 **85 项通过**。Windows 打包工具 **19 组**模拟 Git/Docker 场景通过，实际运行环境为本机已有 PowerShell 7.4 容器（禁网）；真实 Git 快照归档检查通过。Windows 5.1 的执行已接入 CI，但本地结果不能称为 Windows 5.1 实机或远端 CI 通过。
 

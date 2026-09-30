@@ -8,7 +8,8 @@ export interface Session {
   media:{name:string;mediaId:string;width:number;height:number;fps:number;frameCount:number}
   progress:Progress
   resume:{lastViewedFrameIndex:number|null;cursorRevision:number;firstUnsubmittedFrameIndex:number|null;draftFrameIndexes:number[]}
-  permissions:{canClaim:boolean;canEdit:boolean;canComplete:boolean}
+  permissions:{canClaim:boolean;canEdit:boolean;canComplete:boolean;canWithdraw:boolean}
+  returnRequests?:{frameIndex:number;reason:string;confirmationId:string}[]
   readOnlyReason:string|null;completedReviewVersionId:string|null
 }
 export interface Frame {
@@ -35,6 +36,9 @@ async function request<T>(path:string,method='GET',body?:unknown,key?:string):Pr
 export const reviewWorkflowApi={
   completionPreview:(id:string)=>request<CompletionPreview>(`/media/${encodeURIComponent(id)}/completion-preview`),
   completeAnnotation:(id:string,body:unknown,key:string)=>request<Mutation>(`/media/${encodeURIComponent(id)}/complete`,'POST',body,key),
+  submissionStatus:(id:string)=>request<{items:Session[]}>(`/media/${encodeURIComponent(id)}/submission-status`),
+  withdraw:(id:string,revision:number,key:string)=>request<Mutation>(`/sessions/${id}/withdraw`,'POST',{expectedSessionRevision:revision},key),
+  resetAnnotations:(id:string,revision:number,key:string)=>request<{ok:boolean;mediaId:string;revision:number;generationId:string}>(`/media/${encodeURIComponent(id)}/reset-annotations`,'POST',{expectedRevision:revision,confirmDiscard:true},key),
   list:()=>request<{items:Session[]}>('/sessions'),
   session:(id:string)=>request<Session>(`/sessions/${id}`),
   frame:(id:string,fi:number)=>request<Frame>(`/sessions/${id}/frames/${fi}`),

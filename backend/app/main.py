@@ -9,11 +9,12 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 import mimetypes
+import tempfile
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from fastapi.responses import Response
+from fastapi.responses import Response, JSONResponse
 from pydantic import BaseModel
 
 from .auth import current_user, hash_password, sign_jwt, verify_password
@@ -42,7 +43,7 @@ from .tracker import (
 )
 from .review_routes import register_review_routers
 from .review_source_lock import source_write
-from . import annotation_state
+from . import annotation_state, media_reimport
 
 app = FastAPI(title="SAM3 Annotation Backend", version="3.0.0")
 app.add_middleware(
@@ -91,6 +92,8 @@ def startup() -> None:
     from .training_export import recover_interrupted
     recover_interrupted()
     TRACK_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    for root in (TRACK_DATA_DIR, LEGACY_TRACK_DATA_DIR):
+        media_reimport.recover(root)
     DATASET_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     print("=" * 70)
     print("✅ FastAPI backend started")
@@ -196,6 +199,7 @@ def save_manual(req: ManualAnnotationRequest, user: dict[str, Any] = Depends(cur
     batch_id = f"batch-{user['uid']}-{uuid.uuid4().hex[:10]}"
     rows = []
     workspace = annotation_state.read_state(media_dir(req.mediaId))
+    annotation_state.require_generation(workspace, req.generationId)
     for obj in req.objects:
         # 数据库只记录人工新增/人工修改后的对象；AI Tracking 结果不进入人工结果库。
         if obj.get("source") != "manual":
@@ -386,59 +390,52 @@ async def save_upload(upload: UploadFile, target: Path) -> int:
 
 
 @app.post("/api/track/upload", status_code=201)
-async def upload_video(file: UploadFile = File(...), user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+async def upload_video(file: UploadFile = File(...), user: dict[str, Any] = Depends(current_user)):
     filename = Path(file.filename or "video.bin").name
     if not Path(filename).suffix:
         raise HTTPException(400, "视频文件必须包含扩展名")
-    stem = safe_stem(filename)
-    media_id = allocate_media_id(stem)
-    directory = media_dir(media_id)
-    directory.mkdir(parents=True, exist_ok=False)
-    target = directory / filename
+    TRACK_DATA_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        size = await save_upload(file, target)
-    except Exception:
-        target.unlink(missing_ok=True)
-        try:
-            if directory.is_dir() and not any(directory.iterdir()):
-                directory.rmdir()
-        except OSError:
-            pass
-        raise
+        with tempfile.TemporaryDirectory(prefix="_upload-", dir=TRACK_DATA_DIR) as tmp:
+            target = Path(tmp) / filename
+            size = await save_upload(file, target)
+            if size <= 0:
+                raise HTTPException(400, "视频文件为空")
+            try:
+                video_meta = _probe_video(target)
+            except Exception as exc:
+                raise HTTPException(400, f"无法解码该视频格式：{exc}") from exc
+            if any(float(video_meta.get(key) or 0) <= 0 for key in ("frameCount", "width", "height", "fps")):
+                raise HTTPException(400, "上传文件不可读取，或无法获得有效的帧数、尺寸、FPS 元数据")
+            return publish_upload(target, filename, video_meta, user["uid"])
     finally:
         await file.close()
-    if size <= 0:
-        target.unlink(missing_ok=True)
-        try:
-            directory.rmdir()
-        except OSError:
-            pass
-        raise HTTPException(400, "视频文件为空")
-    # 用 OpenCV 读取源视频真实元信息；不转换、不改写原始文件。
+
+
+@source_write
+def publish_upload(target, filename, video_meta, uid):
+    existing, sha = media_reimport.duplicate(iter_media_dirs(), find_video, target)
+    if existing:
+        duplicate = media_reimport.duplicate_data(existing, uid)
+        source = find_video(existing)
+        duplicate["media"] = {"mediaId": existing.name, "videoName": source.name,
+                              "videoUrl": f"/api/track/video/{existing.name}", **video_meta,
+                              "duration": video_meta["frameCount"] / video_meta["fps"]}
+        return JSONResponse(status_code=409, content={"code": "DUPLICATE_VIDEO", "message": "该视频已存在，是否覆盖重新标注？", "duplicate": duplicate})
+    media_id = allocate_media_id(safe_stem(filename))
+    directory = media_dir(media_id)
+    directory.mkdir(parents=True, exist_ok=False)
+    video = directory / filename
     try:
-        video_meta = _probe_video(target)
-    except Exception as exc:
-        target.unlink(missing_ok=True)
-        try:
-            directory.rmdir()
-        except OSError:
-            pass
-        raise HTTPException(400, f"无法解码该视频格式：{exc}") from exc
-    if (
-        int(video_meta.get("frameCount") or 0) <= 0
-        or int(video_meta.get("width") or 0) <= 0
-        or int(video_meta.get("height") or 0) <= 0
-        or float(video_meta.get("fps") or 0) <= 0
-    ):
-        target.unlink(missing_ok=True)
-        try:
-            directory.rmdir()
-        except OSError:
-            pass
-        raise HTTPException(400, "上传文件不可读取，或无法获得有效的帧数、尺寸、FPS 元数据")
-    duration = (video_meta["frameCount"] / video_meta["fps"]) if video_meta.get("fps") else 0
-    meta = {"mediaId": media_id, "videoName": filename, "videoPath": str(target.resolve()), "videoMimeType": _video_media_type(target), "createdBy": user["uid"], **video_meta, "duration": duration}
-    (directory / "media.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        target.replace(video)
+        duration = video_meta["frameCount"] / video_meta["fps"]
+        meta = {"mediaId": media_id, "videoName": filename, "videoPath": str(video.resolve()), "videoMimeType": _video_media_type(video), "createdBy": uid, "sha256": sha, **video_meta, "duration": duration}
+        (directory / "media.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        import shutil
+        shutil.rmtree(directory)
+        raise
+    logging.getLogger("review.media").info("media.uploaded media=%s actor=%s sha=%s", media_id, uid, sha)
     return {"mediaId": media_id, "videoName": filename, "videoUrl": f"/api/track/video/{media_id}", "videoMimeType": meta["videoMimeType"], **video_meta, "duration": duration}
 
 
@@ -477,6 +474,7 @@ def save_frame_annotations(req: dict[str, Any], user: dict[str, Any] = Depends(c
         normalized_annotations.append(ann)
     directory = media_dir(str(req["mediaId"]))
     workspace = annotation_state.read_state(directory)
+    annotation_state.require_generation(workspace, req.get("generationId"))
     if any(annotation_state.is_deleted(workspace, frame, ann["object_id"]) for ann in normalized_annotations):
         raise HTTPException(409, "当前 seed 包含已删除的对象，请重新读取工作区")
     directory.mkdir(parents=True, exist_ok=True)
@@ -568,6 +566,7 @@ def _legacy_workspace_state(directory: Path, media_id: str) -> dict[str, Any] | 
 
 
 @app.get("/api/track/workspace/{media_id}")
+@source_write
 def get_workspace_state(media_id: str, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     """Return durable per-video editor state without duplicating tracker JSONL."""
     directory = media_dir(media_id)
@@ -723,6 +722,7 @@ def rewind_tracking(req: dict[str, Any], user: dict[str, Any] = Depends(current_
         raise HTTPException(400, "mediaId/startFrame 无效")
 
     directory = media_dir(media_id)
+    annotation_state.require_generation(annotation_state.read_state(directory), req.get("generationId"))
     _require_pause_resolved(annotation_state.read_state(directory), start_frame)
     video = find_video(directory)
     if not video:
@@ -781,6 +781,7 @@ def start_tracking(req: TrackRequest, user: dict[str, Any] = Depends(current_use
     req.annotations = normalized_request_annotations
     directory = media_dir(req.mediaId)
     workspace = annotation_state.read_state(directory)
+    annotation_state.require_generation(workspace, req.generationId)
     if any(annotation_state.is_deleted(workspace, req.startFrame, ann["object_id"]) for ann in req.annotations):
         raise HTTPException(409, "当前 seed 包含已删除的对象，请重新读取工作区")
     _require_pause_resolved(workspace, req.startFrame)
@@ -947,6 +948,7 @@ def _tracker_rows_to_frames(rows: list[dict[str, Any]], fps: float = 0.0) -> lis
 
 
 @app.get("/api/track/result/{media_id}")
+@source_write
 def tracking_result(media_id: str, frameIndex: int | None = Query(default=None), user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     directory = media_dir(media_id)
     file = directory / RESULT_FILE_NAME

@@ -257,3 +257,22 @@ def test_invalid_geometry_reference_is_not_restored(bbox):
     event = {"objectId": 7, "frameIndex": 2, "decision": "normal", "geometryReference": {
         "objectId": 7, "frameIndex": 2, "bbox": bbox, "source": "confirmed-normal"}}
     assert not _load_confirmed_geometry_references({"trackingFeedbackEvents": [event]}, 2, {})
+
+@pytest.mark.parametrize('rule', ({'deletedObjectIds': [7]}, {'deletedFrameObjects': [{'objectId': 7, 'frameIndex': 1}]}))
+def test_resume_does_not_resurrect_deleted_seed_identity_from_retained_history(tmp_path, monkeypatch, caplog, rule):
+    caplog.set_level('INFO', logger='review.tracking')
+    other = [100, 200, 140, 220]
+    (tmp_path / 'tracker_results.json').write_text(json.dumps({
+        'frame_index': 0, 'source_frame_index': 0,
+        'objects': [{'object_id': 7, 'bbox': [100, 100, 140, 120]}, {'object_id': 12, 'bbox': other}]
+    }) + '\n')
+    (tmp_path / 'workspace_state.json').write_text(json.dumps(rule))
+    result = _geometry_segment(tmp_path, monkeypatch, 1, [100, 100, 140, 120],
+                               {fi: {12: other} for fi in range(2, 7)})
+    assert result['anomaly_paused'] is None
+    assert result['lastProcessedFrame'] == 6
+    assert 'active_ids=[12]' in caplog.text
+    # Undo data remains intact; new seed/output includes only requested IDs.
+    raw = [json.loads(line) for line in (tmp_path / 'tracker_results.json').read_text().splitlines()]
+    assert raw[0]['objects'][0]['object_id'] == 7
+    assert all([obj['object_id'] for obj in row['objects']] == [12] for row in raw[1:])

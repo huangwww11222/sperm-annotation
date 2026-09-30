@@ -25,6 +25,7 @@ storage/
     tracker_overlay.mp4          # 带框预览
     workspace_state.json         # 可恢复人工/删除/基准/异常/当前位置与设置
     .frame_cache/                # 逐帧 JPEG 缓存
+  media/_annotation_resets/<id>/ # 覆盖事务的临时文件及 journal.json；重启按 DB 回执恢复/清理
   datasets/
     train_<id>.zip               # 当前训练导出生成包，认证接口下载
     train_<id>.zip.partial       # 打包临时文件
@@ -32,6 +33,8 @@ storage/
 ```
 
 `workspace_state.json` 临时文件写入后原子替换。AI 逐帧结果不复制进去，加载时与 `tracker_results.json` 合并，人工修正优先，删除标记不能因重新加载复活。
+
+覆盖重新标注仅允许没有未撤回送审任务的媒体。重置使用 SQL 写事务、工作区 revision 与幂等键，移动旧 workspace/seed/results/overlay 到恢复目录，写入空工作区并删除该 media_id 的活动人工查询记录；原视频、media.json、历史 A 保留。成功后清理临时旧文件，失败回滚；启动按 journal 和成功回执协调进程中断后的文件状态，不能当作普通缓存直接删除。新的 generationId 使前端丢弃旧框/撤销/校准缓存，并在重放待重试草稿前识别轮次变化；仅已确认的覆盖允许丢弃旧请求，普通冲突不能静默覆盖。旧版本或旧无版本客户端不能写回已舍弃状态。新增字段和表均为兼容增量迁移，存储运行契约保持 1。
 
 工作区当前还保存 `revision`、稳定 ID 的 `deletedObjectIds/deletedFrameObjects`、服务端生成的 `normalMotionSamples` 和 `trackingFeedbackEvents`。内部 `_writeReceipts` 与状态同一次原子替换，GET 不暴露回执；响应丢失后原键重放不会重复递增版本或新增反馈。文件替换失败保留原状态和版本，日志记录 `annotation.workspace_save_failed`。这些状态受单进程来源锁保护，不属于 SQLite 跨资源事务。
 
@@ -55,12 +58,13 @@ storage/
 | C 并发/撤销 | `confirmation_change_versions`、`confirmation_actions` |
 | F | `final_versions`、`final_version_frames`、`confirmation_final_records` 存完整帧、决定快照、前一版本 |
 | 历史/兼容 | `confirmation_reopen_events` 留重新确认记录；`final_frame_objects` 兼容旧对象读取方，不能取代完整帧表 |
+| 撤回与重审 | `review_withdrawals` 留送审者撤回记录；`review_return_events` 留 C→B 的帧/原因/操作者及后续 B/C 关联；`confirmation_decision_carries` 关联继承决定与原事件 |
 | 游标 | `review_bookmarks`、`confirmation_bookmarks`，按用户与任务隔离、版本独立 |
 | 幂等 | `review_write_receipts` 与业务变化同一事务；`training_exports` 有操作者+请求键唯一约束 |
 | 导出 | `training_exports` 存任务设置、进度、manifest、错误、完成状态 |
 | 审计身份/证据 | `audit_source_identity` 保存部署身份；`training_export_audits` 按 export_id 唯一保存规范 JSON、采集时间和 SHA；触发器禁止更新/删除 |
 
-A/B/F 不随浏览、缩放、草稿、重新确认而改写。F 的对象集合和类别继承 A，只选择几何来源。旧问题标记表或状态仍可能存在，不表示当前产品启用阻塞/退回流程。
+A/B/F 不随浏览、缩放、草稿、重新确认或退回重审而改写。F 的对象集合和类别继承 A，只选择几何来源。当前帧重审使用上述事件表；旧问题标记表不作为这一流程的状态来源。
 
 ## 备份、兼容和清理
 
@@ -75,6 +79,8 @@ A/B/F 不随浏览、缩放、草稿、重新确认而改写。F 的对象集合
 ## 数据集质量审计
 
 `quality_audit.py` 在创建导出任务的事务内固定所选 F 的相关业务历史：媒体/A 全帧、B 有效帧与全部成功 submission/payload、B 版本与净修改、C 决定/动作/撤销/重新确认、F 完整帧与决定快照。用户仅导出 id/username，不含密码、JWT、游标或写请求收据。部署身份随数据库备份/升级保留。每份导出独立快照，重新确认不修改旧证据。
+
+发生帧重审时审计还保存退回事件及决定继承关联，补入来源 C 的决定事件与责任人，不能把继承的选择冒充为本轮新点击。
 
 旧数据集没有快照时明确未覆盖；只读提取不会初始化数据库、补造历史或把未知观看时长写成零。A 的作者字段表示送审责任，不能代表每个框的手工作者。失败任务可保留尝试快照，但不算成功交付。
 

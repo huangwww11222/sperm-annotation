@@ -41,6 +41,14 @@ export class WorkspaceWrites {
     } catch (error) { console.warn('[annotation.pending_cache_failed]', { mediaId, error }) }
   }
   setRevision(mediaId: string, revision: number) { this.revisions.set(this.storageKey(mediaId), revision); this.conflicts.delete(this.storageKey(mediaId)) }
+  discardForReset(mediaId: string, revision: number) {
+    // Only a confirmed server generation change authorizes dropping an old
+    // ambiguous request. Ordinary conflicts must retain the reload requirement.
+    return this.enqueue(mediaId, async () => {
+      this.remember(mediaId)
+      this.setRevision(mediaId, revision)
+    })
+  }
   private async send(mediaId: string, request: PendingWrite): Promise<WriteResult> {
     const scope = request.scope || this.storageKey(mediaId)
     request.scope = scope

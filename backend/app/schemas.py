@@ -13,6 +13,7 @@ class AuthRequest(BaseModel):
 
 class ManualAnnotationRequest(BaseModel):
     mediaId: str
+    generationId: str | None = None
     mediaType: str | None = None
     mediaName: str | None = None
     mediaWidth: float | None = None
@@ -25,6 +26,7 @@ class ManualAnnotationRequest(BaseModel):
 
 class TrackRequest(BaseModel):
     mediaId: str
+    generationId: str | None = None
     mediaName: str | None = None
     mediaWidth: float | None = None
     mediaHeight: float | None = None
