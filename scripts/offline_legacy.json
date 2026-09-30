@@ -1,0 +1,17 @@
+{
+  "contract": 1,
+  "backends": {
+    "6dc42aa3f8c71c91417ea4ba5c2e6da32f2c28b79bf0a9ad4b76ed8d4a089d44": {
+      "revision": "2488003defbf11bb33b0baf246aaaeea3679109c",
+      "description": "医院首次 GPU 离线部署版本"
+    },
+    "11cb14c24b232af012e0230a3aa747c95d1a56de9330495cf4129e61cbf84836": {
+      "revision": "6f203e4d380652933d0e7dea4035558c6dee0ab7",
+      "description": "医院 Chrome 93 / HTTP 兼容与删除修复版本"
+    },
+    "0fc7eeb510dd06a6418963a67aa2c48f9c654888d774228d86656392f33dae73": {
+      "revision": "d004570de85bce785c810a4b985a4f46f0fd0806",
+      "description": "统一工作台、删除操作与追踪反馈版本"
+    }
+  }
+}

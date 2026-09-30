@@ -7,7 +7,8 @@ Vue 3 + TypeScript + Vite；FastAPI + SQLite；SAM3 在后端按需加载。前�
 | 职责 | 实现入口 |
 | --- | --- |
 | Docker 部署入口 | 根目录 `deploy.sh` / `deploy.ps1`、`compose.yaml` / `compose.gpu.yaml`、`.env.docker.example` |
-| Chrome 93 / HTTP 兼容与专项离线修复 | `frontend/src/utils/browserCompat.ts`、`scripts/build_compat_update.py` / `install_compat_update.sh`；用途和适用版本见 Docker 部署说明 |
+| 完整离线更新包与服务器升级 | 根目录 `build-offline.ps1` / `update-offline.sh`、`scripts/offline_update.py` / `offline_legacy.json`；制作、版本识别、备份、恢复与回滚见 Docker 部署说明 |
+| Chrome 93 / HTTP 兼容 | `frontend/src/utils/browserCompat.ts`；`scripts/build_compat_update.py` / `install_compat_update.sh` 仅保留历史专项修复用途 |
 | 容器启动前检查 | `backend/app/deployment_check.py`、`backend/docker-entrypoint.sh` |
 | 模型随仓库交付 | `model-distribution/manifest.json` 与 `LICENSE-SAM.txt`、`scripts/prepare_model.py` / `build_model_bundle.py` |
 | 仓库与容器验收 | `scripts/check_repository.py`、`scripts/docker_smoke.py`、`.github/workflows/` |
@@ -68,3 +69,4 @@ npm run build --prefix frontend
 - GPU 任务、来源锁及训练导出队列使用进程内状态，保持 **单后端进程、单 Uvicorn worker**。扩容前需要单独设计，不能直接增加 workers。
 - Docker 首次通过部署脚本或配置模板默认启用 GPU + AI Tracking（`compose.yaml` + `compose.gpu.yaml`）；显式 `cpu` 仅人工模式使用基础 Compose，不启用 AI。已有 `.env` 保留原模式。两种模式均支持完整人工标注→审查→确认→导出。`SAM3_ENABLED` 的本机开发默认值仍为 true，Compose 明确覆盖。
 - Docker 设置 `APP_DATA_DIR=/data/database`，日志与 DB 同卷持久化；启动前校验密钥、目录和 GPU 模型条件。部署细节见 [DOCKER_DEPLOYMENT.md](DOCKER_DEPLOYMENT.md)。
+- 医院升级使用固定 Git 提交构建的完整离线包。升级器沿用现有运行配置和绝对数据路径；成功后 `.env` 指向 `.offline/current-compose.json`。部署状态、日志、备份和中断恢复记录都在原部署目录的 `.offline/`，不能作为代码缓存清理。`offline_legacy.json` 记录已核对旧后端的全体 Python 源码指纹；`contract` 是人工维护的存储与运行兼容契约，不是现有 SQLite schema 版本号。改变不兼容的数据格式、运行配置或模型要求时必须同时设计迁移并更新契约，不能只递增应用版本。

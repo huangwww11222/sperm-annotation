@@ -10,7 +10,7 @@ paths = subprocess.check_output(['git', 'ls-files', '-z'], cwd=root).decode().sp
 errors = []
 for name in filter(None, paths):
     path = Path(name)
-    if name.startswith(('backend/storage/', 'backend/track_data/', 'backend/track_modul/', 'runtime/', 'models/', 'work/', 'output/', 'update-backups/', '测试精子视频/')) or path.name == '.DS_Store' or (path.name.startswith('.env') and not path.name.endswith('.example')) or re.search(r'\.db(?:-wal|-shm)?$', name):
+    if name.startswith(('backend/storage/', 'backend/track_data/', 'backend/track_modul/', 'runtime/', 'models/', 'work/', 'output/', 'update-backups/', '.offline/', '.offline-partial-', '测试精子视频/')) or path.name == '.DS_Store' or (path.name.startswith('.env') and not path.name.endswith('.example')) or re.search(r'\.db(?:-wal|-shm)?$', name):
         errors.append(f'运行数据/本机配置不应跟踪：{name}')
         continue
     full = root / path

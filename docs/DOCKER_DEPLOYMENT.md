@@ -58,7 +58,7 @@ docker compose --profile model-setup run --rm --no-deps model-setup
 
 只执行 `docker compose up` 会跳过模型准备；首次请使用部署脚本，或先手动执行上方 model-setup 命令。已有旧 `.env` 没有 SAM3_AUTO_DOWNLOAD 时仍默认自动下载；GPU 模式和路径设置沿用原值。
 
-**已有 CPU 配置或旧版本配置升级**：保留 `.env` 的 JWT_SECRET 和 APP_DATA_ROOT，在 `.env` 设置：
+**联网源码部署的 CPU/GPU 模式切换**：保留 `.env` 的 JWT_SECRET 和 APP_DATA_ROOT，在 `.env` 设置：
 
 ```dotenv
 COMPOSE_PATH_SEPARATOR=,
@@ -67,6 +67,8 @@ SAM3_MODEL_HOST_PATH=./models/sam3
 ```
 
 再运行 `bash deploy.sh gpu` / `.\deploy.ps1 -Mode gpu`。切回 CPU 则设置 `COMPOSE_FILE=compose.yaml`，并清除或改成 CPU 对应的 `BACKEND_IMAGE`。如果脚本检测到指定模式与旧 `.env` 不一致，会停止并说明如何修改，不默默覆盖配置。
+
+第 6 节的离线升级沿用当前模式，不负责 CPU/GPU 切换；不能将已托管部署的 `.offline/current-compose.json` 改回上述源码配置来切模式。
 
 启动前检查会验证目录可写、密钥有效、模型配置/权重分片完整，以及 CUDA 和 Transformers 类能否导入。失败记录 `deployment.preflight_failed`；成功记录 `deployment.ready`。这不等于真实推理已经验收，首次 Tracking 才加载权重，仍需用实际视频测试。
 
@@ -156,17 +158,82 @@ bash deploy.sh gpu --pull
 
 Windows：`.\deploy.ps1 -Mode gpu -Pull`。等价命令是 `docker compose pull` 后 `docker compose up -d --no-build --wait`。ARM64 机器目前从源码构建 CPU 版；发布工作流不承诺 ARM64 预构建镜像。
 
-离线环境在联网机器 `docker save` 导出对应前后端镜像，到目标服务器 `docker load`；复制源码中的 scripts/、model-distribution/、compose.yaml、compose.gpu.yaml（需要 GPU 时）、实际 `.env` 和已准备好的完整模型，并设置 SAM3_AUTO_DOWNLOAD=false，执行 `docker compose up -d --no-build --wait`。不运行会联网拉取的 `--pull` 模式。CPU/GPU 镜像、平台和 `.env` 名称必须匹配。
+首次离线部署需在联网机器 `docker save` 导出对应前后端镜像，到目标服务器 `docker load`；复制源码中的 scripts/、model-distribution/、compose.yaml、compose.gpu.yaml（需要 GPU 时）、为该服务器准备的 `.env` 和完整模型，设置 SAM3_AUTO_DOWNLOAD=false，再执行 `docker compose up -d --no-build --pull never --wait`。CPU/GPU 镜像、平台和 `.env` 名称必须匹配。已有医院部署的后续更新使用下面的升级工具，沿用服务器原配置。
 
-### 医院内网：交付最新完整版本
+### 医院内网：可复用的离线升级流程
 
-常规交付使用同一源码版本生成的完整离线包，不要求安装者先安装旧版再打补丁。联网准备电脑更新到已修复的源码版本，构建 **linux/amd64 的 GPU 后端和前端镜像**，再导出新的 `images.tar`。同时更新包内的 Compose 配置、`scripts/`、`model-distribution/`、一键安装/部署脚本和校验清单，记录源码提交号及镜像标签/摘要。不要沿用旧包的 `images.tar` 或旧校验值；Windows 准备电脑使用 Docker 的 Linux 容器模式，无需具备目标服务器的 NVIDIA GPU，但最终 GPU 验收必须在服务器完成。
+`build-offline.ps1` 在联网 Windows 电脑制作完整更新包，`update-offline.sh` 在已有 Linux Docker 部署上安装更新。医院服务器全程使用本地镜像，不需要访问 GitHub、镜像仓库、PyPI 或 npm。此流程只升级已运行的项目；全新服务器仍需完成 Docker/GPU 环境、首次配置和模型准备，不能以升级包代替首次安装包。
 
-医院当前使用的 `install-offline.sh` / `deploy-offline.sh` 是离线包入口，不是根目录的联网源码构建入口。更新这两个入口时，保持“本地校验 → docker load → 复用配置和模型 → 不构建、不拉取地启动 → 健康检查与日志”的流程。首次安装默认 GPU + AI；已有部署升级必须保留 `.env`、登录密钥、Compose 项目名和实际数据/模型挂载路径，不能拿新包的示例配置覆盖服务器配置。目标服务器已具备完整模型时可复用，设置 `SAM3_AUTO_DOWNLOAD=false`；首次离线安装须在包中准备完整模型。
+服务器需有 Bash、Python 3、Docker + Compose，以及读取运行容器、读写实际数据库/Storage 和创建备份的权限；Ubuntu 24.04 通常已带 Python 3。沿用现有部署管理员账号执行；以 root 安装的数据不能换成无权限账号备份。检查和升级均要求原前后端正常运行，已中断的升级按第 8 节恢复。
 
-升级现有医院部署前按第 8 节备份并暂停写入，把新包解压到独立目录，再核对与原部署的数据挂载和项目名一致后执行一键更新。离线启动使用 `docker compose up -d --no-build --pull never --wait`，禁止在内网执行源码构建或拉取。保留旧镜像和备份用于恢复，更新后客户端按 Ctrl+F5，并验收上传抽帧、送审、删除后刷新、原有账号/标注恢复及真实 GPU 追踪。
+#### A. 联网 Windows 电脑制作更新包
 
-仓库代码推送成功不代表医院已有离线包已经更新；必须重新生成并交付上述镜像和配套文件。下面的专项补丁只作为既有旧版本的临时修复方案。
+准备 Git、Docker Desktop 的 Linux 容器模式和 PowerShell 5.1+。准备电脑无需 GPU、Python 或 Node.js；应用依赖在 Docker 内构建。确认 `docker info --format '{{.OSType}}'` 输出 `linux`。镜像构建和导出占用额外磁盘，包大小取决于 GPU 依赖；首次构建需要下载基础镜像、Python 与 npm 依赖。
+
+在已克隆的仓库根目录执行：
+
+```powershell
+git pull --ff-only
+.\build-offline.ps1 -Ref HEAD
+```
+
+脚本拒绝未提交的工作区改动，将指定 ref 一次解析为固定提交号，再从该提交的快照构建 Linux amd64 前后端镜像；后续远端 main 移动不会改变已经生成的包。选择的提交必须已包含离线升级工具，不能拿引入工具前的旧标签直接制作新式包。脚本不自动 fetch 或替你合并代码，先确认本地仓库已取得待发布版本。
+
+| 参数 | 含义 |
+| --- | --- |
+| `-Ref` | 本地可解析的分支、标签或提交号，默认 `HEAD` |
+| `-Version` | 显示和镜像版本，默认 `git-<提交号前12位>`；发布标签可显式指定，如 `v1.2.0` |
+| `-Mode` | 默认 `gpu`；仅人工部署才显式 `cpu`。更新包模式必须匹配医院当前模式 |
+| `-OutputDirectory` / `-OutputDir` | 完整包的输出目录；默认 `output/sperm-annotation-<版本>-<模式>-linux-amd64`。已有目录拒绝覆盖 |
+
+例如，已经创建并测试过 `v1.2.0` 标签后制作该版本：
+
+```powershell
+git fetch --tags
+.\build-offline.ps1 -Ref v1.2.0 -Version v1.2.0
+```
+
+输出目录包括完整前后端 `images.tar`、含提交号/镜像身份/文件校验的 `manifest.json`、`update-offline.sh`、配套 `scripts/` 和部署配置参考文件。包不含 `.env`、密码、业务视频、数据库或模型；现有医院模型继续复用。构建日志位于制作机器 `work/offline-build-<编号>/build.log`，构建失败不会发布完整目标目录。交付时传入**整个目录及其子目录**，不能只发 `.sh` 或只换校验清单。
+
+#### B. 医院服务器先检查
+
+把更新包放入独立目录，例如 `/opt/sperm-updates/<版本>/`，保留原部署 `/opt/sperm-annotation/sperm-annotation-offline/`。以下 `/新包目录` 和 `/原部署目录` 均替换为实际绝对路径：
+
+```bash
+bash /新包目录/update-offline.sh /原部署目录 --status
+bash /新包目录/update-offline.sh /原部署目录 --check
+```
+
+`--status` 显示已保存的版本和未完成操作记录，不验证实际运行版本；`--check` 才校验包和当前部署，不停止服务、不导入镜像、不写业务数据。两者可生成运维日志。升级器核对实际容器、Compose 项目名、运行环境及数据库/Storage/模型挂载，识别 CPU/GPU 模式，避免相对路径变化使服务指向空目录。不要先把新包解压覆盖原 `.env`，也不要在新包目录直接执行 `docker compose up`。
+
+第一次从历史部署接入时，工具对容器内整个后端 Python 源码集合计算指纹，核对 `scripts/offline_legacy.json` 中人工审查过的基线。目前包含医院最初离线版本、浏览器兼容修复版本及后续统一工作台版本。这里的“包含”不代表任何同名镜像都受支持；以服务器实际检查结果为准。旧镜像无法识别、源码已另行修改或配置与容器不符时停止，并输出需要核对的原因；不能手工改版本文件、跳过指纹或强行覆盖。
+
+后续由工具管理的部署，按持久化版本信息、镜像身份和运行配置核验。版本标签只方便识别，源码提交号和镜像标识才定位具体产物。更新包带有目标提交的祖先清单，当前提交必须位于其中，避免把旧包或分叉版本误当升级；制作电脑需要完整 Git 历史，浅克隆先执行 `git fetch --unshallow`。降级统一走带数据恢复的回滚。包中的 `contract` 是维护者声明的存储与运行兼容契约，不是数据库内已经存在的 schema 版本号；契约不兼容时必须先提供对应迁移，不能直接套用旧升级步骤。
+
+完全相同的镜像包重复执行会提示已安装。同一版本号或同一源码提交却带有不同镜像时拒绝覆盖，应明确发布新版本；不要在对外发布后移动同名标签或替换已交付包。
+
+#### C. 安装更新
+
+确认所有使用者保存并退出，当前没有追踪或导出任务，再运行：
+
+```bash
+bash /新包目录/update-offline.sh /原部署目录
+```
+
+升级会短暂停机。工具先保留旧配置与镜像标记，导入并核对新镜像，执行新后端的环境预检；GPU 模式同时检查 CUDA 和模型条件。预检通过后停止前端入口、确认后台任务空闲、停止后端，备份完整 database 和 storage。备份成功后，在保持现有数据、端口、密钥和模型路径的配置上启动新服务，最后检查后端健康与前端访问。磁盘空间必须足以同时保留新镜像、完整数据备份及失败恢复时的额外副本；升级器按文件系统合计检查，并在导入镜像后复查。业务目录须为磁盘挂载点内的子目录，不能直接用挂载点本身作为 database/storage；原视频较多时，备份时间与数据量有关。
+
+成功后在原部署目录 `.offline/` 保存版本、日志和备份，`.env` 的 `COMPOSE_FILE` 指向 `.offline/current-compose.json`。旧 `deploy-offline.sh` 被备份并由新入口接管，避免它再次导入旧 `images.tar` 撤销升级。日后仍在原部署目录查看服务和日志；下一次更新继续用新包中的升级入口，不能用旧首次安装包反复覆盖。
+
+```bash
+cd /原部署目录
+bash manage-offline.sh ps
+bash manage-offline.sh logs --tail=100 backend frontend
+bash /新包目录/update-offline.sh /原部署目录 --status
+```
+
+升级成功后，浏览器按 Ctrl+F5。核对原账号、素材、标注和审查/确认结果，再用测试视频检查上传抽帧、送审、删除后刷新、训练包和一次实际 AI Tracking。健康检查或 CUDA 张量计算不能代替真实模型推理验收。
+
+普通 Git push 只发布源码；每次医院升级仍需制作、传入并安装对应更新包。现有版本标签工作流发布镜像与此本地打包流程并行，不能把“仓库有工作流文件”视为医院自动升级或 GPU 已通过验收。
 
 ## 7. 迁移现有数据库和 Storage
 
@@ -182,25 +249,40 @@ docker compose stop
 
 ## 8. 更新、备份与恢复
 
-升级前安排停写，记录当前 Git 标签/镜像摘要及模型版本，并备份：实际 database 整个目录、storage 整个目录、`.env` 和模型来源。源码和数据目录分开存放；不要对业务目录执行 git clean。
+联网源码部署：安排停写，完整备份实际 database、storage、`.env` 和模型来源，更新至已验收的源码标签后运行 `deploy.sh` / `deploy.ps1`；预构建方式改 `.env` 镜像版本后 pull/up。源码和数据分开存放，不对业务目录执行 git clean。SQLite 有 WAL 时不能只复制 app.db；停后端后备份整个数据库目录。
 
-升级：先备份，再更新到已验收的源码标签，执行部署脚本；预构建方式改 `.env` 镜像版本后 pull/up。新镜像包含新增迁移时，不保证旧程序能直接读取升级后的 DB；回滚时恢复同批次数据库与 storage，再启动旧镜像。
+离线管理的部署按第 6 节升级。运维文件保存在**原部署目录**：
 
-恢复：停服务，恢复完整备份，保持挂载路径与文件权限正确，再启动并抽查已有视频、审查/确认状态和训练包下载。
-
-### 2026-09-29 医院 Chrome 93 专项离线补丁
-
-此小包只用于已部署版本的浏览器兼容与视频删除修复，不是通用升级器。制作机器先执行 `npm run build --prefix frontend`，再执行 `python3 scripts/build_compat_update.py`，生成单文件 `output/hospital-compat-update.sh`（内含已构建页面与修复后的 main.py）。模型、Python/Node 依赖、业务数据不在包内。
-
-把文件传到服务器，在无人编辑、没有追踪或导出任务时执行（更新会短暂停服务）：
-
-```bash
-bash hospital-compat-update.sh /opt/sperm-annotation/sperm-annotation-offline
+```text
+.offline/
+  current-compose.json  当前实际运行配置（包含部署密钥，不外传）
+  state.json            当前已安装版本、源码提交、镜像标识
+  pending.json          仅未完成操作存在，供中断恢复使用
+  logs/                 每次检查、升级、恢复的日志
+  backups/<备份编号>/   对应升级前配置、镜像身份及完整数据库/素材备份
 ```
 
-参数必须是实际含 `.env` 和 `compose.yaml` 的部署目录。脚本识别当前 CPU/GPU 模式、校验包、后端代码版本以及运行容器与 Compose 的环境/数据挂载一致性，仅接受固定已核对基线或本次已修复版本；版本不符时停止，不覆盖服务器上其他修改。使用现有本地前后端镜像添加代码层，构建无联网步骤，不下载模型、不修改 .env，也不清理业务数据。原镜像和 `rollback.sh` 保存到该部署目录 `update-backups/<时间>/`，重建容器失败时自动尝试回滚。补丁继续使用原镜像标签，正常重建容器会保留修复；以后重新导入旧 images.tar 会覆盖该标签，应避免导入旧包或重新应用补丁。
+旧镜像保留在本机 Docker 中，并打上 `annotation-offline-backup` 标签；备份目录记录镜像身份，不重复导出整份旧镜像归档。需要回滚时不能清理这些镜像。上述目录不是源码缓存，不能随着代码整理、容器清理或 Git 更新删除。磁盘备份只保护本机升级过程，部署方仍需安排独立的数据备份。
 
-更新后客户端按 Ctrl+F5，验收上传/换帧、送审、审查与确认、训练 ZIP，以及未送审测试视频的取消删除/确认删除/刷新。垃圾桶表示服务器删除；“×”仍表示临时关闭。脚本日志位于备份目录 `update.log`。需要人工回滚时运行脚本最后输出的 `bash .../rollback.sh`；本补丁没有数据库迁移。
+升级中失败时，查看脚本给出的日志与恢复状态。出现断电或终端中断，工具保留未完成操作记录；在重试升级前恢复：
+
+```bash
+bash /新包目录/update-offline.sh /原部署目录 --recover
+```
+
+恢复依据已记录的阶段和备份，不把未完成的升级标为成功。命令失败时继续依据该次日志定位，不删除恢复记录来绕过检查。若新包被移走，可使用备份内保存的工具执行 `python3 /原部署目录/.offline/backups/<备份编号>/offline_update.py /原部署目录 --recover`。文件 SHA256 用于发现传输损坏，不是发布者数字签名；升级包应通过既定可信交付渠道取得。
+
+需要主动回退已完成的升级时，使用当前版本对应的上一次升级备份编号；工具不允许跨过后续升级直接恢复更早备份：
+
+```bash
+bash /新包目录/update-offline.sh /原部署目录 --rollback <备份编号> --restore-data
+```
+
+`--restore-data` 明确表示恢复升级前的同批数据库和 Storage。**回退后，升级之后产生的新标注不会出现在当前旧版本数据中。** 工具先保留回滚时的当前数据副本，再恢复旧配置、镜像和数据，供必要时人工核对。不能只换旧镜像继续使用可能已经迁移的新数据库，也不能把多次备份混合恢复。
+
+### 历史专项修复
+
+`scripts/build_compat_update.py` / `install_compat_update.sh` 仅保留 2026-09-29 Chrome 93 / HTTP 和媒体删除专项修复的追溯用途；仅支持其固定基线，不用于以后版本升级。常规更新统一使用完整镜像包和 `update-offline.sh`，验收当前素材列表的确认删除与刷新结果。历史专项测试记录见 [TESTING.md](TESTING.md#最近验证记录)。
 
 ## 9. 交付与验收
 

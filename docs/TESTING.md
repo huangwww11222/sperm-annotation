@@ -38,6 +38,7 @@ npm run build --prefix frontend
 | 全窗口专注、视频进度 | 上述对应页面回归、构建 | `workspace-layout-browser.mjs`（49） |
 | 三页工作台一致性、紧凑对象导航 | 上述对应页面回归、构建 | `workbench-consistency-browser.mjs`（124）；包含两尺寸浅深主题、跨页收起、专注、原生折叠、对象/修改项导航与保存 |
 | 数据库查询/升级、Docker 发布 | `test_annotation_result_dedupe.py`、`test_deployment_preflight.py`、`test_docker_deployment_contract.py`、`test_model_distribution.py` | 下方容器验收；不是只运行前端构建 |
+| 完整离线包、旧版识别、备份升级与回滚 | `test_offline_update.py`、`scripts/test_build_offline.ps1` | 下方离线升级验收；模拟 Docker 不代替真实导入和数据恢复 |
 | 核心操作优先级、用户说明 | 上述 B/C/导出回归、构建 | `workspace-priority-browser.mjs`（36） |
 
 括号为当前脚本检查数量，**不是每次修改自动通过的结果**。测试源位于 `backend/tests/` 与 `frontend/tests/`。
@@ -156,6 +157,27 @@ docker compose down
 
 `.github/workflows/ci.yml` 在 PR/main 验证；`release-images.yml` 在版本标签推送后调用验证，再发布镜像。新增工作流需推送后实际运行，不能把本地配置校验说成 GitHub Actions 已通过。镜像需要在 Packages 确认访问权限。
 
+### 完整离线升级验收
+
+服务端工具回归使用模拟 Docker 和临时目录，制作端回归使用 PowerShell 与模拟 Git/Docker。它们不访问医院服务器、不使用业务数据；在仓库根目录运行：
+
+```bash
+APP_DATA_DIR="$PWD/work/offline-update-test-data" \
+APP_DB_FILE="$PWD/work/offline-update-test-data/app.db" \
+APP_STORAGE_DIR="$PWD/work/offline-update-test-storage" \
+PYTHONPATH=backend work/review-venv/bin/python -m pytest backend/tests/test_offline_update.py -q
+bash -n update-offline.sh
+python3 scripts/check_repository.py
+```
+
+```powershell
+.\scripts\test_build_offline.ps1
+```
+
+集成验收必须另建隔离 Compose 项目，沿用上方 `scripts/docker_smoke.py` 的新测试数据目录，使用已知基线镜像创建账号、素材、工作区、B/C/F 和训练包。新包按 [离线升级流程](DOCKER_DEPLOYMENT.md#医院内网可复用的离线升级流程) 构建；不能直接以可变本地源码替代指定提交快照。先执行 `--check` 并确认旧服务仍可用，再执行真实升级和 `--verify-restart`，核对镜像、版本状态与现有登录令牌/数据保留。必须另验证重复安装、坏包/未知旧版/运行配置变化拒绝、升级失败恢复、中断后 `--recover`，以及完成升级后的 `--rollback <编号> --restore-data`。回滚后核对恢复数据及回滚前数据副本；不得只凭 HTTP 200 判定保留了业务状态。
+
+测试记录应明确区分模拟 Docker、真实 CPU 容器和真实 GPU 服务器。Windows PowerShell 脚本通过不代表 Windows Docker 已构建出 GPU 包；CPU 镜像通过不代表 Linux amd64 / NVIDIA L20 上的推理通过。GitHub Actions 结果以实际运行记录为准。
+
 ## 日志驱动排查
 
 1. 从页面错误获取请求号和动作；查看控制台与 Network 的实际响应，先分清客户端模拟故障还是服务端真实拒绝。
@@ -178,11 +200,16 @@ docker compose down
 
 ## 最近验证记录
 
+2026-09-30 通用离线发布与升级：新增升级器 **64 项**（真实隔离 SQLite/文件、模拟 Docker 边界）及相关部署回归合计 **85 项通过**。Windows 打包工具 **19 组**模拟 Git/Docker 场景通过，实际运行环境为本机已有 PowerShell 7.4 容器（禁网）；真实 Git 快照归档检查通过。Windows 5.1 的执行已接入 CI，但本地结果不能称为 Windows 5.1 实机或远端 CI 通过。
+
+实际隔离 Compose 从 `2488003` 完整后端代码接管到当前应用，验证未知旧指纹拒绝、检查模式、完整镜像导入、备份升级、重复包无操作、恢复旧版本；升级后及回滚后旧登录令牌、工作区、C 确认和训练 ZIP 保留。本机使用 Linux ARM64 CPU 镜像，后端在依赖未变化的旧 CPU 镜像上替换完整代码，前端使用当前生产构建；不是重新下载依赖的完整 GPU 构建或医院 L20 验收。前端类型检查/生产构建通过。镜像、数据和日志隔离在 `work/offline-system-test/` 与 `work/offline-*.log`；未操作医院服务器。
+
+
 2026-09-29 Chrome 93 / HTTP 与素材删除修复：后端和离线更新脚本 **169 项通过**（其中更新脚本 7 项验证 CPU/GPU 配置选择、版本/运行配置不符停止、AI 忙/构建失败不切换服务、重启失败自动恢复原镜像）；前端兼容/几何/缓存 **5+5+6+4 项通过**，类型检查与 Chrome 93 目标构建通过。浏览器专项 **21**、B **27**、C **39**、C 故障恢复 **30**、训练导出 **29**、离线生产页面 **4**，合计 **150 项通过**；业务流程回归禁用了新版超时、UUID 和视频帧回调 API，专项/生产页面另验证真正的非安全 HTTP。
 
 实际隔离 CPU Compose 在旧镜像上运行小型补丁；发现并修正解压目录权限导致的 Nginx 403，新增首页与 API 双检查。真实验证安装、原镜像回滚、再次安装，以及升级前登录令牌、工作区、确认结果和训练包保留。容器中的生产构建实际通过上传/提帧、删除后刷新、人工框送审。补丁以现有本地镜像加 COPY 层，构建禁止拉取与网络，不传模型。Linux/Windows 7 Chrome 93 的实际客户端与 GPU 推理仍需医院端验收；本机缺失 API 测试和 CPU 容器不能代替它们。
 
-数据位于 `work/e2e-confirm-ux-compat-*`、`work/compat-offline-test/runtime`，日志 `work/compat-*.log`，截图 `output/playwright/compat-*`。离线包生成方式与执行命令见 [Docker 部署说明](DOCKER_DEPLOYMENT.md#2026-09-29-医院-chrome-93-专项离线补丁)。`test_offline_compat_update.py` 使用模拟 Docker，不访问真实服务器；生产页面脚本为 `offline-update-browser.mjs`，默认验证本机隔离容器 18087 端口，可用 `COMPAT_PRODUCTION_PORT` 修改端口，需先生成上述三帧 AVI 夹具。
+数据位于 `work/e2e-confirm-ux-compat-*`、`work/compat-offline-test/runtime`，日志 `work/compat-*.log`，截图 `output/playwright/compat-*`。以上为旧专项补丁的验证记录；当前完整更新包入口见 [Docker 部署说明](DOCKER_DEPLOYMENT.md#医院内网可复用的离线升级流程)。`test_offline_compat_update.py` 使用模拟 Docker，不访问真实服务器；生产页面脚本为 `offline-update-browser.mjs`，默认验证本机隔离容器 18087 端口，可用 `COMPAT_PRODUCTION_PORT` 修改端口，需先生成上述三帧 AVI 夹具。
 
 模型交付的专项验收：2026-09-28 部署测试 18 项通过，完整模型包校验、下载续传与缓存复用、处理器加载及公开 Release 附件检查完成；未运行真实 GPU 推理。固定模型信息以 `model-distribution/manifest.json` 为准。
 

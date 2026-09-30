@@ -33,3 +33,5 @@
 ## 第三方交付
 
 根 README 面向安装者，`deploy.sh` / `deploy.ps1` 初始化配置并启动；首次默认 GPU + AI，CPU 仅人工模式须显式选择；已有 .env 不自动切换。CPU 基础模式与 GPU 覆盖配置分开。部署修改须读 DOCKER_DEPLOYMENT.md，使用隔离 Compose 项目验证；不能把 CPU 容器测试当成真实 GPU 验收。提交前运行 `python3 scripts/check_repository.py`，运行数据和模型权重不纳入 Git，也不进入 Docker build context。模型随仓库 Release 提供，Git 保留 model-distribution/ 的固定清单与许可；部署先运行独立 model-setup 容器，不把公开模型包误当用户业务数据清理。`db.py` 的查询接口必须保留可选 user_id/media_id/source 过滤，同名视频按 media_id 区分，不能在合并时恢复重复函数。
+
+医院已有部署通过 `build-offline.ps1` 制作固定提交的完整镜像包，再用 `update-offline.sh` 离线升级。不能只更换脚本或沿用旧 images.tar；不能解压到新目录后以相对 runtime 路径重建一套空数据。升级器保留实际运行配置、校验已知旧后端或托管版本身份、停写备份后切换；`.offline/` 是运维状态和备份，不纳入 Git，也不自动清理。`scripts/offline_legacy.json` 的 `contract` 是存储/运行兼容承诺，新增破坏性数据库、环境或模型变更必须实现迁移并调整契约，不能把未知版本加入白名单绕过检查。回滚必须明确恢复同批数据，并保存回滚时的新数据副本。

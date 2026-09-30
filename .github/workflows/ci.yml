@@ -74,3 +74,6 @@ jobs:
       - name: PowerShell installer configuration contract (mock Docker)
         shell: powershell
         run: .\scripts\test_deploy.ps1
+      - name: Offline release packaging contract (mock Git and Docker)
+        shell: powershell
+        run: .\scripts\test_build_offline.ps1

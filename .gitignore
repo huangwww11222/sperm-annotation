@@ -32,3 +32,7 @@ backend/data/app.db-wal
 # Local delivery backups and user-supplied video data.
 /update-backups/
 /测试精子视频/
+
+# Local offline upgrade state, private backups and incomplete package exports.
+/.offline/
+/.offline-partial-*/

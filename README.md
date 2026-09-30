@@ -37,24 +37,45 @@ cd sperm-annotation
 
 本工具面向**可信团队共享使用**，注册账号不等于素材隔离。默认不提供租户隔离、管理员审批注册或实时协同编辑；多人避免同时修改同一视频。公网部署应由 HTTPS 反向代理和组织访问控制保护，不直接将共享标注环境开放给所有人。
 
+## 医院内网：持续交付离线更新
+
+已安装的医院服务器通过完整离线更新包升级。联网 Windows 电脑安装 Git、Docker Desktop 并使用 Linux 容器模式；不需要 GPU、Python 或 Node.js。每次发布后，在干净的仓库目录运行：
+
+```powershell
+git pull --ff-only
+.\build-offline.ps1 -Ref HEAD
+```
+
+默认构建 Linux amd64 的 GPU 后端和前端，生成 `output/sperm-annotation-git-<提交号前12位>-gpu-linux-amd64/`。版本固定到本次 Git 提交，包内含完整镜像、校验清单和升级工具，不带业务数据、密码或模型。也可用 `-Ref v1.2.0 -Version v1.2.0` 制作已存在的发布标签，显式 `-Mode cpu` 才制作仅人工模式的包。
+
+将**整个输出目录**传入医院内网，保留原部署目录。在服务器先检查，再于无人使用时更新：
+
+```bash
+bash /新包目录/update-offline.sh /原部署目录 --check
+bash /新包目录/update-offline.sh /原部署目录
+```
+
+工具识别旧版本、检查配置与任务、停写备份、替换镜像并验收启动，保留原有账号、视频、标注、登录密钥和模型路径。未知旧版本或配置不一致会停止并给出原因；首次升级以实际检查结果为准。日志、备份、失败恢复和回滚见 [离线升级流程](docs/DOCKER_DEPLOYMENT.md#医院内网可复用的离线升级流程)。此入口用于升级已有服务；首次安装仍按上面的部署说明。推送 GitHub 只更新源码，医院需接收并安装对应更新包。
+
 ## 使用与维护
 
 - [用户使用说明](frontend/src/help/user-guide.md)：操作步骤、快捷键、保存续做、常见问题；前端顶部也可阅读、搜索和下载。
 - [Docker 部署说明](docs/DOCKER_DEPLOYMENT.md)：模型配置、预构建镜像、日志、升级、备份与恢复。
-- 内网客户端支持 Chrome 93，上传抽帧和审查流程已适配 HTTP。新部署直接使用当前完整版本；医院内网部署须重新构建并导出完整镜像，见 [离线部署](docs/DOCKER_DEPLOYMENT.md#6-预构建镜像与离线部署)。仅替换部署脚本不会更新旧镜像中的应用代码。
+- 内网客户端支持 Chrome 93，上传抽帧和审查流程已适配 HTTP。仅替换部署脚本不会更新旧镜像中的应用代码，医院升级使用上述完整离线包。
 - 查看状态：`docker compose ps`；排查：`docker compose logs --tail=100 backend frontend`。
-- 更新前先备份数据；更新代码后执行 `bash deploy.sh`，Windows 执行 `.\deploy.ps1`。
+- 联网源码部署更新前先备份数据；更新代码后执行 `bash deploy.sh`，Windows 执行 `.\deploy.ps1`。已经由离线升级工具接管的部署继续使用 `update-offline.sh`。
 - 仅运行 **一个 backend 实例、一个 worker**，SQLite 放在服务器本地磁盘。
 
 ## 仓库组织与开发
 
 ```text
 README.md / deploy.sh / deploy.ps1     第三方安装入口
+build-offline.ps1 / update-offline.sh  Windows 制作完整更新包、Linux 服务器离线升级
 compose.yaml / compose.gpu.yaml        基础服务与默认启用的 GPU 覆盖配置
 .env.docker.example                   可提交的配置模板
 backend/                              API、数据库、追踪、测试、Dockerfile
 frontend/                             界面、用户手册、测试、Dockerfile、Nginx
-scripts/                              模型自动安装、专项离线补丁、仓库检查和容器验收
+scripts/                              离线升级与旧版本识别、模型安装、仓库检查和容器验收
 model-distribution/                   固定模型清单、来源与 SAM 许可
 .github/workflows/                    PR 验证与版本镜像发布
 AGENTS.md / docs/                     AI 开发入口和当前技术文档
