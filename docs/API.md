@@ -29,11 +29,13 @@
 | `GET /api/annotation/projects/{projectId}/results` | 人工标注记录查询 |
 | `POST /api/track/annotations`、`/api/track/rewind`、`/api/track` | seed、回退、发起追踪 |
 | `GET /api/track/status/{taskId}`、`/api/track/result/{mediaId}` | 追踪状态与对象 |
-| `GET /api/track/result-file/{mediaId}`、`/api/track/overlay/{mediaId}` | JSONL 与带框视频 |
+| `GET /api/track/result-file/{mediaId}`、`/api/track/overlay/{mediaId}` | JSONL 与按需生成的完整带框视频；预览缓存以当前视频/追踪/删除规则校验，生成时输入变化返回 409，失败 503 不影响已保存 JSONL |
 
 `AnnotationObject` 定义在 [annotation.ts](../frontend/src/types/annotation.ts)：界面 `id` 与稳定 `objectId` 不等价，`frameIndex` 为实际 0 起帧号；工作区 bbox 为百分比 `{x,y,width,height}`。seed / Tracking / B/C 使用原图像素 xyxy，转换不能重复进行。追踪结果文件虽后缀 `.json`，实际逐行 JSONL。
 
 工作区 GET 返回 `revision`（旧工作区首次为 0）；新版 PUT 携带 `expectedRevision` 和 `Idempotency-Key`，返回新的 `revision`。未知保存结果必须沿用原键和原正文，成功回执重放先于版本校验。无版本的旧客户端仍可保存普通编辑，但不能变更新删除规则，也不能覆盖服务端反馈、样本和回执。新前端始终使用版本和幂等键。
+
+`POST /api/track` 新前端另携带 `Idempotency-Key`，同账号原键/输入在当前后端进程内返回同一个 taskId，原键用于不同输入返回 409；覆盖轮次仍校验，不能借回执绕过 generationId。旧无键客户端保持兼容。状态 GET 含 `stage`（queued/decoding/preparing_model/tracking/saving_results/paused/completed）、处理帧数与原始 `lastProcessedFrame`，不暴露请求 hash/key。模型失败在任务状态返回 failed 与具体 message，短 HTTP 超时不等于后台任务已失败。工作区浏览状态可在追踪中保存；改人工框、基准或删除规则返回 409。rewind 成功的 `overlayRegenerated` 为 false，不重编码源视频；结果发布原子完成。
 
 删除规则是 `deletedObjectIds:number[]`（整视频）和 `deletedFrameObjects:[{objectId,frameIndex}]`（单帧）；`deletedTrackingIds` 仅保留历史兼容。规则同时作用于人工/AI、seed、追踪读取、人工记录查询与送审。单帧删除不关闭后续该对象的追踪；整视频删除不允许该对象进入后续 seed。原追踪文件不物理抹除，撤销通过恢复工作区及移除对应删除标记实现。A/B/F 不随删除或撤销改变。
 
@@ -92,6 +94,8 @@ Session 另带 `returnRequests:[{frameIndex,reason,confirmationId}]`，仅未解
 `Change` 含 `changeId/frameIndex/objectId/annotationId/beforeBbox/afterBbox/metrics/decisionRevision/decision`。C 不能上传任意新 bbox 或改变类别/对象集合。`progress` 含 `totalChanges/decided/pending/keptA/adoptedB/percent`，零修改百分比不替代显式完成。
 
 C 权限另带 `canReturn`；返回状态为 `returned`，`returnedReview:{frameIndex,reason,reviewSessionId,nextConfirmationId}|null` 指向原 B 及重审后新 C。旧 C 不再可编辑或完成。B 仅取消被退回帧的有效提交，保留旧 submission 与起始 B 几何；草稿/恢复不能代替重新显式提交。再次 freeze 固定新 B/C，其他帧几何未变且已有决定的项以带来源关联的新事件继承，退回帧不继承决定；新 C 保留原确认人。
+
+新版 C 写请求携带 `X-Confirmation-Response: delta`。响应新增 `itemsScope:'changed'`：决定/撤销仅返回受影响项，游标/领取/完成/重新确认/退回返回空 `items`；完整 `session`、选中项、下个待选项仍返回。前端按 changeId 合并而不是替换全列表，检测到其他窗口的业务版本跳变时重新 GET session/changes。无 header 的旧客户端仍返回全量列表。幂等回执保存首次响应，重试返回同一响应形态；新版能重放升级前的全量回执。响应模式不改变原请求业务 hash，不删除历史决定或旧回执。会话统计与下个待选项通过 SQL 计算，不为浏览位置反复解码全视频几何。
 
 `GET /api/final-versions/{id}` 和 `/{id}/download` 提供完整 JSON。每帧存在，包括空 `objects:[]`；对象保留稳定身份、类别、最终框、A/B 框及 `choice/resolution/changeId/decisionEventId`。未改对象 `choice:null`、`resolution:'unchanged'`，来源 A。完整帧表不能用仅有对象的表代替，否则会丢空帧。
 

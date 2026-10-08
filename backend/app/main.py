@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 import mimetypes
 import tempfile
+import time
+import hashlib
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -108,6 +110,8 @@ def startup() -> None:
 
 @app.on_event("shutdown")
 def shutdown() -> None:
+    from .video_frames import frames
+    frames.close()
     from .training_export import shutdown as stop_training_exports
     stop_training_exports()
     TRACK_EXECUTOR.shutdown(wait=False, cancel_futures=True)
@@ -595,8 +599,8 @@ def save_workspace_state(media_id: str, payload: dict[str, Any], user: dict[str,
 
     def build(previous: dict[str, Any]) -> dict[str, Any]:
         clean = {**previous, **{k: v for k, v in payload.items() if k not in annotation_state.SERVER_FIELDS and not k.startswith("_")}}
-        if tracking_is_busy() and any(clean.get(field, []) != previous.get(field, []) for field in ("deletedObjectIds", "deletedFrameObjects", "deletedTrackingIds")):
-            raise HTTPException(409, "AI Tracking 正在运行，暂时不能修改删除范围")
+        if tracking_is_busy() and any(clean.get(field, []) != previous.get(field, []) for field in ("manualAnnotations", "manualBaselines", "deletedObjectIds", "deletedFrameObjects", "deletedTrackingIds")):
+            raise HTTPException(409, "AI Tracking 正在运行，暂时不能修改标注或删除范围")
         if payload.get("expectedRevision") is None:
             for field in ("deletedObjectIds", "deletedFrameObjects"):
                 if field in payload and payload[field] != previous.get(field, []):
@@ -660,17 +664,21 @@ def _require_pause_resolved(workspace: dict[str, Any], frame: int) -> None:
         raise HTTPException(409, "请逐个明确确认本帧异常或修正框后继续，AI Tracking 不会自动接受异常")
 
 
-@source_write
 def _run_tracking_task(task_id: str, req: TrackRequest, video: Path, seed_file: Path, output_file: Path) -> None:
-    _set_task(task_id, status="running", message="SAM3 tracking running")
+    began = time.perf_counter()
+    log = logging.getLogger('review.tracking')
+    _set_task(task_id, status="running", stage='decoding', message="正在准备本轮原始帧")
+    log.info('tracking.task_started task=%s media=%s start=%s max_frames=%s', task_id, req.mediaId, req.startFrame, req.maxFrames)
     try:
         workspace = annotation_state.read_state(video.parent)
-        result = track_video(str(video), str(seed_file), str(output_file), max_frames=req.maxFrames, bbox_mode="pixel", start_frame=req.startFrame, normal_feedback=workspace.get("normalMotionSamples", []))
+        result = track_video(str(video), str(seed_file), str(output_file), max_frames=req.maxFrames, bbox_mode="pixel", start_frame=req.startFrame, normal_feedback=workspace.get("normalMotionSamples", []),
+                            progress=lambda **patch: _set_task(task_id, elapsedSeconds=round(time.perf_counter() - began, 1), **patch))
         anomaly_paused = result.get("anomaly_paused")
         if anomaly_paused:
             _set_task(
                 task_id,
                 status="paused",
+                stage='paused',
                 message=f"Anomaly detected at frame {anomaly_paused['frame_index']}",
                 paused=True,
                 pausedFrame=anomaly_paused["frame_index"],
@@ -685,15 +693,16 @@ def _run_tracking_task(task_id: str, req: TrackRequest, video: Path, seed_file: 
             _set_task(
                 task_id,
                 status="success",
+                stage='completed',
                 message="completed",
                 processedFrames=result.get("processedFrames", 0),
                 lastProcessedFrame=result.get("lastProcessedFrame"),
                 reachedVideoEnd=result.get("reachedVideoEnd", False),
                 warningSummary=result.get("warningSummary", []),
             )
+        log.info('tracking.task_finished task=%s media=%s elapsed_ms=%.1f', task_id, req.mediaId, (time.perf_counter() - began) * 1000)
     except Exception as exc:
-        import traceback
-        traceback.print_exc()
+        log.exception('tracking.task_failed task=%s media=%s elapsed_ms=%.1f', task_id, req.mediaId, (time.perf_counter() - began) * 1000)
         _set_task(task_id, status="failed", message=str(exc))
 
 
@@ -747,8 +756,21 @@ def rewind_tracking(req: dict[str, Any], user: dict[str, Any] = Depends(current_
 
 @app.post("/api/track", status_code=202)
 @source_write
-def start_tracking(req: TrackRequest, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+def start_tracking(req: TrackRequest, user: dict[str, Any] = Depends(current_user), idempotency_key: str = Header(default='')) -> dict[str, Any]:
     require_tracking_enabled()
+    request_key = idempotency_key if isinstance(idempotency_key, str) else ''
+    if len(request_key) > 128:
+        raise HTTPException(422, '追踪请求重试标识过长')
+    request_hash = hashlib.sha256(req.model_dump_json().encode()).hexdigest()
+    if request_key:
+        with TASK_LOCK:
+            prior = next((t for t in TASKS.values() if t.get('userId') == user['uid'] and t.get('requestKey') == request_key), None)
+        if prior:
+            if prior['requestHash'] != request_hash:
+                raise HTTPException(409, '同一重试标识不能用于不同追踪输入')
+            annotation_state.require_generation(annotation_state.read_state(media_dir(req.mediaId)), req.generationId)
+            logging.getLogger('review.tracking').info('tracking.start_replay task=%s media=%s', prior['taskId'], req.mediaId)
+            return {'taskId': prior['taskId'], 'status': 'queued', 'maxFrames': prior['maxFrames'], 'trackFrames': prior['maxFrames']}
     if tracking_is_busy():
         raise HTTPException(409, "已有 SAM3 Tracking 任务正在运行，请等待完成")
     if not req.annotations:
@@ -806,7 +828,7 @@ def start_tracking(req: TrackRequest, user: dict[str, Any] = Depends(current_use
     seed_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     task_id = uuid.uuid4().hex
-    _set_task(task_id, taskId=task_id, status="queued", message="queued", mediaId=req.mediaId, startFrame=req.startFrame, maxFrames=req.maxFrames, userId=user["uid"])
+    _set_task(task_id, taskId=task_id, status="queued", stage='queued', message="queued", mediaId=req.mediaId, startFrame=req.startFrame, maxFrames=req.maxFrames, userId=user["uid"], requestKey=request_key, requestHash=request_hash)
     TRACK_EXECUTOR.submit(_run_tracking_task, task_id, req, video, seed_file, output_file)
     return {"taskId": task_id, "status": "queued", "maxFrames": req.maxFrames, "trackFrames": req.maxFrames}
 
@@ -817,7 +839,7 @@ def tracking_status(task_id: str, user: dict[str, Any] = Depends(current_user)) 
         item = TASKS.get(task_id)
     if not item:
         raise HTTPException(404, "task not found")
-    return {k: v for k, v in item.items() if k != "userId"}
+    return {k: v for k, v in item.items() if k not in {'userId', 'requestKey', 'requestHash'}}
 
 
 @app.post("/api/anomaly/scan", response_model=AnomalyScanResponse)
@@ -1084,53 +1106,31 @@ def video_frame(media_id: str, frame_index: int, user: dict[str, Any] = Depends(
     if not file:
         raise HTTPException(404, "视频不存在")
 
-    # 小型磁盘缓存：同一帧反复切换时无需重复解码。
-    cache_dir = directory / ".frame_cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_file = cache_dir / f"frame_{frame_index:08d}.jpg"
-    if cache_file.is_file() and cache_file.stat().st_size > 0:
-        return FileResponse(cache_file, media_type="image/jpeg", filename=cache_file.name, headers={"Cache-Control": "public, max-age=31536000, immutable"})
-
     try:
-        import cv2
-        cap = cv2.VideoCapture(str(file))
-        if not cap.isOpened():
-            raise HTTPException(500, "无法打开源视频")
-
-        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        if total and frame_index >= total:
-            cap.release()
-            raise HTTPException(404, f"视频只有 {total} 帧，无法访问第 {frame_index} 帧")
-
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-        ok, frame = cap.read()
-        cap.release()
-        if not ok or frame is None:
-            raise HTTPException(404, f"无法解码第 {frame_index} 帧")
-
-        ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
-        if not ok:
-            raise HTTPException(500, f"第 {frame_index} 帧 JPEG 编码失败")
-        cache_file.write_bytes(encoded.tobytes())
-        return Response(content=encoded.tobytes(), media_type="image/jpeg", headers={"Cache-Control": "public, max-age=31536000, immutable"})
-    except HTTPException:
-        raise
+        from .video_frames import frames, FrameReadError
+        data = frames.read(file, frame_index)
+        return Response(content=data, media_type='image/jpeg', headers={'Cache-Control': 'private, max-age=31536000, immutable'})
+    except FrameReadError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(500, f"读取第 {frame_index} 帧失败：{exc}") from exc
 
 
 @app.get("/api/track/overlay/{media_id}")
 def tracking_overlay(media_id: str, user: dict[str, Any] = Depends(current_user)) -> FileResponse:
-    file = media_dir(media_id) / OVERLAY_FILE_NAME
-    if not file.is_file():
-        raise HTTPException(404, f"{OVERLAY_FILE_NAME} 尚未生成")
+    from .tracking_preview import prepare
+    directory = media_dir(media_id)
+    video = find_video(directory)
+    if not video or not (directory / RESULT_FILE_NAME).is_file():
+        raise HTTPException(404, '原视频或追踪结果不存在')
+    file = prepare(video, directory / RESULT_FILE_NAME, tracking_is_busy)
     return FileResponse(file, media_type="video/mp4", filename=OVERLAY_FILE_NAME, content_disposition_type="inline")
 
 
 @app.get("/api/track/sam3/health")
 def sam3_health(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     engine = get_tracker_engine()
-    return {"ok": True, "modelLoaded": engine.model is not None and engine.processor is not None, "model": engine.model_id, "device": engine.device, "dtype": str(engine.dtype)}
+    return {"ok": True, "modelLoaded": engine.model is not None and engine.processor is not None, "model": engine.model_id, "device": str(engine.device), "dtype": str(engine.torch_dtype)}
 
 
 # ---------------------------- dataset export ----------------------------

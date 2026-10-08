@@ -24,6 +24,7 @@ const {
   objectDeletionBusy, objectDeletionError, objectDeletionPendingAction, retryObjectDeletion,
   confirmTrackingAnomaly, trackingFeedbackBusy, trackingFeedbackError, trackingFeedbackPending, trackingFeedbackPendingAction, retryTrackingAnomalyFeedback,
   trackingCalibrationSummary, resetTrackingCalibration, trackingWarningSummary,
+  trackingError,trackingProgress,trackingRetryLabel,trackingRetryBusy,retryTracking,workspaceRecoveryRequired,saveRecoveryLabel,retryWorkspaceSave,reloadWorkspaceFromServer,
 } = useWorkspace()
 const importDialog=ref<HTMLElement|null>(null)
 watch(duplicateImport,async value=>{if(value){await nextTick();importDialog.value?.querySelector<HTMLElement>('button:not(:disabled)')?.focus()}})
@@ -250,7 +251,10 @@ function pointerUp(e:PointerEvent) {
 function cancelPointer(){if(pointerRaf)cancelAnimationFrame(pointerRaf);pointerRaf=0;pan=null;pointerActive=false;cancelAnnotationGesture()}
 function stageClick(e:MouseEvent){if(suppressClick){suppressClick=false;return}if(!hiddenBoxes.value)onStageClick(e)}
 async function jump(){frameInput.value=Math.max(0,Math.min(maxFrameIndex.value,Math.floor(Number(jumpFrame.value)||1)-1));await seekToInputFrame();jumpFrame.value=currentFrame.value+1}
-async function retrySave(){try{await persistWorkspaceState(currentMediaId.value,true)}catch{/* The store logs and exposes the failure. */}}
+async function retrySave(){
+  if(workspaceRecoveryRequired.value){if(!window.confirm('工作区发生冲突或读取失败。将先下载本地标注备份，再读取服务器当前状态；未保存的本地修改不会覆盖服务器。是否继续？'))return;await reloadWorkspaceFromServer();return}
+  try{await retryWorkspaceSave()}catch{/* The store logs and exposes the failure. */}
+}
 function enhancement(preset:string){if(preset==='原图'){resetMediaFilter();inverted.value=false}else if(preset==='暗场'){brightness.value=150;contrast.value=125}else{brightness.value=100;contrast.value=160}}
 function keys(e:KeyboardEvent){
   if(document.querySelector('[data-user-guide][open], [data-object-delete-dialog][open], [data-reimport-dialog]'))return
@@ -322,7 +326,8 @@ onUnmounted(()=>{if(deleteDialog.value?.open){deleteDialog.value.close();documen
       <span class="save-indicator" :class="saveState" role="status"><i />{{ saveLabel }}</span><SendToReview />
     </section>
     <div v-if="importError" class="error-banner" role="alert">{{ importError }}</div>
-    <div v-if="saveError" class="error-banner" role="alert">{{ saveError }} <button class="quiet-button" @click="retrySave">重试保存</button></div>
+    <div v-if="saveError" class="error-banner" role="alert" data-testid="workspace-save-error">{{ saveError }} <button class="quiet-button" :disabled="saveState==='saving'||workspaceRestoring||trackingRetryBusy||!!deletingMediaId||objectDeletionBusy||trackingFeedbackBusy" @click="retrySave">{{ saveState==='saving'?'正在重试保存…':saveRecoveryLabel }}</button></div>
+    <div v-if="trackingError" class="error-banner tracking-error-banner" role="alert" data-testid="tracking-error"><span>第 {{ trackingError.frameIndex+1 }} 帧 · {{ trackingError.phase }}失败：{{ trackingError.message }}</span><button class="quiet-button" :disabled="trackingRetryBusy||workspaceRestoring||saveState==='saving'||!!objectDeletionPendingAction||trackingFeedbackPending" @click="retryTracking">{{ trackingRetryBusy?'正在重试…':trackingRetryLabel }}</button></div>
     <div v-if="mediaDeleteError" class="error-banner" role="alert">{{ mediaDeleteError }}</div>
     <div v-if="objectDeletionError && !deletionDialogOpen" class="error-banner" role="alert">{{ objectDeletionError }} <button class="quiet-button" :disabled="objectDeletionBusy" @click="objectDeletionPendingAction?.action==='delete'?openVideoDeletion():retryObjectDeletion()">重试本次{{ objectDeletionPendingAction?.action==='undo'?'撤销':objectDeletionPendingAction?.action==='redo'?'重做':'删除' }}</button></div>
     <WorkbenchLayout library-label="素材库" :immersive="focused">
@@ -366,12 +371,12 @@ onUnmounted(()=>{if(deleteDialog.value?.open){deleteDialog.value.close();documen
         <div v-if="isVideo" class="annotation-timeline"><div class="timeline-controls"><button class="icon-button" aria-label="上一帧" :disabled="isAiBusy||currentFrame===0" @click="seekByFrame(-1)">←</button><button class="play-button" :aria-label="isPlaying?'暂停':'播放'" :disabled="isAiBusy||exactFrameLoading" @click="togglePlayback"><AppIcon :name="isPlaying?'pause':'play'" :size="15" /></button><button class="icon-button" aria-label="下一帧" :disabled="isAiBusy||currentFrame===maxFrameIndex" @click="seekByFrame(1)">→</button><label class="frame-jump">第 <input v-model.number="jumpFrame" aria-label="跳转帧号" type="number" min="1" :max="maxFrameIndex+1" :disabled="isAiBusy" @change="jump" @keydown.enter="jump" /> / {{ maxFrameIndex+1 }} 帧</label><select v-model.number="playbackRate" aria-label="播放速度" class="speed-select"><option v-for="r in [.25,.5,1,2]" :key="r" :value="r">{{ r }}×</option></select><button class="quiet-button copy-previous" :disabled="editingBlocked||currentFrame===0" title="只补充当前帧缺少的对象 (C)" @click="copyPreviousFrame">复制上一帧 <kbd>C</kbd></button></div>
           <div class="timeline-track" role="slider" aria-label="视频时间轴" tabindex="0" :aria-valuenow="currentFrame+1" :aria-valuemin="1" :aria-valuemax="maxFrameIndex+1" @click="onTimelineClick"><i class="timeline-base" /><i class="timeline-progress" :style="{width:`${maxFrameIndex?currentFrame/maxFrameIndex*100:0}%`}"/><i v-for="f in markers" :key="f" class="timeline-marker" :style="{left:`${maxFrameIndex?f/maxFrameIndex*100:0}%`}"/><i v-for="a in anomalyFrames" :key="a.frame_index" class="timeline-anomaly" :title="`第 ${a.frame_index+1} 帧：${a.reasons.join(' · ')}`" :style="{left:`${maxFrameIndex?a.frame_index/maxFrameIndex*100:0}%`}"/><i class="timeline-cursor" :style="{left:`${maxFrameIndex?currentFrame/maxFrameIndex*100:0}%`}"/></div><div class="timeline-caption"><span>{{ formatTime(currentTime) }} / {{ formatTime(videoDuration) }}</span><span>{{ annotatedFrameCount }} 帧含标注 <i />绿色为已有标注</span></div>
         </div>
-        <footer class="annotation-status"><span :title="statusMessage">{{ statusMessage }}</span><span v-if="mousePixel">X {{ mousePixel.x }} · Y {{ mousePixel.y }} px</span><span v-else>原图坐标 · 显示增强不影响标注</span></footer>
+        <footer class="annotation-status"><span :title="trackingProgress||statusMessage">{{ trackingProgress||statusMessage }}</span><span v-if="mousePixel">X {{ mousePixel.x }} · Y {{ mousePixel.y }} px</span><span v-else>原图坐标 · 显示增强不影响标注</span></footer>
       </section></template>
       <template #inspector><aside class="annotation-inspector">
         <section class="panel ai-panel">
           <div class="ai-heading"><AppIcon name="spark" :size="18"/><strong>AI 辅助追踪</strong><span class="ai-state">{{ isAiBusy?'追踪中':hasPausedTracking?'待人工核对':'就绪' }}</span></div>
-          <p>{{ hasPausedTracking?'先核对画布下的暂停对象，明确确认后继续。':'以当前帧为起点，自动追踪已有目标。' }}</p>
+          <p>{{ trackingProgress|| (hasPausedTracking?'先核对画布下的暂停对象，明确确认后继续。':'以当前帧为起点，自动追踪已有目标。') }}</p>
           <button class="btn-primary" :disabled="editingBlocked||hasPausedTracking||trackingFeedbackPending||!!objectDeletionPendingAction||!isVideo||!currentObjects.some(o=>o.bbox)" @click="runAiTrack">{{ isAiBusy?'正在追踪…':'AI Tracking' }}</button>
           <div v-if="trackingCalibrationSummary.length" class="tracking-calibration"><strong>已保存的正常确认 · 异常检测持续开启</strong><div v-for="item in trackingCalibrationSummary" :key="item.objectId"><span>#{{ item.objectId }}<template v-if="item.sampleCount"> · {{ item.sampleCount }} 次正常运动确认</template><template v-if="item.geometryFrame!=null"> · 第 {{ item.geometryFrame+1 }} 帧尺寸已确认</template></span><button class="quiet-button" :disabled="feedbackBlocked||trackingFeedbackPending" @click="resetTrackingCalibration(item.objectId)">恢复默认判断</button></div></div>
           <div v-if="trackingFeedbackError && trackingFeedbackPendingAction?.decision==='reset'" class="tracking-feedback-error" role="alert">{{ trackingFeedbackError }}<button class="quiet-button" :disabled="trackingFeedbackBusy" @click="retryTrackingAnomalyFeedback">重试恢复默认判断</button></div>

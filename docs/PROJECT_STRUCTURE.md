@@ -27,6 +27,8 @@ Vue 3 + TypeScript + Vite；FastAPI + SQLite；SAM3 在后端按需加载。前�
 | 记录查询 | `pages/ResultsPage.vue`、`backend/app/db.py` |
 | 媒体/工作区/Tracking API | `api/trackApi.ts`、`api/httpAnnotationApi.ts`、`backend/app/main.py` |
 | Tracking 编排 / 模型 / 异常 | `backend/app/tracker.py`、`services/sam3_engine.py`、`services/anomaly_detector.py`、`services/annotation_seed.py` |
+| 按需带框视频预览 | `backend/app/tracking_preview.py`；长时编码在来源锁外，输入签名校验后发布 |
+| 精确帧性能与缓存 | `backend/app/video_frames.py` 复用/限量解码器、原子 JPEG 与源签名；`frontend/src/api/sourceFrameApi.ts` 为 B/C 提供限量 Blob 缓存 |
 | 数据库和增量迁移 | `db.py`、`review_schema.py`、三个 workflow/export 模块中的 `migrate()` |
 | 日志/来源锁 | `review_logging.py`、`review_source_lock.py` |
 

@@ -22,9 +22,11 @@ storage/
     media.json                   # 原始宽高、FPS、帧数等
     annotations_frame_*.json     # 每次 Tracking seed
     tracker_results.json         # JSONL：逐行原始视频帧
-    tracker_overlay.mp4          # 带框预览
+    tracker_overlay.mp4          # 按需生成的带框预览，不属于追踪完成条件
+    tracker_overlay.meta.json    # 派生预览的输入签名，可重新生成
     workspace_state.json         # 可恢复人工/删除/基准/异常/当前位置与设置
-    .frame_cache/                # 逐帧 JPEG 缓存
+    .frame_cache/                # 逐帧 JPEG 缓存，128 帧/128 MiB 上限
+      source.json               # 源文件路径/大小/mtime/文件身份，失效后重建 JPEG
   media/_annotation_resets/<id>/ # 覆盖事务的临时文件及 journal.json；重启按 DB 回执恢复/清理
   datasets/
     train_<id>.zip               # 当前训练导出生成包，认证接口下载
@@ -33,6 +35,10 @@ storage/
 ```
 
 `workspace_state.json` 临时文件写入后原子替换。AI 逐帧结果不复制进去，加载时与 `tracker_results.json` 合并，人工修正优先，删除标记不能因重新加载复活。
+
+精确帧 JPEG 先写临时文件再原子替换；命中缓存读取为响应字节，避免返回路径后被 LRU 清理。只清理 `.frame_cache/frame_*.jpg`，源变化清理旧签名的这些 JPEG；不删除视频、标注、预览临时文件或其他运维数据。最多缓存 2 个解码器，后台长时追踪/导出另用顺序解码；不共享来源写锁。浏览器缓存服务器视频的人工框，AI 正文不再重复写入 localStorage；人工 pending 原请求、删除撤销快照及业务审计仍保存。
+
+Tracking JSONL 同样先写临时文件再原子替换，发布失败保留旧分支。长时视频解码、模型推理和按需预览编码不占用来源锁，结果/预览发布才使用短锁；追踪运行期间工作区只允许浏览状态保存，框、人工基准、删除规则写入仍拒绝。预览生成在 `.frame_cache/overlay-*.mp4` 临时文件进行，成功且输入签名未变化才发布；它及 meta 文件是可重建缓存，不影响 A/B/F 或训练集原图。任务内存与前端待查询记录不代表推理跨重启恢复，启动幂等回执在当前进程内有效。
 
 覆盖重新标注仅允许没有未撤回送审任务的媒体。重置使用 SQL 写事务、工作区 revision 与幂等键，移动旧 workspace/seed/results/overlay 到恢复目录，写入空工作区并删除该 media_id 的活动人工查询记录；原视频、media.json、历史 A 保留。成功后清理临时旧文件，失败回滚；启动按 journal 和成功回执协调进程中断后的文件状态，不能当作普通缓存直接删除。新的 generationId 使前端丢弃旧框/撤销/校准缓存，并在重放待重试草稿前识别轮次变化；仅已确认的覆盖允许丢弃旧请求，普通冲突不能静默覆盖。旧版本或旧无版本客户端不能写回已舍弃状态。新增字段和表均为兼容增量迁移，存储运行契约保持 1。
 
@@ -65,6 +71,8 @@ storage/
 | 审计身份/证据 | `audit_source_identity` 保存部署身份；`training_export_audits` 按 export_id 唯一保存规范 JSON、采集时间和 SHA；触发器禁止更新/删除 |
 
 A/B/F 不随浏览、缩放、草稿、重新确认或退回重审而改写。F 的对象集合和类别继承 A，只选择几何来源。当前帧重审使用上述事件表；旧问题标记表不作为这一流程的状态来源。
+
+新版 C 将一次决定的变化项或游标的空项列表写入原 `review_write_receipts`，避免每次浏览都复制整个修改项列表。旧回执不改写；决定事件、head、版本与业务事务不变。新增修改项导航复合索引为兼容增量，存储运行契约仍为 1。
 
 ## 备份、兼容和清理
 

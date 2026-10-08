@@ -1,5 +1,6 @@
 import { withRequestTimeout } from '../utils/browserCompat'
 import { tokenStore } from './http'
+import { sourceFrameBlob } from './sourceFrameApi'
 import type { Box, ReviewObject } from '../review/geometry'
 export type Choice = 'A' | 'B'
 export interface Change {
@@ -19,12 +20,12 @@ export interface ConfirmationSession {
 export interface FrameContext { frameIndex:number;baselineObjects:ReviewObject[];reviewObjects:ReviewObject[] }
 export type Action = 'claim'|'decide'|'undo'|'finish'|'reopen'|'return'|'cursor'
 export interface Operation { action:Action;sid:string;changeId?:string;body:Record<string,unknown>;key:string }
-export interface Result { session:ConfirmationSession;items:Change[];selectedChangeId:string|null;nextPendingChangeId:string|null;savedAt:string }
+export interface Result { session:ConfirmationSession;items:Change[];itemsScope?:'changed';selectedChangeId:string|null;nextPendingChangeId:string|null;savedAt:string }
 export interface Failure {message:string;status?:number;code?:string;requestId?:string}
 async function request<T>(path:string,method='GET',body?:unknown,key?:string,blob=false):Promise<T> {
   try {
     return await withRequestTimeout(30000, async (signal) => {
-      const r=await fetch('/api'+path,{method,signal,headers:{Authorization:`Bearer ${tokenStore.get()}`,'Content-Type':'application/json',...(key?{'X-Review-Contract':'2','Idempotency-Key':key}:{})},body:body===undefined?undefined:JSON.stringify(body)})
+      const r=await fetch('/api'+path,{method,signal,headers:{Authorization:`Bearer ${tokenStore.get()}`,'Content-Type':'application/json',...(key?{'X-Review-Contract':'2','Idempotency-Key':key,'X-Confirmation-Response':'delta'}:{})},body:body===undefined?undefined:JSON.stringify(body)})
       if(!r.ok) {
         const d=await r.json().catch(()=>({}))
         throw {message:d.message||(typeof d.detail==='string'?d.detail:`请求失败（${r.status}）`),status:r.status,code:d.code,requestId:d.requestId||r.headers.get('X-Request-ID')}
@@ -45,6 +46,6 @@ export const confirmationApi={
   changes:(id:string)=>request<{items:Change[]}>(`${base}/${id}/changes`),
   frame:(id:string,fi:number)=>request<FrameContext>(`${base}/${id}/frames/${fi}`),
   operate:(op:Operation)=>request<Result>(`${base}/${op.sid}/`+(op.action==='decide'?`changes/${op.changeId}/decision`:op.action==='finish'?'finalize':op.action),op.action==='decide'||op.action==='cursor'?'PUT':'POST',op.body,op.key),
-  image:(media:string,fi:number)=>request<Blob>(`/track/frame/${encodeURIComponent(media)}/${fi}`,'GET',undefined,undefined,true),
+  image:(media:string,fi:number)=>sourceFrameBlob(media,fi),
   download:(id:string)=>request<Blob>(`/final-versions/${id}/download`,'GET',undefined,undefined,true),
 }

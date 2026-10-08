@@ -52,6 +52,8 @@ export interface TrackStatusResponse {
   taskId: string
   status: 'queued' | 'running' | 'success' | 'failed' | 'paused'
   message?: string
+  stage?: 'queued' | 'decoding' | 'preparing_model' | 'tracking' | 'saving_results' | 'paused' | 'completed'
+  elapsedSeconds?: number
   paused?: boolean
   pausedFrame?: number
   pausedObjects?: Array<{
@@ -256,12 +258,16 @@ export const trackApi = {
     startFrame: number
     maxFrames?: number
     annotations: unknown[]
-  }) {
-    return jsonRequest<TrackRunResponse>('/track', { method: 'POST', body: JSON.stringify(input) })
+  }, requestKey?: string) {
+    const result=await jsonRequest<TrackRunResponse>('/track', { method: 'POST', headers: requestKey ? {'Idempotency-Key': requestKey} : {}, body: JSON.stringify(input) })
+    if(typeof result.taskId!=='string'||!result.taskId)throw new Error('服务器未返回有效追踪任务，请重试原追踪请求')
+    return result
   },
 
   async getStatus(taskId: string) {
-    return jsonRequest<TrackStatusResponse>(`/track/status/${encodeURIComponent(taskId)}`)
+    const result=await jsonRequest<TrackStatusResponse>(`/track/status/${encodeURIComponent(taskId)}`)
+    if(!['queued','running','success','failed','paused'].includes(result.status))throw new Error('服务器未返回有效追踪状态，请重新查询原任务')
+    return result
   },
 
   async getFrameBlob(mediaId: string, frameIndex: number): Promise<Blob> {

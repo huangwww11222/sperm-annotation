@@ -1,8 +1,8 @@
 """Authenticated C API. No legacy mutation can bypass version/idempotency checks."""
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Header
 from fastapi.responses import Response
 from pydantic import Field
 
@@ -17,6 +17,7 @@ router = APIRouter(
 final_router = APIRouter(
     prefix="/api/final-versions", tags=["final-versions"], route_class=LoggedRoute
 )
+ResponseMode = Annotated[Literal['full','delta'], Header(alias='X-Confirmation-Response')]
 
 
 class Decision(Model):
@@ -63,38 +64,38 @@ def frame(sid: str, fi: int, user: User):
 
 
 @router.post("/sessions/{sid}/claim")
-def claim(sid: str, user: User, key: Key):
-    return flow.write("claim", sid, user["uid"], key, {})
+def claim(sid: str, user: User, key: Key, response_mode: ResponseMode='full'):
+    return flow.write("claim", sid, user["uid"], key, {}, response_mode=response_mode)
 
 
 @router.put("/sessions/{sid}/changes/{change_id}/decision")
-def decide(sid: str, change_id: str, body: Decision, user: User, key: Key):
-    return flow.write("decide", sid, user["uid"], key, body.model_dump(), change_id)
+def decide(sid: str, change_id: str, body: Decision, user: User, key: Key, response_mode: ResponseMode='full'):
+    return flow.write("decide", sid, user["uid"], key, body.model_dump(), change_id, response_mode)
 
 
 @router.post("/sessions/{sid}/undo")
-def undo(sid: str, body: Undo, user: User, key: Key):
-    return flow.write("undo", sid, user["uid"], key, body.model_dump())
+def undo(sid: str, body: Undo, user: User, key: Key, response_mode: ResponseMode='full'):
+    return flow.write("undo", sid, user["uid"], key, body.model_dump(), response_mode=response_mode)
 
 
 @router.post("/sessions/{sid}/finalize")
-def finish(sid: str, body: Version, user: User, key: Key):
-    return flow.write("finish", sid, user["uid"], key, body.model_dump())
+def finish(sid: str, body: Version, user: User, key: Key, response_mode: ResponseMode='full'):
+    return flow.write("finish", sid, user["uid"], key, body.model_dump(), response_mode=response_mode)
 
 
 @router.post("/sessions/{sid}/reopen")
-def reopen(sid: str, body: Version, user: User, key: Key):
-    return flow.write("reopen", sid, user["uid"], key, body.model_dump())
+def reopen(sid: str, body: Version, user: User, key: Key, response_mode: ResponseMode='full'):
+    return flow.write("reopen", sid, user["uid"], key, body.model_dump(), response_mode=response_mode)
 
 
 @router.post("/sessions/{sid}/return")
-def return_frame(sid: str, body: ReturnFrame, user: User, key: Key):
-    return flow.write("return", sid, user["uid"], key, body.model_dump())
+def return_frame(sid: str, body: ReturnFrame, user: User, key: Key, response_mode: ResponseMode='full'):
+    return flow.write("return", sid, user["uid"], key, body.model_dump(), response_mode=response_mode)
 
 
 @router.put("/sessions/{sid}/cursor")
-def cursor(sid: str, body: Cursor, user: User, key: Key):
-    return flow.write("cursor", sid, user["uid"], key, body.model_dump(), body.changeId)
+def cursor(sid: str, body: Cursor, user: User, key: Key, response_mode: ResponseMode='full'):
+    return flow.write("cursor", sid, user["uid"], key, body.model_dump(), body.changeId, response_mode)
 
 
 @final_router.get("")

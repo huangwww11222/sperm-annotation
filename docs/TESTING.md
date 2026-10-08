@@ -30,6 +30,8 @@ npm run build --prefix frontend
 | 标注手势、性能、续标、快捷键 | `test:annotation`；必要时 `test_frontend_tracking_contract.py`、`test_manual_baseline_restore.py` | `annotation-ux-browser.mjs`（48）；`annotation-ui-consistency.mjs`（14） |
 | 删除范围、人工正常反馈、重试 | `test:annotation`（含写入队列重放/账号隔离/版本冲突）；`test_annotation_controls.py`、`test_anomaly_detector.py`、`test_tracking_adaptive_feedback.py` | `annotation-delete-feedback-browser.mjs`（67；反馈/删除真后端，GPU模拟） |
 | Tracking 调用/完成定位 | seed、rewind、timing、manual baseline、frontend tracking contract pytest | `annotation-tracking-ui.mjs`（14，模拟响应，无真实 GPU） |
+| 4K 准备、保存锁与失败恢复 | `test_tracking_performance.py`、`test_video_timing.py`、`test_tracking_adaptive_feedback.py`；真实 4K 连续窗口/坐标、慢模型期间读写、启动重放、预览缓存和原子发布失败 | `tracking-recovery-browser.mjs`（25；真实 4K 视频/保存/抽帧，模拟模型与网络故障，查询恢复/原键重放/冲突备份） |
+| 帧解码、追踪内存、大量修改项性能 | `test_video_frames.py`（逐帧身份/随机访问/失败 seek/缓存限量与原子失败/真实 processor 输入一致/掩码几何一致/首次模型 dtype）、`test_confirmation_performance.py`（5,000 项/紧凑回执/升级前重放/精确进度） | `performance-browser.mjs`（27；外部真实 4K 副本、50,000 AI 对象、初次读取失败/坏 JPEG 原位重试、C 同帧图像复用/增量回复/并发版本跳变） |
 | Chrome 93 / HTTP、素材删除 | `test:compatibility`、`test_media_deletion.py` | `browser-compat-media.mjs`；下述旧 API 回归模式 |
 | 送审 | `test_review_completion.py` | `review-ingress-browser.mjs`（6） |
 | 撤回、重复视频覆盖、本帧重审 | `test_workflow_transitions.py`、`test_media_reimport.py`、`test_tracking_adaptive_feedback.py`；撤回/领取竞争、回滚/重放、导出门禁和审计继承 | `workflow-transitions-browser.mjs`（37；真实源视频/接口，覆盖成功响应丢失、旧窗口待重试草稿、新轮次人工记录/seed，两尺寸浅深主题） |
@@ -98,6 +100,21 @@ node frontend/tests/workspace-layout-browser.mjs
 其他脚本按上表选择 `node frontend/tests/<脚本>.mjs`：
 
 - `annotation-ux-browser` 前重置 UX；外观、模拟 Tracking 不需要新 C 任务，但需要可用账号。
+- `tracking-recovery-browser` 前在同一隔离环境运行 `backend/tests/tracking_recovery_fixture.py`（要求 `/work/e2e-confirm-ux*`，先用 C 夹具建立用户）；测试后端开启 SAM3_ENABLED 以走真实 rewind/seed，但模型响应由浏览器模拟，不加载权重。运行 `CONFIRMATION_ORIGIN=http://127.0.0.1:5373 node frontend/tests/tracking-recovery-browser.mjs`。脚本只修改本批隔离媒体，需重跑先重新生成夹具；HTTP 30 秒计时器缩短为 300ms 复现同一取消路径，不是等待真实 30 秒。GPU 输出模拟原始帧 JSONL，保存、抽帧、冲突和原键重放使用真后端。截图/失败诊断位于 `output/playwright/tracking-recovery-*`，不能将其称为真实模型 4K 效果验收。
+
+### 外部真实视频性能测量
+
+保持上述三个 APP 路径隔离到 `work/`，素材会复制到测试媒体目录，原文件只读。`real_video_benchmark.py` 测量当前精确帧冷/热读取，并以独立顺序解码的 JPEG 校验原始帧身份。预处理模式需要已准备的本地模型配置及锁定的 Transformers/Torchvision，使用真实 processor，但不加载模型权重；每次内存测量用独立进程，RSS 包含 Python/Torch/processor，不含模型推理。
+
+```bash
+work/review-venv/bin/python backend/tests/real_video_benchmark.py --source-dir "/实际视频目录"
+work/review-venv/bin/python backend/tests/real_video_benchmark.py --source-dir "/实际视频目录" --processor --count 120 --video "某个视频.mp4"
+work/review-venv/bin/python backend/tests/real_video_benchmark.py --source-dir "/实际视频目录" --pipeline --count 120
+```
+
+`--phase before --processor --count 8` 为旧整窗口预处理的同样本对照；勿用长高分辨率窗口冒险占满测试机内存。`--pipeline` 验证真实原视频解码、标准预处理、seed、原始帧号、框坐标及 JSONL 发布，但推理输出模拟，不能用作模型精度/GPU 耗时证明。结果写入忽略的 `work/performance-*.json`。
+
+真实素材浏览器用例先生成 C/UX/B 基础夹具，再在同一 `/work/e2e-confirm-ux-*` 环境运行 `backend/tests/real_4k_browser_fixture.py --source-dir "/实际视频目录"`；生成的测试标注不代表该视频真实目标。随后运行 `CONFIRMATION_ORIGIN=http://127.0.0.1:5373 node frontend/tests/performance-browser.mjs`，会消费本批 C 决定；重新运行先生成新任务。截图/指标在 `output/playwright/performance-results.json` 和 `real-4k-performance.png`。
 - `annotation-delete-feedback-browser` 前在同一隔离环境运行 `backend/tests/annotation_controls_fixture.py`，只重置六个 `controls-*` 媒体，凭证留在 `work/annotation-controls-browser-fixture.json`。环境路径支持 `/work/e2e-confirm-ux*` 或单独 `/work/e2e-annotation-controls*`；前端地址用 `ANNOTATION_ORIGIN`。覆盖当前帧/全视频删除、统计取消/确认、跨帧撤销、刷新、正常/仅本次/实际修框、尺寸误报无须重画的人工参照保存与恢复、校准重置、两类写入成功但响应丢失的原键重放、帮助下载一致及小窗口首屏。其后续 GPU job 响应模拟，保存/反馈/seed/rewind与原视频帧走真实后端；不能称真实模型验收。
 - `test_tracking_adaptive_feedback.py` 使用模拟推理输出与真实反馈持久化，复现高度 0.59 倍的逐帧暂停，验证正常确认后不重画也可继续、原形状往返、重启读取、回退帧界限，以及新尺寸异常/丢失/重叠仍暂停；这些结果不代表真实 GPU 推理。
 - `review-browser` 和 `review-failure-browser` 每组前重新生成 B 夹具。
@@ -201,10 +218,21 @@ python3 scripts/check_repository.py
 | `media.deleted/delete_failed/delete_rejected`、`annotation.media_deleted/media_delete_failed/media_list_failed` | 删除结果、媒体 ID、操作者、文件系统异常；前端网络失败不得当删除成功 |
 | `annotation.local_save_failed/selection_save_failed`、`ui.preference_save_failed` | 本机存储不可用 |
 | `annotation.feedback_saved`、`tracking.anomaly_pause/completed` | 正常确认原因、尺寸参照帧/来源、运动样本及实际续追起止帧；区分清除当前暂停与后续检测是否读取确认参照 |
+| `tracking.rewind/decoded/task_started/task_finished/task_failed/start_replay` | JSONL 回退耗时、本轮原始尺寸/帧数/RGB 字节、模型任务与耗时、启动重放及失败堆栈；与前端 `annotation.tracking_failed` 的阶段/帧号/taskId 对齐 |
+| `tracking.preview_started/preview_completed/preview_failed` | 按需整段预览编码及耗时，区分预览失败与追踪或保存失败 |
+| `source.lock_slow` | 来源锁等待 ≥500ms 或占用 ≥1s 时记录操作名与 wait_ms/work_ms；用来识别其他上传/保存是否仍在阻塞，不能只看客户端 timeout 猜模型耗时 |
 
 日志不记录 JWT/密码；不要记录每个鼠标移动。浏览器 route 注入的 503 不会出现在服务端日志；数据库触发器故障测试验证真实事务回滚与日志。
 
 ## 最近验证记录
+
+2026-10-08 外部真实 4K 与性能：两段只读原视频均为 **4096×3000 MP4**，分别 630 帧/8.557 FPS、129 帧/7.94 FPS。独立顺序解码的帧 JPEG 与优化 API 相同；真实 processor 的前 8 帧在原整窗口/新分批方式下输入张量逐帧 SHA 完全一致，原文件与隔离副本完整 SHA 一致。中段连续窗口及尾帧通过真实解码/预处理、模拟推理的编排验证；未运行 CUDA 模型。
+
+本机 macOS CPU 测量：连续 12 个首次读取帧均值 **74.7→33.0 ms、62.6→23.5 ms**（含首帧开解码器，不含浏览器绘制/网络）；回退 **1–2 ms**，不编码视频。120 帧真实 processor 准备 **3.37/3.51 秒**，进程峰值 RSS **1,483/1,460 MiB**，CPU 模型输入 697.7 MiB；不包含 GPU 模型/推理显存。8 帧对照峰值 **1,755→1,304 MiB、1,631→1,304 MiB**。5,000 修改项旧兼容全量游标回复约 **2.2 MB/38 ms**，新版约 **1 KB/1.4 ms**；这是隔离测试中的处理时间/JSON 序列化大小，不是医院服务器测速。
+
+隔离全量后端 **376 项通过、1 项跳过**，前端单元 **20+6+4+5 项**、类型检查/生产构建和仓库检查通过。浏览器 **27 项真实视频/密集对象/坏 JPEG 恢复**、**25 项追踪恢复**、**48 项标注交互**、**34 项 C 故障**、**19 项 B 故障**、**124 项三页布局**通过，合计 **277 项**。同帧上下文的新缓存行为用断网不重复读图检查替换旧重复下载的故障注入；原键游标恢复仍验证。新请求/解码失败不能伪装成功，已缓存可用图像不因未请求的网络故障失效。日志 `work/performance-*.log/json`，数据 `work/performance-*`、`work/e2e-confirm-ux-performance-*`，图像在 `output/playwright/`。医院完整推理耗时、显存与精度仍需 GPU 实机验收。
+
+2026-10-08 前一阶段 4K 准备与超时恢复：先复现 rewind 全段重编码、长时推理占来源锁与忙时人工框写入三个失败，再修复并通过隔离后端全量 **361 项、1 项跳过**。前端几何/写入/兼容 **18+6+4+5 项**、类型检查和生产构建通过。真实 3840×2160 合成 AVI 验证连续窗口读取、原始帧号/像素框与按需预览；浏览器恢复专项 **25 项**、三页工作台 **124 项**、原追踪定位/显式反馈 **14 项通过**。模型和故障响应由测试模拟；当时尚未取得现场原视频。日志 `work/4k-*.log`；隔离数据 `work/e2e-confirm-ux-4k-*`；截图及失败诊断 `output/playwright/tracking-recovery-*`。
 
 2026-09-30 撤回送审、重复视频覆盖与本帧重审：隔离后端全量 **351 项通过、1 项跳过**；前端几何/写入/兼容 **18+6+4+5 项通过**，类型检查和生产构建通过。专项浏览器 **37 项**、既有三页工作台 **124 项通过**，覆盖两尺寸浅深主题、覆盖取消/响应丢失后刷新重试、旧窗口请求拒绝与待重试草稿清理、当前轮次人工记录/seed，以及 C→B→C 完整重审和其他帧决定保留。删除后的异常回归使用模拟推理，未运行真实 GPU。日志位于 `work/workflow-*.log`，数据在 `work/e2e-confirm-transitions-*`，截图在 `output/playwright/transitions-*`。
 

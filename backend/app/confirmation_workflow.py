@@ -48,6 +48,7 @@ def migrate(c):
       final_version_id TEXT NOT NULL REFERENCES final_versions(id), actor_id INTEGER NOT NULL REFERENCES users(id),
       created_at TEXT NOT NULL
     );
+    CREATE INDEX IF NOT EXISTS idx_changes_navigation ON review_changes(review_version_id,frame_index,object_id,id);
     """)
     c.commit()
 
@@ -120,18 +121,18 @@ def change_metrics(a, b):
     return metrics
 
 
-def changes(c, s):
+def changes(c, s, change_id=None):
     rows = c.execute(
         """SELECT x.*,h.choice,h.event_id
        FROM review_changes x LEFT JOIN decision_heads h ON h.change_id=x.id AND h.confirmation_id=?
-       WHERE x.review_version_id=? ORDER BY x.frame_index,x.object_id,x.id""",
-        (s["id"], s["review_version_id"]),
+       WHERE x.review_version_id=?""" + (' AND x.id=?' if change_id is not None else '') + ' ORDER BY x.frame_index,x.object_id,x.id',
+        (s["id"], s["review_version_id"], *([change_id] if change_id is not None else [])),
     ).fetchall()
     revisions = {
         r["change_id"]: r["revision"]
         for r in c.execute(
-            "SELECT * FROM confirmation_change_versions WHERE confirmation_id=?",
-            (s["id"],),
+            "SELECT * FROM confirmation_change_versions WHERE confirmation_id=?" + (' AND change_id=?' if change_id is not None else ''),
+            (s["id"], *([change_id] if change_id is not None else [])),
         )
     }
     result = []
@@ -163,8 +164,11 @@ def last_action(c, s):
 
 
 def session_data(c, s, uid):
-    items = changes(c, s)
-    decided = sum(x["decision"] is not None for x in items)
+    total, kept, adopted = c.execute('''SELECT COUNT(*),COALESCE(SUM(h.choice='A'),0),COALESCE(SUM(h.choice='B'),0)
+        FROM review_changes x LEFT JOIN decision_heads h ON h.confirmation_id=? AND h.change_id=x.id
+        WHERE x.review_version_id=?''', (s['id'],s['review_version_id'])).fetchone()
+    decided = kept + adopted
+    first_pending = next_pending(c, s)
     reason = integrity(c, s)
     active = s["state"] in ("pending", "in_progress") and not reason
     own = s["confirmer_id"] == uid
@@ -194,34 +198,28 @@ def session_data(c, s, uid):
             frameCount=s["frame_count"],
         ),
         progress=dict(
-            totalChanges=len(items),
+            totalChanges=total,
             decided=decided,
-            pending=len(items) - decided,
-            keptA=sum(
-                bool(x["decision"] and x["decision"]["choice"] == "A") for x in items
-            ),
-            adoptedB=sum(
-                bool(x["decision"] and x["decision"]["choice"] == "B") for x in items
-            ),
-            percent=round(decided / len(items) * 100, 1) if items else 100,
+            pending=total - decided,
+            keptA=kept,
+            adoptedB=adopted,
+            percent=round(decided / total * 100, 1) if total else 100,
         ),
         permissions=dict(
             canClaim=active and s["confirmer_id"] is None,
             canEdit=active and own,
             canUndo=active and own and action is not None,
-            canComplete=active and own and decided == len(items),
+            canComplete=active and own and decided == total,
             canReopen=s["state"] == "confirmed" and own and not reason,
             canExport=fv is not None and s["state"] == "confirmed",
-            canReturn=active and own and bool(items),
+            canReturn=active and own and bool(total),
         ),
         returnedReview=dict(frameIndex=returned["frame_index"], reason=returned["reason"],
                            reviewSessionId=returned["session_id"], nextConfirmationId=returned["next_confirmation_id"]) if returned else None,
         resume=dict(
             lastViewedChangeId=bookmark["change_id"] if bookmark else None,
             cursorRevision=bookmark["revision"] if bookmark else 0,
-            firstPendingChangeId=next(
-                (x["changeId"] for x in items if not x["decision"]), None
-            ),
+            firstPendingChangeId=first_pending,
         ),
         undo=dict(actionId=action["id"], changeId=action["change_id"])
         if action
@@ -322,7 +320,24 @@ def append_decision(c, s, change_id, choice, uid, note=None):
     return event
 
 
-def write(action, sid, uid, key, body, change_id=None):
+def next_pending(c, s, selected=None):
+    base = '''SELECT x.id FROM review_changes x LEFT JOIN decision_heads h
+        ON h.confirmation_id=? AND h.change_id=x.id WHERE x.review_version_id=?
+        AND (h.choice IS NULL OR h.choice NOT IN ('A','B'))'''
+    order = ' ORDER BY x.frame_index,x.object_id,x.id LIMIT 1'
+    if selected:
+        row = c.execute('SELECT frame_index,object_id,id FROM review_changes WHERE id=? AND review_version_id=?',
+                        (selected,s['review_version_id'])).fetchone()
+        if row:
+            following = c.execute(base+' AND (x.frame_index,x.object_id,x.id)>(?,?,?)'+order,
+                                  (s['id'],s['review_version_id'],*tuple(row))).fetchone()
+            if following:
+                return following[0]
+    first = c.execute(base+order,(s['id'],s['review_version_id'])).fetchone()
+    return first[0] if first else None
+
+
+def write(action, sid, uid, key, body, change_id=None, response_mode='full'):
     h = digest(["confirmation", action, sid, change_id, body])
     try:
         with closing(connect()) as c, c:
@@ -395,9 +410,8 @@ def write(action, sid, uid, key, body, change_id=None):
                         "确认进度已在其他窗口更新，请重新读取",
                     )
                 if action == "decide":
-                    item = next(
-                        (x for x in changes(c, s) if x["changeId"] == change_id), None
-                    )
+                    found = changes(c, s, change_id)
+                    item = found[0] if found else None
                     if not item:
                         raise ReviewError("CHANGE_NOT_FOUND", "修改项不属于此任务", 404)
                     if body["expectedDecisionRevision"] != item["decisionRevision"]:
@@ -465,28 +479,26 @@ def write(action, sid, uid, key, body, change_id=None):
                 else:
                     raise ReviewError("INVALID_ACTION", "操作不支持", 422)
             s = session_row(c, sid)
-            items = changes(c, s)
-            p = session_data(c, s, uid)["progress"]
+            view = session_data(c, s, uid)
+            p = view['progress']
             if action != "cursor":
                 c.execute(
                     "UPDATE confirmation_sessions SET decided_changes=?,kept_a=?,adopted_b=? WHERE id=?",
                     (p["decided"], p["keptA"], p["adoptedB"], sid),
                 )
-            pending = {x["changeId"] for x in items if not x["decision"]}
-            index = next(
-                (i for i, x in enumerate(items) if x["changeId"] == selected), -1
-            )
-            ordered = items[index + 1 :] + items[: index + 1]
-            nxt = next(
-                (x["changeId"] for x in ordered if x["changeId"] in pending), None
-            )
+            if response_mode == 'delta':
+                items = changes(c, s, selected) if action in ('decide','undo') else []
+            else:
+                items = changes(c, s)
+            nxt = next_pending(c, s, selected)
             result = dict(
-                session=session_data(c, s, uid),
+                session=view,
                 items=items,
                 selectedChangeId=selected,
                 nextPendingChangeId=nxt,
                 savedAt=now(),
             )
+            if response_mode == 'delta': result['itemsScope'] = 'changed'
             c.execute(
                 "INSERT INTO review_write_receipts VALUES (?,?,?,?,?)",
                 (uid, key, h, packed(result), now()),

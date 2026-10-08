@@ -1,5 +1,6 @@
 import { withRequestTimeout } from '../utils/browserCompat'
 import { tokenStore } from './http'
+import { sourceFrameBlob } from './sourceFrameApi'
 import type { ReviewObject, Patch } from '../review/geometry'
 export interface CompletionPreview { sourceRevision:string;frameCount:number;objectFrames:number;emptyFrames:number;unknownFrames:number;unknownFrameRanges:{start:number;end:number}[] }
 export interface Progress { submittedFrames:number;unsubmittedFrames:number;draftFrames:number;modifiedFrames:number;modifiedBoxes:number;percent:number }
@@ -47,8 +48,6 @@ export const reviewWorkflowApi={
   finish:(id:string,revision:number,key:string)=>request<Mutation>(`/sessions/${id}/freeze`,'POST',{expectedSessionRevision:revision},key),
   cursor:(id:string,fi:number,revision:number,key:string)=>request<{revision:number}>(`/cursors`,'PUT',{sessionId:id,frameIndex:fi,expectedCursorRevision:revision},key),
   async image(mediaId:string,fi:number) {
-    const r=await fetch(`/api/track/frame/${encodeURIComponent(mediaId)}/${fi}`,{headers:{Authorization:`Bearer ${tokenStore.get()}`}})
-    if(!r.ok) throw {status:r.status,message:'当前帧图像加载失败，请重试'}
-    return URL.createObjectURL(await r.blob())
+    return URL.createObjectURL(await sourceFrameBlob(mediaId,fi))
   },
 }

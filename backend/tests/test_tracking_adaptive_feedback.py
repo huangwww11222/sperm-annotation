@@ -14,9 +14,10 @@ class FakeEngine:
     device = "cpu"
     torch_dtype = "float32"
 
-    def __init__(self, boxes):
+    def __init__(self, boxes, source_start=0):
         self.boxes = boxes
         self.seed_ids = []
+        self.source_start = source_start
 
     def make_tracker_session(self, frames):
         return object()
@@ -26,10 +27,16 @@ class FakeEngine:
 
     def propagate_manual(self, session, max_frames, start_frame_idx):
         for frame in sorted(self.boxes):
-            yield SimpleNamespace(frame_idx=frame)
+            yield SimpleNamespace(frame_idx=frame-self.source_start)
 
     def decode_tracker_output(self, session, output):
-        return [SimpleNamespace(object_id=oid, bbox=box, score=0.9, mask_area=None, sam3_object_id=oid) for oid, box in self.boxes[output.frame_idx].items()], None
+        return [SimpleNamespace(object_id=oid, bbox=box, score=0.9, mask_area=None, sam3_object_id=oid) for oid, box in self.boxes[output.frame_idx+self.source_start].items()], None
+
+
+class FakeWindow:
+    def __init__(self, meta): self.meta = meta
+    def __enter__(self): return self
+    def __exit__(self, *args): pass
 
 
 def _run(tmp_path, monkeypatch, *, workspace=None, samples=None, boxes=None):
@@ -43,7 +50,7 @@ def _run(tmp_path, monkeypatch, *, workspace=None, samples=None, boxes=None):
     engine = FakeEngine(boxes or {frame: {7: [100 + 45 * frame, 100, 140 + 45 * frame, 112], 12: [100, 200, 140, 212]} for frame in range(1, 7)})
     meta = {"width": 1000, "height": 500, "fps": 30, "frameCount": 8, "source_frame_indices": list(range(8))}
     monkeypatch.setattr("app.tracker._probe_video", lambda path: meta)
-    monkeypatch.setattr("app.tracker.read_video", lambda *a, **kw: ([object()] * 8, meta))
+    monkeypatch.setattr("app.tracker.SourceVideoWindow", lambda *a, **kw: FakeWindow(meta))
     monkeypatch.setattr("app.tracker.get_sam3_engine", lambda *a: engine)
     monkeypatch.setattr("app.tracker._render_overlay_video", lambda *a, **kw: None)
     result = track_video(str(tmp_path / "video.avi"), str(seed), str(tmp_path / "tracker_results.json"), 8, normal_feedback=samples)
@@ -151,10 +158,10 @@ def _geometry_segment(tmp_path, monkeypatch, seed_frame, seed_box, boxes):
         {"object_id": 7, "name": "sperm7", "bbox": seed_box, "source": "manual" if seed_frame == 0 else "ai"},
         {"object_id": 12, "name": "sperm12", "bbox": [100, 200, 140, 220], "source": "manual" if seed_frame == 0 else "ai"},
     ]}))
-    engine = FakeEngine(boxes)
+    engine = FakeEngine(boxes, source_start=seed_frame)
     meta = {"width": 696, "height": 512, "fps": 4, "frameCount": 8, "source_frame_indices": list(range(8))}
     monkeypatch.setattr("app.tracker._probe_video", lambda path: meta)
-    monkeypatch.setattr("app.tracker.read_video", lambda *a, **kw: ([object()] * 8, meta))
+    monkeypatch.setattr("app.tracker.SourceVideoWindow", lambda *a, **kw: FakeWindow({**meta,'source_frame_indices':list(range(seed_frame,8))}))
     monkeypatch.setattr("app.tracker.get_sam3_engine", lambda *a: engine)
     monkeypatch.setattr("app.tracker._render_overlay_video", lambda *a, **kw: None)
     return track_video(str(tmp_path / "video.avi"), str(seed), str(tmp_path / "tracker_results.json"), 8, start_frame=seed_frame)

@@ -39,3 +39,16 @@ test('clear prevents stale pending loads repopulating a new media cache',async()
   resolve(new Blob(['old']));await old
   assert.equal(await (await c.get('a',async()=>new Blob(['new']))).text(),'new')
 })
+test('invalidating an undecodable successful reply allows a fresh download',async()=>{
+  const c=new FrameCache();let calls=0
+  const read=()=>c.get('frame',async()=>new Blob([++calls===1?'broken JPEG':'valid JPEG']))
+  assert.equal(await (await read()).text(),'broken JPEG');c.invalidate('frame')
+  assert.equal(await (await read()).text(),'valid JPEG');assert.equal(calls,2)
+})
+test('invalidating an in-flight frame prevents it replacing a newer cache entry',async()=>{
+  const c=new FrameCache();let resolve
+  const old=c.get('frame',()=>new Promise(r=>{resolve=r}));c.invalidate('frame')
+  await c.get('frame',async()=>new Blob(['new']))
+  resolve(new Blob(['old']));await old
+  assert.equal(await (await c.get('frame',async()=>new Blob(['unexpected']))).text(),'new')
+})

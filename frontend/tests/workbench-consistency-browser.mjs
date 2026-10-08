@@ -218,14 +218,14 @@ try {
   check(await page.getByRole('dialog').getByRole('button', { name: '关闭', exact: true }).evaluate(button => button === document.activeElement), 'expanded-context reverse Tab returns to Close without leaving the modal')
   await page.keyboard.press('b')
   check((await cSession()).progress.decided === 0, 'expanded frame dialog isolates decision shortcuts')
-  await page.route('**/api/track/frame/*/0', route => route.fulfill({ status: 503, json: { message: 'Injected context image failure' } }))
+  let unavailableImageReads = 0
+  await page.route('**/api/track/frame/*/0', route => { unavailableImageReads++; return route.fulfill({ status: 503, json: { message: 'Injected context image failure' } }) })
   await page.getByRole('dialog', { name: '完整帧上下文' }).locator('.context-boxes [data-object-id="2"]').click()
   const contextDialog = page.getByRole('dialog', { name: '完整帧上下文' })
-  await contextDialog.getByRole('alert').waitFor()
-  check(await contextDialog.getByRole('button', { name: '重试加载', exact: true }).isVisible() && await page.getByTestId('choose-a').isDisabled(), 'context image failure provides recovery inside the modal and disables decisions')
+  await cIdle()
+  check(unavailableImageReads === 0 && !await contextDialog.getByRole('alert').count() && (await cSession()).progress.decided === 0, 'same-frame context reuses its loaded image during a frame endpoint outage without making decisions')
   await page.unroute('**/api/track/frame/*/0')
-  await contextDialog.getByRole('button', { name: '重试加载', exact: true }).click(); await cIdle()
-  check(await contextDialog.locator('[data-variant=full]').count() === 1 && (await page.getByTestId('current-item').innerText()).includes('对象 #2'), 'modal retry restores the actual selected object and full frame')
+  check(await contextDialog.locator('[data-variant=full]').count() === 1 && (await page.getByTestId('current-item').innerText()).includes('对象 #2'), 'cached modal navigation retains the actual selected object and full frame')
   const cursorKeys = []
   await page.route('**/api/confirmation/sessions/*/cursor', async route => {
     cursorKeys.push(route.request().headers()['idempotency-key'])

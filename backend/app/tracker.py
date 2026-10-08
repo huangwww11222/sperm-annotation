@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import math
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +13,7 @@ from PIL import Image
 
 from .config import DEVICE, DTYPE, MODEL_ID
 from .annotation_state import is_deleted, read_state
+from .review_source_lock import source_write
 from .services.anomaly_detector import (
     AnomalyConfig,
     AnomalyDetector,
@@ -18,7 +21,7 @@ from .services.anomaly_detector import (
     ConfirmedGeometryReference,
     ManualBaseline,
 )
-from .services.sam3_engine import get_sam3_engine, read_video
+from .services.sam3_engine import get_sam3_engine, SourceVideoWindow
 from .services.visualization import draw_frame, open_video_writer
 
 
@@ -129,7 +132,12 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     text = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
     if text:
         text += "\n"
-    path.write_text(text, encoding="utf-8")
+    temporary = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
+    try:
+        temporary.write_text(text, encoding="utf-8")
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _clean_history_before_seed(
@@ -314,6 +322,7 @@ def rewind_tracking_results(
     retained. The replacement tracking run will upsert/replace frame N when its
     new result is written.
     """
+    began = time.perf_counter()
     cutoff = int(cutoff_frame)
     if cutoff < 0:
         raise ValueError("cutoff_frame must be >= 0")
@@ -331,33 +340,23 @@ def rewind_tracking_results(
         else:
             removed += 1
 
-    _write_jsonl(path, kept)
-
-    overlay_path = path.parent / OVERLAY_FILE_NAME
-    if video_file.is_file():
-        video_meta = dict(meta or {})
-        if not video_meta:
-            video_meta = _probe_video(video_file)
-        try:
-            _render_overlay_video(video_file, overlay_path, video_meta, kept)
-        except Exception as exc:
-            print(f"[tracking-rewind] overlay regeneration failed: {exc}")
+    if removed:
+        _write_jsonl(path, kept)
+        (path.parent / OVERLAY_FILE_NAME).unlink(missing_ok=True)
 
     # Annotation JSON is user data and also the durable source of manual
     # baselines.  Rewinding tracking must never delete it; the next save simply
     # overwrites the selected frame if the user confirms a new annotation.
     deleted_seed_files = 0
 
-    print(
-        f"[tracking-rewind] cutoff={cutoff} kept_rows={len(kept)} "
-        f"removed_rows={removed} deleted_future_seeds={deleted_seed_files}"
-    )
+    logging.getLogger('review.tracking').info('tracking.rewind media=%s cutoff=%s kept=%s removed=%s elapsed_ms=%.1f overlay_regenerated=false',
+        path.parent.name, cutoff, len(kept), removed, (time.perf_counter() - began) * 1000)
     return {
         "cutoffFrame": cutoff,
         "keptRows": len(kept),
         "removedRows": removed,
         "deletedFutureSeedFiles": deleted_seed_files,
-        "overlayRegenerated": video_file.is_file(),
+        "overlayRegenerated": False,
     }
 
 
@@ -369,12 +368,13 @@ def track_video(
     bbox_mode: str = "pixel",
     start_frame: int | None = None,
     normal_feedback: list[dict[str, Any]] | None = None,
+    progress=None,
 ) -> dict[str, Any]:
     """Run SAM3 on the exact original source-frame sequence.
 
     The persisted result is JSONL with one frame object per line, matching the
-    supplied tracker_results.json structure. SAM3 frame_index and source_frame_index
-    are intentionally identical in raw-frame mode.
+    supplied tracker_results.json structure. Published frame_index and
+    source_frame_index match; local model indices are mapped before publication.
     """
     if bbox_mode != "pixel":
         raise ValueError("FastAPI tracker expects pixel bbox input")
@@ -402,30 +402,33 @@ def track_video(
     if requested_source_start != seed_source_frame:
         raise ValueError("startFrame must match the annotation frameIndex")
 
-    # Raw-frame mode: keep the exact source frame sequence.
-    # This deliberately uses the original FPS and original frame indices so
-    # SAM3, tracker_results.json and the browser all share one timeline.
-    frames, meta = read_video(video_file, target_fps=None)
+    # Model indices are local to this bounded window; every external frame,
+    # metric and seed stays on the original source timeline and pixel grid.
+    requested = min(int(max_frames), source_frame_count - seed_source_frame)
+    if progress: progress(stage='decoding', message='正在读取本轮原始帧')
+    began = time.perf_counter()
+    if progress: progress(stage='preparing_model', message='正在准备模型和本轮输入')
+    engine = get_sam3_engine(MODEL_ID, DEVICE, DTYPE)
+    with SourceVideoWindow(video_file, max_frames=requested, target_fps=None, start_frame=seed_source_frame) as window:
+        session = engine.make_tracker_session(window)
+        meta = window.meta
     source_indices = [int(x) for x in meta.get("source_frame_indices", [])]
-    if not frames or not source_indices:
+    if not source_indices:
         raise ValueError("No source frames available")
 
-    # In raw-frame mode the source frame index is the SAM3 session index.
-    seed_frame = seed_source_frame
-    if seed_frame >= len(frames):
-        raise ValueError(f"Seed frame {seed_frame} outside decoded video")
-
-    available = len(frames) - seed_frame
-    requested = min(int(max_frames), available)
+    if source_indices != list(range(seed_source_frame, seed_source_frame + len(source_indices))):
+        raise ValueError('Decoded window does not match the original source-frame sequence')
+    seed_frame = 0
+    requested = len(source_indices)
     if requested <= 0:
         raise ValueError("No frames remain from selected start frame")
 
-    engine = get_sam3_engine(MODEL_ID, DEVICE, DTYPE)
+    logging.getLogger('review.tracking').info('tracking.decoded media=%s start=%s frames=%s width=%s height=%s rgb_bytes=%s elapsed_ms=%.1f',
+        video_file.parent.name, seed_source_frame, requested, width, height, requested * width * height * 3, (time.perf_counter() - began) * 1000)
 
     # IMPORTANT for a 4 GB GPU: preprocessing/storage stay on CPU, while the
     # actual SAM3 inference model remains on CUDA. These are the same controls
     # used by the validated standalone backend.
-    session = engine.make_tracker_session(frames)
     engine.add_manual_boxes(session, seed_frame, objects)
 
     # Restore explicit human decisions for this media. AI history supplies
@@ -472,14 +475,14 @@ def track_video(
         "sam3_object_id": int(obj["object_id"]),
     } for obj in objects]
     new_rows: list[dict[str, Any]] = [{
-        "frame_index": seed_frame,
+        "frame_index": seed_source_idx,
         "source_frame_index": seed_source_idx,
         "objects": seed_rows,
     }]
 
     # 人工确认的 seed 作为可信历史写入，但不把它当作 AI 输出触发暂停。
     detector.initialize_seed(
-        seed_frame,
+        seed_source_idx,
         {int(obj["object_id"]): list(obj["bbox"]) for obj in objects},
     )
 
@@ -487,6 +490,7 @@ def track_video(
     warning_summary: dict[tuple[int, str], dict[str, Any]] = {}
     last_processed_frame = seed_source_idx
     end_frame_exclusive = seed_frame + requested
+    if progress: progress(stage='tracking', message='正在追踪', processedFrames=1, lastProcessedFrame=seed_source_idx)
     for output in engine.propagate_manual(
         session,
         max_frames=requested,
@@ -530,7 +534,7 @@ def track_video(
             oid = int(obj_row["object_id"])
             frame_objs_for_detector[oid] = list(obj_row["bbox"])
         hidden_ids = {oid for oid in active_object_ids if is_deleted(workspace, source_idx, oid)}
-        anomaly_report = detector.push(frame_idx, frame_objs_for_detector, ignored_object_ids=hidden_ids)
+        anomaly_report = detector.push(source_idx, frame_objs_for_detector, ignored_object_ids=hidden_ids)
 
         # A single-frame omission must not end this object's model history.
         # Retain raw predictions for deletion undo. API/workflow readers apply
@@ -561,7 +565,7 @@ def track_video(
                     break
 
         row = {
-            "frame_index": frame_idx,
+            "frame_index": source_idx,
             "source_frame_index": source_idx,
             "objects": object_rows,
             "anomalies": [
@@ -577,6 +581,7 @@ def track_video(
         }
         new_rows.append(row)
         last_processed_frame = source_idx
+        if progress: progress(stage='tracking', message='正在追踪', processedFrames=len(new_rows), lastProcessedFrame=source_idx)
         print(
             f"[sam3] frame={frame_idx} source={source_idx} "
             f"tracked_objects={len(object_rows)}"
@@ -643,22 +648,22 @@ def track_video(
                         "prevArea": details.get("baseline_area"),
                         "currArea": details.get("current_area"),
                     })
-            print(f"[anomaly] HARD detected → pause frame={frame_idx}: {pause_objects}")
+            print(f"[anomaly] HARD detected → pause source_frame={source_idx}: {pause_objects}")
             result_anomaly_paused = {
-                "frame_index": frame_idx,
+                "frame_index": source_idx,
                 "reasons": pause_objects,
                 "levels": {str(k): v.value for k, v in anomaly_report.object_levels.items()},
             }
             break
 
+    if progress: progress(stage='saving_results', message='正在保存追踪结果')
     merged_rows = _merge_rows(Path(output_json), new_rows, keep_before_source_frame=seed_source_idx)
-    overlay_path = Path(output_json).parent / OVERLAY_FILE_NAME
-    _render_overlay_video(video_file, overlay_path, meta, merged_rows)
 
     result = {
         "frames": [{**row, "objects": [obj for obj in row.get("objects", []) if not is_deleted(workspace, int(row["source_frame_index"]), int(obj["object_id"]))]} for row in merged_rows],
         "resultFile": str(Path(output_json).resolve()),
-        "overlayVideo": str(overlay_path.resolve()),
+        "overlayVideo": None,
+        "overlayDeferred": True,
         "startFrame": requested_source_start,
         "requestedFrames": requested,
         "processedFrames": len(new_rows),
@@ -688,10 +693,11 @@ def track_video(
         {oid: ref.frame_index for oid, ref in detector.geometry_references.items()}, list(warning_summary.values()),
     )
     print(f"[sam3] result jsonl: {output_json}")
-    print(f"[sam3] overlay mp4: {overlay_path}")
+    print('[sam3] full-video preview is generated only when requested')
     return result
 
 
+@source_write
 def _merge_rows(
     path: Path,
     new_rows: list[dict[str, Any]],
@@ -722,6 +728,7 @@ def _merge_rows(
 
     ordered = [merged[key] for key in sorted(merged)]
     _write_jsonl(path, ordered)
+    (path.parent / OVERLAY_FILE_NAME).unlink(missing_ok=True)
     return ordered
 
 

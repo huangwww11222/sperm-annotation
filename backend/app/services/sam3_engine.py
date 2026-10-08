@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import math
 import os
+import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -36,69 +38,73 @@ def _as_numpy(value: Any) -> np.ndarray | None:
         return None
 
 
-def read_video(
-    video_path: str | Path,
-    max_frames: int | None = None,
-    target_fps: float | None = None,
-) -> tuple[list[Image.Image], dict[str, Any]]:
-    """Read RGB PIL frames using the same global sampling idea as 01_test.
+class SourceVideoWindow:
+    """Single-pass native frames. The caller retains only its current batch."""
 
-    When target_fps is lower than source FPS, frames are sampled at a fixed
-    source-frame interval. source_frame_indices maps each sampled frame back
-    to the original video frame number.
-    """
-    path = Path(video_path)
-    if not path.is_file():
-        raise FileNotFoundError(f"Video not found: {path}")
+    def __init__(self, video_path, max_frames=None, target_fps=None, start_frame=0):
+        if start_frame < 0 or (max_frames is not None and max_frames < 1):
+            raise ValueError('Invalid source-frame window')
+        self.path = Path(video_path)
+        self.max_frames, self.target_fps, self.start_frame = max_frames, target_fps, start_frame
+        self.cap = None
+        self.meta = {}
+        self.consumed = False
 
-    cap = cv2.VideoCapture(str(path))
-    if not cap.isOpened():
-        raise ValueError(f"Cannot open video: {path}")
+    def __enter__(self):
+        if not self.path.is_file():
+            raise FileNotFoundError(f'Video not found: {self.path}')
+        from ..video_frames import open_capture_at
+        self.cap = open_capture_at(self.path, self.start_frame)
+        fps = float(self.cap.get(cv2.CAP_PROP_FPS) or 0)
+        requested_fps = float(self.target_fps or 0)
+        interval = max(1, int(round(fps / requested_fps))) if 0 < requested_fps < fps else 1
+        self.meta = dict(name=self.path.name, width=int(self.cap.get(3)), height=int(self.cap.get(4)),
+                         fps=fps / interval if fps else requested_fps, source_fps=fps,
+                         frameCount=int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0),
+                         sample_interval=interval, source_frame_indices=[])
+        return self
 
-    source_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    def __exit__(self, *args):
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
 
-    requested_fps = float(target_fps or 0.0)
-    if requested_fps > 0 and source_fps > 0 and requested_fps < source_fps:
-        sample_interval = max(1, int(round(source_fps / requested_fps)))
-    else:
-        sample_interval = 1
+    def __len__(self):
+        n = self.meta['frameCount']
+        interval = self.meta['sample_interval']
+        first = self.start_frame + (-self.start_frame % interval)
+        remaining = max(0, (n - first + interval - 1) // interval)
+        return min(remaining, self.max_frames) if self.max_frames else remaining
 
-    process_fps = source_fps / sample_interval if source_fps > 0 else requested_fps
-    frames: list[Image.Image] = []
-    source_frame_indices: list[int] = []
-
-    source_idx = 0
-    try:
-        while True:
-            ok, frame = cap.read()
+    def __iter__(self):
+        if self.cap is None or self.consumed:
+            raise ValueError('Source window must be opened and consumed once')
+        self.consumed = True
+        index, count = self.start_frame, 0
+        while self.max_frames is None or count < self.max_frames:
+            ok, frame = self.cap.read()
             if not ok:
                 break
-            if source_idx % sample_interval == 0:
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frames.append(Image.fromarray(rgb))
-                source_frame_indices.append(source_idx)
-                if max_frames is not None and len(frames) >= max_frames:
-                    break
-            source_idx += 1
-    finally:
-        cap.release()
+            if frame.shape[:2] != (self.meta['height'], self.meta['width']):
+                raise ValueError(f'Source image size changed at frame {index}')
+            if index % self.meta['sample_interval'] == 0:
+                self.meta['source_frame_indices'].append(index)
+                count += 1
+                yield Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            index += 1
+        if not count:
+            raise ValueError(f'Video contains no readable frames: {self.path}')
+        if self.max_frames is not None and self.meta['frameCount'] and count != len(self):
+            raise ValueError(f'Cannot decode source window: expected {len(self)} frames from {self.start_frame}, got {count}')
+        if not self.meta['frameCount']:
+            self.meta['frameCount'] = index
 
-    if not frames:
-        raise ValueError(f"Video contains no readable frames: {path}")
 
-    return frames, {
-        "name": path.name,
-        "width": width,
-        "height": height,
-        "fps": process_fps,
-        "source_fps": source_fps,
-        "frameCount": frame_count or source_idx + 1,
-        "sample_interval": sample_interval,
-        "source_frame_indices": source_frame_indices,
-    }
+def read_video(video_path, max_frames=None, target_fps=None, start_frame=0):
+    """Compatibility materializer; production tracking consumes SourceVideoWindow."""
+    with SourceVideoWindow(video_path, max_frames, target_fps, start_frame) as window:
+        frames = list(window)
+        return frames, window.meta
 
 
 class Sam3Engine:
@@ -172,13 +178,15 @@ class Sam3Engine:
             from transformers import Sam3TrackerVideoModel, Sam3TrackerVideoProcessor
 
             kwargs = self._pretrained_kwargs()
+            started = time.perf_counter()
             print(f"[sam3] loading tracker from: {self.model_id}")
             print(f"[sam3] device={self.device}, dtype={self.torch_dtype}")
-            self.tracker_model = Sam3TrackerVideoModel.from_pretrained(self.model_id, **kwargs).to(
+            self.tracker_model = Sam3TrackerVideoModel.from_pretrained(self.model_id, dtype=self.torch_dtype, **kwargs).to(
                 self.device, dtype=self.torch_dtype
             )
             self.tracker_processor = Sam3TrackerVideoProcessor.from_pretrained(self.model_id, **kwargs)
             self.tracker_model.eval()
+            logging.getLogger('review.tracking').info('tracking.model_ready device=%s dtype=%s elapsed_ms=%.1f', self.device, self.torch_dtype, (time.perf_counter()-started)*1000)
             print("[sam3] tracker loaded once and cached.")
 
     @property
@@ -189,17 +197,44 @@ class Sam3Engine:
     def processor(self):
         return self.tracker_processor
 
-    def make_tracker_session(self, frames: list[Image.Image]):
+    def make_tracker_session(self, frames):
         self.load_tracker()
-        return self.tracker_processor.init_video_session(
-            video=frames,
-            inference_device=self.device,
-            processing_device="cpu",
-            inference_state_device="cpu",
-            video_storage_device="cpu",
-            dtype=self.torch_dtype,
-            max_vision_features_cache_size=1,
-        )
+        from transformers import Sam3TrackerVideoInferenceSession
+        # Use exactly the standard video processor, only in small batches.
+        # Avoid stacking/resizing all native 4K frames in a single allocation.
+        started = time.perf_counter()
+        count, written, batch, storage, original_size = len(frames), 0, [], None, None
+        if count < 1:
+            raise ValueError('No source frames available')
+        def process():
+            nonlocal written, storage, original_size
+            inputs = self.tracker_processor.video_processor(videos=batch, device='cpu', return_tensors='pt')
+            size = tuple(int(x) for x in inputs.original_sizes[0])
+            if original_size is not None and size != original_size:
+                raise ValueError('Source image size changed during preprocessing')
+            original_size = size
+            pixels = inputs.pixel_values_videos[0]
+            if pixels.shape[0] != len(batch) or written + len(batch) > count:
+                raise ValueError('Video processor changed the source-frame sequence')
+            if storage is None:
+                storage = torch.empty((count, *pixels.shape[1:]), device='cpu', dtype=self.torch_dtype)
+            storage[written:written + len(batch)].copy_(pixels)
+            written += len(batch)
+            batch.clear()
+        with torch.inference_mode():
+            for frame in frames:
+                batch.append(frame)
+                if len(batch) == 2:
+                    process()
+            if batch:
+                process()
+        if written != count or storage is None:
+            raise ValueError(f'Incomplete video preprocessing: expected {count}, got {written}')
+        logging.getLogger('review.tracking').info('tracking.preprocessed frames=%s raw_batch_frames=2 storage_bytes=%s elapsed_ms=%.1f',
+            written, storage.numel() * storage.element_size(), (time.perf_counter() - started) * 1000)
+        return Sam3TrackerVideoInferenceSession(video=storage, video_height=original_size[0], video_width=original_size[1],
+            inference_device=self.device, inference_state_device='cpu', video_storage_device='cpu',
+            dtype=self.torch_dtype, max_vision_features_cache_size=1)
 
     def add_manual_boxes(self, session, frame_index: int, objects: list[dict[str, Any]]) -> None:
         self.load_tracker()
@@ -223,20 +258,8 @@ class Sam3Engine:
             show_progress_bar=False,
         )
 
-    def decode_tracker_output(self, session, output) -> tuple[list[TrackDetection], dict[int, np.ndarray]]:
+    def decode_tracker_output(self, session, output, keep_masks=False) -> tuple[list[TrackDetection], dict[int, np.ndarray]]:
         self.load_tracker()
-        masks = self.tracker_processor.post_process_masks(
-            [output.pred_masks],
-            original_sizes=[[session.video_height, session.video_width]],
-            binarize=True,
-        )[0]
-        masks_np = _as_numpy(masks)
-        if masks_np is None:
-            return [], {}
-        masks_np = np.asarray(masks_np)
-        if masks_np.ndim == 4 and masks_np.shape[1] == 1:
-            masks_np = masks_np[:, 0]
-
         ids = [int(x) for x in getattr(session, "obj_ids", [])]
         scores_np = _as_numpy(getattr(output, "object_score_logits", None))
         if scores_np is not None:
@@ -246,24 +269,36 @@ class Sam3Engine:
         detections: list[TrackDetection] = []
         mask_map: dict[int, np.ndarray] = {}
         for i, object_id in enumerate(ids):
-            mask = masks_np[i] if i < len(masks_np) else None
-            if mask is None:
+            if i >= output.pred_masks.shape[0]:
                 continue
-            ys, xs = np.where(mask > 0.5)
-            if len(xs) == 0:
+            # Standard interpolation/binarization on the original device, one
+            # object at a time. Tracking consumes geometry, not retained masks.
+            masks = self.tracker_processor.post_process_masks([output.pred_masks[i:i+1]],
+                original_sizes=[[session.video_height, session.video_width]], binarize=True)[0]
+            masks_np = _as_numpy(masks)
+            if masks_np is None:
                 continue
-            bbox = [float(xs.min()), float(ys.min()), float(xs.max() + 1), float(ys.max() + 1)]
+            mask = np.asarray(masks_np)[0]
+            if mask.ndim == 3 and mask.shape[0] == 1:
+                mask = mask[0]
+            occupied = mask > .5
+            ys = np.flatnonzero(occupied.any(axis=1))
+            xs = np.flatnonzero(occupied.any(axis=0))
+            if not len(xs) or not len(ys):
+                continue
+            bbox = [float(xs[0]), float(ys[0]), float(xs[-1] + 1), float(ys[-1] + 1)]
             score = float(scores_np[i]) if scores_np is not None and i < len(scores_np) else None
             detections.append(
                 TrackDetection(
                     object_id=object_id,
                     bbox=bbox,
                     score=score,
-                    mask_area=int(mask.sum()),
+                    mask_area=int(np.count_nonzero(occupied)),
                     sam3_object_id=object_id,
                 )
             )
-            mask_map[object_id] = mask
+            if keep_masks:
+                mask_map[object_id] = mask
         return detections, mask_map
 
     @staticmethod

@@ -31,7 +31,7 @@ def test_tracking_requires_explicit_per_object_feedback_before_resume() -> None:
     store = (ROOT / "frontend/src/stores/workspace.ts").read_text(encoding="utf-8")
     panel = (ROOT / "frontend/src/components/AnnotationTrackingFeedback.vue").read_text(encoding="utf-8")
     api = (ROOT / "frontend/src/api/trackApi.ts").read_text(encoding="utf-8")
-    run = store[store.index("const runAiTrack"):store.index("const buildSam3AnnotationsJson")]
+    run = store[store.index("const performTracking"):store.index("const buildSam3AnnotationsJson")]
     assert "confirmedPausedIds" not in run
     assert "请先逐项确认暂停对象" in run
     assert "const prepareTrackingFeedback" in store
@@ -96,7 +96,7 @@ def test_workspace_state_is_restored_before_tracking_results_and_uses_canonical_
     tracker = (ROOT / "backend/app/tracker.py").read_text(encoding="utf-8")
 
     reset_block = store[store.index("const resetAnnotationViewForMedia"):store.index("const loadServerMedia")]
-    assert reset_block.index("restoreWorkspaceState(mediaId)") < reset_block.index("loadTrackingResult(mediaId, true)")
+    assert reset_block.index("restoreWorkspaceState(mediaId)") < reset_block.index("loadTrackingResult(mediaId, true, true)")
     assert "media.serverMediaId || mediaId" in store
     assert "getWorkspaceState" in api and "saveWorkspaceState" in api
     assert 'WORKSPACE_STATE_FILE_NAME = "workspace_state.json"' in tracker

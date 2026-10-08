@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { createRequestId } from '../utils/browserCompat'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { confirmationApi as api, type Change, type ConfirmationSession, type FrameContext, type Operation, type Action, type Choice, type Failure } from '../api/confirmationApi'
+import { confirmationApi as api, type Change, type ConfirmationSession, type FrameContext, type Operation, type Action, type Choice, type Failure, type Result } from '../api/confirmationApi'
 import WorkflowProgress from '../components/WorkflowProgress.vue'
 import WorkbenchHeader from '../components/WorkbenchHeader.vue'
 import WorkbenchLayout from '../components/WorkbenchLayout.vue'
@@ -9,6 +9,7 @@ import ConfirmationImage from '../confirmation/ConfirmationImage.vue'
 import TrainingDatasetExport from '../components/TrainingDatasetExport.vue'
 import { addLeaveGuard } from '../router'
 import { useAuth } from '../stores/auth'
+import { invalidateSourceFrame } from '../api/sourceFrameApi'
 
 const sessions=ref<ConfirmationSession[]>([]), session=ref<ConfirmationSession|null>(null), items=ref<Change[]>([])
 const selected=ref<string|null>(null), context=ref<FrameContext|null>(null), imageUrl=ref('')
@@ -75,6 +76,23 @@ function fail(e:unknown,action:string) {
   console.error('[confirmation.operation_failed]',{action,sessionId:session.value?.id,changeId:selected.value,...f})
 }
 function update(s:ConfirmationSession) { session.value=s;sessions.value=sessions.value.map(x=>x.id===s.id?s:x) }
+async function applyResult(r:Result,action:Action) {
+  const previous=session.value?.revision??r.session.revision
+  const allowed=action==='cursor'?0:1
+  if(r.itemsScope==='changed'&&(r.session.revision<previous||r.session.revision>previous+allowed)) {
+    // Another window changed business state: refresh instead of leaving a
+    // partial list stale or silently rebasing an unconfirmed operation.
+    const [s,cs]=await Promise.all([api.session(r.session.id),api.changes(r.session.id)])
+    update(s);items.value=cs.items
+    r.session=s;r.nextPendingChangeId=s.resume.firstPendingChangeId
+  } else {
+    update(r.session)
+    if(r.itemsScope==='changed') {
+      const updates=new Map(r.items.map(item=>[item.changeId,item]))
+      items.value=items.value.map(item=>updates.get(item.changeId)||item)
+    } else items.value=r.items
+  }
+}
 function prefs() {
   try {localStorage.setItem(prefKey,JSON.stringify({mode:mode.value,zoom:zoom.value,autoNext:autoNext.value,sid:session.value?.id}))}
   catch(e) {console.warn('[confirmation.preferences_unavailable]',e)}
@@ -88,7 +106,8 @@ watch(modal,async(value,old)=>{
   if(value){if(!old)previousFocus=document.activeElement as HTMLElement;await nextTick();dialog.value?.querySelector<HTMLElement>('button')?.focus()}
   else previousFocus?.focus()
 })
-function clearImage() {if(imageUrl.value)URL.revokeObjectURL(imageUrl.value);imageUrl.value='';context.value=null}
+let imageSessionId = ''
+function clearImage() {if(imageUrl.value)URL.revokeObjectURL(imageUrl.value);imageUrl.value='';context.value=null;imageSessionId=''}
 async function list() {
   try {sessions.value=(await api.list()).items;readRetry=null;error.value=''}
   catch(e){fail(e,'list');readRetry=list}
@@ -96,14 +115,21 @@ async function list() {
 async function loadItem(id:string|null,savePosition=true) {
   if(!session.value)return
   const sid=session.value.id,item=items.value.find(x=>x.changeId===id)
-  selected.value=item?.changeId??null;jump.value=String(Math.max(0,index.value)+1);clearImage()
+  selected.value=item?.changeId??null;jump.value=String(Math.max(0,index.value)+1)
+  // Fixed A/B geometry and native pixels are unchanged between objects in the
+  // same frozen frame. Reuse them, while saving each decision/cursor normally.
+  if(imageSessionId===sid&&context.value?.frameIndex===(item?.frameIndex??0)&&imageUrl.value) {
+    if(savePosition&&!pending.value)await bookmark()
+    return
+  }
+  clearImage()
   try {
     const [ctx,blob]=await Promise.all([api.frame(sid,item?.frameIndex??0),api.image(session.value.media.mediaId,item?.frameIndex??0)])
     const url=URL.createObjectURL(blob),img=new Image();img.src=url
     try {await img.decode();if(img.naturalWidth!==session.value.media.width||img.naturalHeight!==session.value.media.height)throw {message:'图像尺寸与固定版本不一致，已停止选择。'}}
-    catch(e){URL.revokeObjectURL(url);throw e}
+    catch(e){invalidateSourceFrame(session.value.media.mediaId,item?.frameIndex??0);URL.revokeObjectURL(url);throw e}
     if(!alive){URL.revokeObjectURL(url);return}
-    context.value=ctx;imageUrl.value=url;readRetry=null
+    context.value=ctx;imageUrl.value=url;imageSessionId=sid;readRetry=null
     if(savePosition&&!pending.value)await bookmark()
   } catch(e) {fail(e,'load_frame');readRetry=()=>selectItem(id)}
 }
@@ -138,7 +164,7 @@ async function bookmark() {
       op={...op,key:createRequestId(),body:{...op.body,expectedCursorRevision:fresh.resume.cursorRevision}}
       r=await api.operate(op)
     }
-    update(r.session);items.value=r.items
+    await applyResult(r,'cursor')
   }catch(e){pending.value=op;persistIntent();fail(e,'bookmark')}
 }
 function operation(action:Action,body:Record<string,unknown>={},changeId?:string) {
@@ -153,7 +179,7 @@ async function retry():Promise<boolean> {
   let success=false
   try {
     const r=await api.operate(op)
-    update(r.session);items.value=r.items;pending.value=null;persistIntent();success=true
+    await applyResult(r,op.action);pending.value=null;persistIntent();success=true
     notice.value=op.action==='finish'?'已生成完整视频的最终版本。':op.action==='reopen'?'已重新开放确认，保留已有选择和历史最终版本。':op.action==='return'?'已退回本帧重审。其他帧的选择保留，审查员重新提交并完成视频后可继续确认。':op.action==='undo'?'已撤销上一次选择，并返回该项。':'已保存到服务器。'
     let target=op.action==='undo'?r.selectedChangeId:selected.value
     if(op.action==='decide'&&autoNext.value&&r.nextPendingChangeId)target=r.nextPendingChangeId

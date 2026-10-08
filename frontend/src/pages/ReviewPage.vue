@@ -5,6 +5,7 @@ import WorkbenchHeader from '../components/WorkbenchHeader.vue'
 import WorkbenchLayout from '../components/WorkbenchLayout.vue'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { reviewWorkflowApi as api, type Frame, type Session, type Mutation, type Failure } from '../api/reviewWorkflowApi'
+import { sourceFrameBlob, invalidateSourceFrame } from '../api/sourceFrameApi'
 import { clone, equal, patches, metrics, dragBox, crop, type ReviewObject, type Box } from '../review/geometry'
 import { useRouter, addLeaveGuard } from '../router'
 
@@ -92,9 +93,10 @@ async function loadFrame(index:number,showDraft=true) {
   busy.value=true;error.value=''
   let url=''
   try {
-    const f=await api.frame(session.value.id,index)
-    url=await api.image(session.value.mediaId,index)
+    const [f,blob]=await Promise.all([api.frame(session.value.id,index),sourceFrameBlob(session.value.mediaId,index)])
+    url=URL.createObjectURL(blob)
     await new Promise<void>((resolve,reject)=>{const img=new Image();img.onload=()=>resolve();img.onerror=()=>reject(new Error('帧图像无法解码'));img.src=url})
+      .catch(e=>{invalidateSourceFrame(session.value!.mediaId,index);throw e})
     if(!alive){URL.revokeObjectURL(url);return false}
     if(imageUrl.value) URL.revokeObjectURL(imageUrl.value)
     imageUrl.value=url;applyFrame(f);history.value=[];selected.value=null
