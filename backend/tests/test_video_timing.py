@@ -14,7 +14,8 @@ def _write_video(path: Path, fps: float, frame_count: int = 8) -> None:
     if not writer.isOpened():
         pytest.skip("OpenCV MJPG writer is unavailable in this environment")
     for index in range(frame_count):
-        writer.write(np.full((48, 64, 3), index, dtype=np.uint8))
+        # Distinct levels remain distinguishable after lossy MJPG encoding.
+        writer.write(np.full((48, 64, 3), 16 + index * 24, dtype=np.uint8))
     writer.release()
 
 
@@ -41,4 +42,19 @@ def test_bounded_reader_seeks_to_exact_source_window(tmp_path, start, count, exp
     assert meta['source_frame_indices'] == expected
     assert meta['frameCount'] == 8
     assert frames[0].size == (64, 48)
-    assert float(np.asarray(frames[0]).mean()) == pytest.approx(start, abs=1)
+    # Compare with independent sequential decoding, not the pre-encoding
+    # brightness: MJPG/YUV rounding differs between platform codec builds.
+    reference = []
+    capture = cv2.VideoCapture(str(video))
+    try:
+        while True:
+            ok, frame = capture.read()
+            if not ok:
+                break
+            reference.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    finally:
+        capture.release()
+    assert len(reference) == 8
+    for actual, source_index in zip(frames, expected, strict=True):
+        np.testing.assert_array_equal(np.asarray(actual), reference[source_index])
+    assert not np.array_equal(reference[start], reference[start - 1])
