@@ -12,7 +12,7 @@ import cv2
 from PIL import Image
 
 from .config import DEVICE, DTYPE, MODEL_ID
-from .annotation_state import is_deleted, read_state
+from .annotation_state import is_deleted, read_state, remember_tracking_results
 from .review_source_lock import source_write
 from .services.anomaly_detector import (
     AnomalyConfig,
@@ -136,6 +136,7 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     try:
         temporary.write_text(text, encoding="utf-8")
         temporary.replace(path)
+        remember_tracking_results(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
 

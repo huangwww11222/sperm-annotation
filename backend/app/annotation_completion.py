@@ -6,12 +6,13 @@ by the workspace's last author. Mutable UI state is excluded from source revisio
 
 import hashlib
 import json
+import logging
 import re
 import uuid
 from contextlib import closing
 from . import review_workflow as w
 from .db import connect
-from .annotation_state import is_deleted
+from .annotation_state import is_deleted, RESULT_META_FILE, normalize_tracking_row
 
 
 def integer(value, label):
@@ -21,11 +22,16 @@ def integer(value, label):
 
 
 def source(directory, uid, info):
+    tracker = directory / "tracker_results.json"
+    if not tracker.exists() and (directory / RESULT_META_FILE).exists():
+        logging.getLogger('review.annotation').error('annotation.completion_results_missing media=%s', directory.name)
+        raise w.ReviewError(
+            'TRACKING_RESULTS_MISSING', '已生成的追踪结果文件缺失，无法送审；请管理员检查存储或恢复备份', 409
+        )
     try:
         workspace = json.loads(
             (directory / "workspace_state.json").read_text(encoding="utf-8")
         )
-        tracker = directory / "tracker_results.json"
         raw = tracker.read_text(encoding="utf-8") if tracker.exists() else ""
     except (OSError, ValueError) as e:
         raise w.ReviewError(
@@ -60,6 +66,7 @@ def source(directory, uid, info):
             )
         frames = {}
         for row in rows:
+            row = normalize_tracking_row(row)
             fi = integer(
                 row.get(
                     "source_frame_index", row.get("frame_index", row.get("frameIndex"))

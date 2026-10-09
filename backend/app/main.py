@@ -13,13 +13,14 @@ import tempfile
 import time
 import hashlib
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.responses import Response, JSONResponse
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
-from .auth import current_user, hash_password, sign_jwt, verify_password
+from .auth import current_user, current_video_user, clear_video_session, set_video_session, hash_password, sign_jwt, verify_password
 from .config import (
     DATASET_EXPORT_DIR, DB_FILE, DEVICE, DTYPE, HOST, JWT_SECRET, LEGACY_TRACK_DATA_DIR, MAX_VIDEO_BYTES, MODEL_ID, PORT,
     TRACK_DATA_DIR, TRACK_FRAMES, SAM3_ENABLED,
@@ -61,6 +62,7 @@ register_review_routers(app)
 TRACK_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sam3-track")
 TASKS: dict[str, dict[str, Any]] = {}
 TASK_LOCK = threading.Lock()
+UPLOAD_LOCK = threading.Lock()
 
 def require_tracking_enabled() -> None:
     if not SAM3_ENABLED:
@@ -137,7 +139,7 @@ def health() -> dict[str, Any]:
 
 # ---------------------------- auth ----------------------------
 @app.post("/api/auth/register", status_code=201)
-def register(req: AuthRequest) -> dict[str, Any]:
+def register(req: AuthRequest, request: Request, response: Response) -> dict[str, Any]:
     name = req.username.strip()
     if not name or not req.password:
         raise HTTPException(400, "账号和密码不能为空")
@@ -146,24 +148,33 @@ def register(req: AuthRequest) -> dict[str, Any]:
     if get_user(name):
         raise HTTPException(409, "账号已存在")
     uid = create_user(name, hash_password(req.password))
+    set_video_session(response, request, uid)
     return {"token": sign_jwt({"uid": uid, "username": name}), "user": {"id": uid, "username": name}}
 
 
 @app.post("/api/auth/login")
-def login(req: AuthRequest) -> dict[str, Any]:
+def login(req: AuthRequest, request: Request, response: Response) -> dict[str, Any]:
     user = get_user(req.username.strip())
     if not user or not verify_password(req.password, user["password_hash"]):
         raise HTTPException(401, "账号或密码错误")
     uid = int(user["id"])
+    set_video_session(response, request, uid)
     return {"token": sign_jwt({"uid": uid, "username": user["username"]}), "user": {"id": uid, "username": user["username"]}}
 
 
 @app.get("/api/auth/me")
-def me(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+def me(request: Request, response: Response, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     row = get_user_by_id(user["uid"])
     if not row:
         raise HTTPException(404, "用户不存在")
+    set_video_session(response, request, int(row['id']))
     return {"id": int(row["id"]), "username": row["username"]}
+
+
+@app.post('/api/auth/logout')
+def logout(response: Response) -> dict[str, bool]:
+    clear_video_session(response)
+    return {'ok': True}
 
 
 # -------------------------- annotation --------------------------
@@ -275,12 +286,14 @@ def remove_annotation(annotation_id: int, user: dict[str, Any] = Depends(current
 def safe_stem(filename: str) -> str:
     stem = Path(Path(filename).name).stem
     clean = "".join("_" if c in '<>:"/\\|?*' or ord(c) < 32 else c for c in stem).strip()
-    return clean or f"video-{uuid.uuid4().hex[:8]}"
+    return clean if clean and clean not in {'.','..'} else f"video-{uuid.uuid4().hex[:8]}"
 
 
 def media_dir(media_id: str) -> Path:
     """Return the new storage path, or a matching legacy media directory."""
-    safe_id = Path(media_id).name
+    if not isinstance(media_id, str) or not media_id or media_id in {'.', '..'} or any(c in media_id for c in ('/', '\\', '\x00')):
+        raise HTTPException(422, 'mediaId 必须是规范的素材标识')
+    safe_id = media_id
     current = TRACK_DATA_DIR / safe_id
     legacy = LEGACY_TRACK_DATA_DIR / safe_id
     if not current.is_dir() and legacy.is_dir():
@@ -379,11 +392,32 @@ def _video_media_type(path: Path) -> str:
     return guessed if guessed and guessed.startswith("video/") else "application/octet-stream"
 
 
+def source_media_info(directory: Path) -> dict[str, Any]:
+    video = find_video(directory)
+    if not video:
+        raise HTTPException(404, '素材不存在')
+    try:
+        info = json.loads((directory / 'media.json').read_text(encoding='utf-8'))
+        if not isinstance(info, dict) or any(type(info.get(k)) not in (int, float) or info[k] <= 0 for k in ('width', 'height', 'frameCount')):
+            raise ValueError('incomplete media metadata')
+        return info
+    except (OSError, ValueError):
+        try:
+            return _probe_video(video)
+        except Exception as exc:
+            logging.getLogger('review.media').exception('media.metadata_read_failed media=%s', directory.name)
+            raise HTTPException(500, '原视频元数据无法读取，请检查存储并重试') from exc
+
+
 async def save_upload(upload: UploadFile, target: Path) -> int:
+    return await run_in_threadpool(_save_upload_stream,upload.file,target)
+
+
+def _save_upload_stream(stream, target: Path) -> int:
     total = 0
     with target.open("wb") as out:
         while True:
-            chunk = await upload.read(1024 * 1024)
+            chunk = stream.read(1024 * 1024)
             if not chunk:
                 break
             total += len(chunk)
@@ -406,19 +440,48 @@ async def upload_video(file: UploadFile = File(...), user: dict[str, Any] = Depe
             if size <= 0:
                 raise HTTPException(400, "视频文件为空")
             try:
-                video_meta = _probe_video(target)
+                video_meta = await run_in_threadpool(_probe_video,target)
             except Exception as exc:
                 raise HTTPException(400, f"无法解码该视频格式：{exc}") from exc
             if any(float(video_meta.get(key) or 0) <= 0 for key in ("frameCount", "width", "height", "fps")):
                 raise HTTPException(400, "上传文件不可读取，或无法获得有效的帧数、尺寸、FPS 元数据")
-            return publish_upload(target, filename, video_meta, user["uid"])
+            return await run_in_threadpool(publish_upload,target, filename, video_meta, user["uid"])
     finally:
         await file.close()
 
 
 @source_write
+def _upload_source_snapshot():
+    return [(directory,video,media_reimport.source_fingerprint(video))
+            for directory in iter_media_dirs() if (video := find_video(directory))]
+
+
 def publish_upload(target, filename, video_meta, uid):
-    existing, sha = media_reimport.duplicate(iter_media_dirs(), find_video, target)
+    began = time.perf_counter()
+    # Imports serialize with each other, but long hashing/decoding must not hold
+    # the lock needed by another video's annotation/review writes.
+    with UPLOAD_LOCK:
+        for attempt in range(3):
+            snapshot = _upload_source_snapshot()
+            videos = {directory:video for directory,video,_ in snapshot}
+            try:
+                existing,sha = media_reimport.duplicate(videos, videos.get, target)
+            except OSError as exc:
+                if snapshot != _upload_source_snapshot():
+                    continue  # Deletion during hashing: take a fresh source snapshot.
+                logging.getLogger('review.media').exception('media.upload_prepare_failed actor=%s',uid)
+                raise HTTPException(500,'上传视频查重失败，请检查存储并重试') from exc
+            result = _commit_upload(target,filename,video_meta,uid,snapshot,existing,sha)
+            if result is not None:
+                logging.getLogger('review.media').info('media.upload_prepared actor=%s elapsed_ms=%.1f retries=%s',uid,(time.perf_counter()-began)*1000,attempt)
+                return result
+        raise HTTPException(409,'素材库在导入期间发生变化，请重试上传')
+
+
+@source_write
+def _commit_upload(target, filename, video_meta, uid, snapshot, existing, sha):
+    if snapshot != _upload_source_snapshot():
+        return None
     if existing:
         duplicate = media_reimport.duplicate_data(existing, uid)
         source = find_video(existing)
@@ -434,6 +497,7 @@ def publish_upload(target, filename, video_meta, uid):
         target.replace(video)
         duration = video_meta["frameCount"] / video_meta["fps"]
         meta = {"mediaId": media_id, "videoName": filename, "videoPath": str(video.resolve()), "videoMimeType": _video_media_type(video), "createdBy": uid, "sha256": sha, **video_meta, "duration": duration}
+        meta['sourceFingerprint'] = media_reimport.source_fingerprint(video)
         (directory / "media.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         import shutil
@@ -448,10 +512,14 @@ def publish_upload(target, filename, video_meta, uid):
 def save_frame_annotations(req: dict[str, Any], user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     if tracking_is_busy():
         raise HTTPException(409, "SAM3 Tracking 正在运行，暂时禁止人工标注")
-    frame = int(req.get("frameIndex", -1))
+    frame = req.get("frameIndex", -1)
     annotations = req.get("annotations")
-    if not req.get("mediaId") or frame < 0 or not isinstance(annotations, list) or not annotations:
+    if not req.get("mediaId") or type(frame) is not int or frame < 0 or not isinstance(annotations, list) or not annotations:
         raise HTTPException(400, "mediaId/frameIndex/annotations 无效")
+    directory = media_dir(req['mediaId'])
+    info = source_media_info(directory)
+    if frame >= info['frameCount']:
+        raise HTTPException(422, 'seed 帧号超过原视频范围')
 
     # Seed identity 必须由前端显式传递并保持稳定；严禁按数组顺序重新编号。
     normalized_annotations: list[dict[str, Any]] = []
@@ -460,10 +528,9 @@ def save_frame_annotations(req: dict[str, Any], user: dict[str, Any] = Depends(c
         if not isinstance(raw, dict):
             raise HTTPException(400, f"annotations[{idx}] 无效")
         object_id_raw = raw.get("object_id", raw.get("objectId"))
-        try:
-            object_id = int(object_id_raw)
-        except (TypeError, ValueError):
+        if type(object_id_raw) is not int:
             raise HTTPException(400, f"annotations[{idx}] 缺少有效 object_id")
+        object_id = object_id_raw
         if object_id <= 0:
             raise HTTPException(400, f"annotations[{idx}] object_id 必须大于 0")
         if object_id in seen_object_ids:
@@ -472,24 +539,34 @@ def save_frame_annotations(req: dict[str, Any], user: dict[str, Any] = Depends(c
         ann = dict(raw)
         ann["object_id"] = object_id
         ann["objectId"] = object_id
-        ann["frameIndex"] = int(ann.get("frameIndex", frame))
-        if ann["frameIndex"] != frame:
+        ann["frameIndex"] = ann.get("frameIndex", frame)
+        if type(ann['frameIndex']) is not int or ann["frameIndex"] != frame:
             raise HTTPException(400, f"annotations[{idx}] frameIndex 与当前 seed frame 不一致")
         normalized_annotations.append(ann)
-    directory = media_dir(str(req["mediaId"]))
+    annotation_state.validate_workspace_geometry({'manualBaselines': [
+        {**ann, 'objectId':ann['object_id'], 'source':'manual'} for ann in normalized_annotations
+    ]}, info)
     workspace = annotation_state.read_state(directory)
     annotation_state.require_generation(workspace, req.get("generationId"))
     if any(annotation_state.is_deleted(workspace, frame, ann["object_id"]) for ann in normalized_annotations):
         raise HTTPException(409, "当前 seed 包含已删除的对象，请重新读取工作区")
-    directory.mkdir(parents=True, exist_ok=True)
     payload = {
-        "media": {"id": str(req["mediaId"]), "name": req.get("mediaName") or f"{req['mediaId']}.mp4", "type": "video", "width": req.get("mediaWidth"), "height": req.get("mediaHeight")},
+        "media": {"id": req["mediaId"], "name": req.get("mediaName") or f"{req['mediaId']}.mp4", "type": "video", "width": info['width'], "height": info['height']},
         "frame": {"frameIndex": frame, "timestampMs": req.get("timestampMs", 0)},
         "coordinateSystem": {"source": "frontend-pixel", "target": "pixel", "bbox": "[x1, y1, x2, y2]"},
         "annotations": normalized_annotations,
     }
     filename = f"annotations_frame_{frame:06d}.json"
-    (directory / filename).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary = directory / f'.{filename}.{uuid.uuid4().hex}.tmp'
+    try:
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, allow_nan=False, indent=2), encoding='utf-8')
+        temporary.replace(directory / filename)
+    except OSError as exc:
+        logging.getLogger('review.annotation').exception('annotation.seed_save_failed media=%s frame=%s actor=%s', req['mediaId'], frame, user['uid'])
+        raise HTTPException(500, 'seed 保存失败，旧标注已保留，请重试') from exc
+    finally:
+        temporary.unlink(missing_ok=True)
+    logging.getLogger('review.annotation').info('annotation.seed_saved media=%s frame=%s actor=%s objects=%s', req['mediaId'], frame, user['uid'], len(normalized_annotations))
     return {"filename": filename, "frameIndex": frame}
 
 
@@ -513,20 +590,25 @@ def _legacy_workspace_state(directory: Path, media_id: str) -> dict[str, Any] | 
             payload = json.loads(path.read_text(encoding="utf-8"))
             frame_index = int(payload.get("frame", {}).get("frameIndex", -1))
             timestamp_ms = int(payload.get("frame", {}).get("timestampMs") or (round(frame_index * 1000 / fps) if fps > 0 else 0))
-        except (OSError, TypeError, ValueError, json.JSONDecodeError):
-            continue
+        except (OSError, TypeError, ValueError, AttributeError) as exc:
+            logging.getLogger('review.annotation').exception('annotation.legacy_seed_read_failed media=%s file=%s', media_id, path.name)
+            raise HTTPException(500, '历史人工标注无法读取，请检查 seed 文件并重试') from exc
         if frame_index < 0:
-            continue
+            raise HTTPException(500, '历史人工标注帧号损坏，请检查 seed 文件')
+        if not isinstance(payload.get('annotations'), list):
+            raise HTTPException(500, '历史人工标注结构损坏，请检查 seed 文件')
         for raw in payload.get("annotations", []):
-            if not isinstance(raw, dict) or raw.get("source") != "manual":
+            if not isinstance(raw,dict):
+                raise HTTPException(500,'历史 seed 对象结构损坏，请检查存储')
+            if raw.get("source") != "manual":
                 continue
             try:
                 object_id = int(raw.get("object_id", raw.get("objectId")))
                 x1, y1, x2, y2 = [float(value) for value in raw["bbox"]]
-            except (KeyError, TypeError, ValueError):
-                continue
-            if x2 <= x1 or y2 <= y1:
-                continue
+            except (KeyError, TypeError, ValueError) as exc:
+                raise HTTPException(500, '历史人工标注坐标或身份损坏，请检查 seed 文件') from exc
+            if object_id <= 0 or x2 <= x1 or y2 <= y1 or (frame_index, object_id) in annotations:
+                raise HTTPException(500, '历史人工标注坐标或身份损坏，请检查 seed 文件')
             name = str(raw.get("name") or f"object-{object_id}")
             annotations[(frame_index, object_id)] = {
                 "id": f"manual-{frame_index}-{object_id}",
@@ -553,7 +635,7 @@ def _legacy_workspace_state(directory: Path, media_id: str) -> dict[str, Any] | 
                 }
     if not annotations:
         return None
-    return {
+    state = {
         "exists": True,
         "format": "annotation-workspace-v1",
         "mediaId": media_id,
@@ -567,6 +649,12 @@ def _legacy_workspace_state(directory: Path, media_id: str) -> dict[str, Any] | 
         "display": {"brightness": 100, "contrast": 100, "zoom": 1},
         "migratedFrom": "annotations_frame_*.json",
     }
+    try:
+        annotation_state.validate_workspace_geometry(state,meta)
+    except HTTPException as exc:
+        logging.getLogger('review.annotation').exception('annotation.legacy_seed_read_failed media=%s',media_id)
+        raise HTTPException(500,'历史人工标注数据损坏，请检查 seed 文件') from exc
+    return state
 
 
 @app.get("/api/track/workspace/{media_id}")
@@ -580,6 +668,12 @@ def get_workspace_state(media_id: str, user: dict[str, Any] = Depends(current_us
     if not path.is_file():
         return {**(_legacy_workspace_state(directory, media_id) or {"exists": False, "mediaId": media_id}), "revision": 0}
     payload = annotation_state.read_state(directory)
+    try:
+        annotation_state.validate_deletions(payload)
+        annotation_state.validate_workspace_geometry(payload, source_media_info(directory))
+    except HTTPException as exc:
+        logging.getLogger('review.annotation').exception('annotation.workspace_data_invalid media=%s',media_id)
+        raise HTTPException(500,'工作区数据损坏，不能将未知状态当作空标注，请检查存储') from exc
     return {**annotation_state.public_state(payload), "exists": True, "mediaId": media_id, "revision": int(payload.get("revision", 0))}
 
 
@@ -599,6 +693,8 @@ def save_workspace_state(media_id: str, payload: dict[str, Any], user: dict[str,
 
     def build(previous: dict[str, Any]) -> dict[str, Any]:
         clean = {**previous, **{k: v for k, v in payload.items() if k not in annotation_state.SERVER_FIELDS and not k.startswith("_")}}
+        annotation_state.validate_deletions(clean)
+        annotation_state.validate_workspace_geometry(clean, source_media_info(directory))
         if tracking_is_busy() and any(clean.get(field, []) != previous.get(field, []) for field in ("manualAnnotations", "manualBaselines", "deletedObjectIds", "deletedFrameObjects", "deletedTrackingIds")):
             raise HTTPException(409, "AI Tracking 正在运行，暂时不能修改标注或删除范围")
         if payload.get("expectedRevision") is None:
@@ -606,7 +702,15 @@ def save_workspace_state(media_id: str, payload: dict[str, Any], user: dict[str,
                 if field in payload and payload[field] != previous.get(field, []):
                     raise HTTPException(428, "修改删除范围需要工作区版本，请刷新页面")
                 clean[field] = previous.get(field, [])
-            clean["deletedTrackingIds"] = list(set(previous.get("deletedTrackingIds", [])) | set(payload.get("deletedTrackingIds", [])))
+            legacy_deleted = payload.get('deletedTrackingIds', [])
+            if not isinstance(legacy_deleted, list):
+                raise HTTPException(422, '历史删除范围必须为数组')
+            existing_legacy_deleted = previous.get('deletedTrackingIds', [])
+            if set(map(str, legacy_deleted)) - set(map(str, existing_legacy_deleted)):
+                raise HTTPException(428, '修改删除范围需要工作区版本，请刷新页面')
+            # Stale legacy snapshots may omit tombstones; preserve the current
+            # set, but never allow an unversioned request to add deletions.
+            clean['deletedTrackingIds'] = existing_legacy_deleted
         known_deleted = set(previous.get("deletedAnnotationFrames", []))
         for obj in [*previous.get("manualAnnotations", []), *manual_annotations]:
             frame = int(obj.get("frameIndex", 0))
@@ -971,12 +1075,17 @@ def _tracker_rows_to_frames(rows: list[dict[str, Any]], fps: float = 0.0) -> lis
 
 @app.get("/api/track/result/{media_id}")
 @source_write
-def tracking_result(media_id: str, frameIndex: int | None = Query(default=None), user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+def tracking_result(media_id: str, frameIndex: int | None = Query(default=None), required: bool = Query(default=False), user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     directory = media_dir(media_id)
+    if not directory.is_dir() or not find_video(directory):
+        raise HTTPException(404, {'code':'MEDIA_NOT_FOUND', 'message':'原视频不存在，请核对素材库或联系管理员'})
     file = directory / RESULT_FILE_NAME
+    rows = annotation_state.read_rows(directory, validate_geometry=True)
     if not file.is_file():
-        raise HTTPException(404, f"{RESULT_FILE_NAME} 尚未生成")
-    rows = annotation_state.read_rows(directory)
+        if required is True:
+            logging.getLogger('review.tracking').error('tracking.expected_result_missing media=%s', media_id)
+            raise HTTPException(409, {'code':'TRACKING_RESULTS_MISSING', 'message':'追踪任务应已生成结果，但结果文件缺失，请检查任务日志与存储'})
+        return {'format':'sam3-tracking-results-jsonl', 'state':'not_generated', 'frames':[], 'count':0}
     workspace = annotation_state.read_state(directory)
     rows = [{**row, "objects": [obj for obj in row.get("objects", []) if not annotation_state.is_deleted(workspace, int(row.get("source_frame_index", row.get("frame_index", 0))), int(obj.get("object_id", obj.get("objectId", 0))))]} for row in rows]
     meta = {}
@@ -989,7 +1098,7 @@ def tracking_result(media_id: str, frameIndex: int | None = Query(default=None),
     source_fps = float(meta.get("fps") or 0.0)
     frames = _tracker_rows_to_frames(rows, source_fps)
     if frameIndex is None:
-        return {"format": "sam3-tracking-results-jsonl", "frames": frames, "count": len(frames)}
+        return {"format": "sam3-tracking-results-jsonl", "state":"available", "frames": frames, "count": len(frames)}
     return next(
         (f for f in frames if int(f.get("frameIndex", -1)) == frameIndex),
         {"frameIndex": frameIndex, "timestampMs": 0, "annotations": []},
@@ -997,13 +1106,19 @@ def tracking_result(media_id: str, frameIndex: int | None = Query(default=None),
 
 
 @app.get("/api/track/result-file/{media_id}")
-def tracking_result_file(media_id: str, user: dict[str, Any] = Depends(current_user)) -> Response:
+@source_write
+def tracking_result_file(media_id: str, required: bool = Query(default=False), user: dict[str, Any] = Depends(current_user)) -> Response:
     directory = media_dir(media_id)
+    if not directory.is_dir() or not find_video(directory):
+        raise HTTPException(404, {'code':'MEDIA_NOT_FOUND', 'message':'原视频不存在，请核对素材库或联系管理员'})
     file = directory / RESULT_FILE_NAME
+    rows = annotation_state.read_rows(directory, validate_geometry=True)
     if not file.is_file():
-        raise HTTPException(404, f"{RESULT_FILE_NAME} 尚未生成")
+        if required is True:
+            logging.getLogger('review.tracking').error('tracking.expected_result_missing media=%s operation=result_file', media_id)
+            raise HTTPException(409, {'code':'TRACKING_RESULTS_MISSING', 'message':'追踪任务应已生成结果，但结果文件缺失，请检查任务日志与存储'})
+        raise HTTPException(404, {'code':'TRACKING_RESULTS_NOT_GENERATED', 'message':'尚未生成追踪结果，请先完成 AI Tracking'})
     workspace = annotation_state.read_state(directory)
-    rows = annotation_state.read_rows(directory)
     for row in rows:
         fi = int(row.get("source_frame_index", row.get("frame_index", 0)))
         row["objects"] = [obj for obj in row.get("objects", []) if not annotation_state.is_deleted(workspace, fi, int(obj.get("object_id", obj.get("objectId", 0))))]
@@ -1012,6 +1127,7 @@ def tracking_result_file(media_id: str, user: dict[str, Any] = Depends(current_u
 
 
 @app.get("/api/track/media")
+@source_write
 def list_media(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     """列出后端已有的所有视频素材（刷新页面后可恢复素材列表）。"""
     items: list[dict[str, Any]] = []
@@ -1027,7 +1143,8 @@ def list_media(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
                 meta = json.loads(meta_file.read_text(encoding="utf-8"))
             except Exception:
                 meta = {}
-        has_result = (entry / RESULT_FILE_NAME).is_file()
+        result_presence = annotation_state.tracking_result_presence(entry)
+        has_result = None if result_presence == 'missing' else result_presence == 'present'
         has_workspace = (entry / WORKSPACE_STATE_FILE_NAME).is_file()
         base_name = meta.get("videoName") or video_file.name
         name_count[base_name] = name_count.get(base_name, 0) + 1
@@ -1043,6 +1160,7 @@ def list_media(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
             "videoUrl": f"/api/track/video/{entry.name}",
             "videoMimeType": meta.get("videoMimeType") or _video_media_type(video_file),
             "hasTrackingResult": has_result,
+            "trackingResultState": result_presence,
             "hasWorkspaceState": has_workspace,
             "fps": meta.get("fps") or 0,
             "width": meta.get("width") or 0,
@@ -1087,11 +1205,11 @@ def delete_media(media_id: str, user: dict[str, Any] = Depends(current_user)) ->
 
 
 @app.get("/api/track/video/{media_id}")
-def video(media_id: str) -> FileResponse:
+def video(media_id: str, user: dict[str, Any] = Depends(current_video_user)) -> FileResponse:
     file = find_video(media_dir(media_id))
     if not file:
         raise HTTPException(404, "视频不存在")
-    return FileResponse(file, media_type=_video_media_type(file), filename=file.name, content_disposition_type="inline")
+    return FileResponse(file, media_type=_video_media_type(file), filename=file.name, content_disposition_type="inline", headers={'Cache-Control':'private, no-store'})
 
 
 

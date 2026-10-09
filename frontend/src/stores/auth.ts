@@ -66,10 +66,12 @@ const register = async (username: string, password: string): Promise<AuthUser> =
   return nextUser
 }
 
-const logout = () => {
+const logout = async () => {
   user.value = null
   localStorage.removeItem(STORAGE_KEY)
   tokenStore.clear()
+  try { await http.post('/auth/logout') }
+  catch (error) { console.error('[auth.video_session_clear_failed]', error) }
 }
 
 /**
@@ -77,15 +79,20 @@ const logout = () => {
  * 在 App.vue 的 onMounted 里调用即可
  */
 const restoreSession = async (): Promise<boolean> => {
-  if (!tokenStore.get()) return false
+  if (!tokenStore.get()) { user.value = null; return false }
   try {
     const me = await http.get<{ id: number; username: string }>('/auth/me')
+    if (!Number.isSafeInteger(me?.id) || me.id <= 0 || typeof me.username !== 'string' || !me.username) throw new Error('登录状态响应损坏，请重试')
     user.value = { id: String(me.id), name: me.username, role: 'annotator' }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(user.value))
     return true
-  } catch {
-    logout()
-    return false
+  } catch (error) {
+    if ((error as {status?: number})?.status === 401) {
+      await logout()
+      return false
+    }
+    console.error('[auth.session_read_failed]', error)
+    throw error
   }
 }
 
@@ -94,6 +101,7 @@ if (typeof window !== 'undefined') {
   window.addEventListener('auth:expired', () => {
     user.value = null
     localStorage.removeItem(STORAGE_KEY)
+    void http.post('/auth/logout').catch(error => console.error('[auth.video_session_clear_failed]', error))
   })
 }
 

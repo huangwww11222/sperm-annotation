@@ -1,6 +1,7 @@
 import { withRequestTimeout } from '../utils/browserCompat'
 import { notifyAuthExpired, tokenStore } from './http'
 import type { TrackingFrameResult } from '../types/annotation'
+import { validateTrackingResult } from '../annotation/trackingResult'
 
 const jsonRequest = async <T>(path: string, init: RequestInit = {}): Promise<T> => withRequestTimeout(30000, async (signal) => {
   const res = await fetch(`/api${path}`, {
@@ -143,10 +144,12 @@ export interface TrackingFeedbackResponse {
 }
 
 export interface TrackResultFile {
+  state?: 'not_generated' | 'available'
   format?: string
   media?: Record<string, unknown>
   tracking?: Record<string, unknown>
   frames: TrackingFrameResult[]
+  count: number
 }
 
 export interface TrackMediaItem {
@@ -156,7 +159,8 @@ export interface TrackMediaItem {
   videoName: string
   videoUrl: string
   videoMimeType?: string
-  hasTrackingResult: boolean
+  hasTrackingResult: boolean | null
+  trackingResultState: 'not_generated' | 'present' | 'missing'
   hasWorkspaceState?: boolean
   fps?: number
   width?: number
@@ -287,9 +291,14 @@ export const trackApi = {
     })
   },
 
-  async getResult(mediaId: string, frameIndex?: number) {
-    const query = frameIndex == null ? '' : `?frameIndex=${encodeURIComponent(frameIndex)}`
-    return jsonRequest<TrackResultFile | TrackingFrameResult>(`/track/result/${encodeURIComponent(mediaId)}${query}`)
+  async getResult(mediaId: string, frameIndex?: number, required = false) {
+    const params = new URLSearchParams()
+    if (frameIndex != null) params.set('frameIndex', String(frameIndex))
+    if (required) params.set('required', 'true')
+    const query = params.toString() ? `?${params}` : ''
+    const result = await jsonRequest<unknown>(`/track/result/${encodeURIComponent(mediaId)}${query}`)
+    validateTrackingResult(result)
+    return result
   },
 
   async getWorkspaceState(mediaId: string) {

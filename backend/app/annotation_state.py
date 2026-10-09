@@ -18,6 +18,7 @@ from fastapi import HTTPException
 
 log = logging.getLogger("review.annotation")
 FILE_NAME = "workspace_state.json"
+RESULT_META_FILE = "tracker_results.meta.json"
 SERVER_FIELDS = {"normalMotionSamples", "trackingFeedbackEvents", "_writeReceipts", "revision", "deletedAnnotationFrames", "generationId"}
 
 
@@ -55,6 +56,91 @@ def is_deleted(workspace: dict[str, Any], frame_index: int, object_id: int) -> b
     return str(object_id) in old or f"ai-{frame_index}-{object_id}" in old or f"manual-{frame_index}-{object_id}" in old
 
 
+def tracking_frame_index(row: dict[str, Any]) -> int:
+    frame = row.get('source_frame_index', row.get('frame_index', row.get('frameIndex')))
+    if type(frame) is not int or frame < 0:
+        raise ValueError('invalid tracking frame identity')
+    return frame
+
+
+def tracking_object_id(obj: dict[str, Any]) -> int:
+    oid = obj.get('object_id', obj.get('objectId', obj.get('sam3_object_id')))
+    if type(oid) is not int or oid <= 0:
+        raise ValueError('invalid tracking object identity')
+    if 'object_id' in obj and 'objectId' in obj and obj['objectId'] != oid:
+        raise ValueError('conflicting stable tracking identities')
+    return oid
+
+
+def normalize_tracking_row(row: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(row, dict) or not isinstance(row.get('objects'), list):
+        raise ValueError('invalid tracking frame')
+    frame = tracking_frame_index(row)
+    objects = []
+    seen = set()
+    for obj in row['objects']:
+        if not isinstance(obj, dict):
+            raise ValueError('invalid tracking object')
+        oid = tracking_object_id(obj)
+        if oid in seen:
+            raise ValueError('duplicate tracking object identity')
+        seen.add(oid)
+        objects.append({**obj, 'object_id':oid})
+    return {**row, 'frame_index':frame, 'source_frame_index':frame, 'objects':objects}
+
+
+def validate_workspace_geometry(state: dict[str, Any], info: dict[str, Any]) -> None:
+    """Validate before publishing a receipt; legal point annotations remain valid."""
+    count = info.get('frameCount')
+    width, height = info.get('width'), info.get('height')
+    def number(value):
+        return type(value) in (int,float) and math.isfinite(value)
+    def identity(obj):
+        if not isinstance(obj, dict) or obj.get('source') != 'manual' or type(obj.get('objectId')) is not int or obj['objectId'] <= 0:
+            raise ValueError('人工对象须有 source=manual 和正整数 objectId')
+        fi = obj.get('frameIndex')
+        if type(fi) is not int or fi < 0 or (number(count) and count > 0 and fi >= count):
+            raise ValueError('人工对象帧号无效或超过原视频范围')
+        return fi,obj['objectId']
+    def box(values, maximum_x, maximum_y):
+        if not isinstance(values,list) or len(values) != 4 or not all(number(v) for v in values):
+            raise ValueError('框坐标须为四个有限数值')
+        x1,y1,x2,y2 = values
+        if x2 <= x1 or y2 <= y1 or min(x1,y1) < -1e-6 or x2 > maximum_x+1e-6 or y2 > maximum_y+1e-6:
+            raise ValueError('框尺寸无效或越过原图边界')
+    try:
+        for field in ('manualAnnotations','manualBaselines'):
+            values = state.get(field,[])
+            if not isinstance(values,list):
+                raise ValueError(f'{field} 必须为数组')
+            seen = set()
+            for obj in values:
+                pair = identity(obj)
+                if pair in seen:
+                    raise ValueError('同帧人工对象身份重复')
+                seen.add(pair)
+                if field == 'manualBaselines':
+                    if not number(width) or width <= 0 or not number(height) or height <= 0:
+                        raise ValueError('原视频尺寸不可用，无法校验人工基准')
+                    box(obj.get('bbox'),width,height)
+                    continue
+                bbox,point = obj.get('bbox'),obj.get('point')
+                if bbox is None and point is None:
+                    raise ValueError('人工对象缺少框或点坐标')
+                if bbox is not None:
+                    if not isinstance(bbox,dict) or not all(number(bbox.get(k)) for k in ('x','y','width','height')):
+                        raise ValueError('人工框坐标无效')
+                    box([bbox['x'],bbox['y'],bbox['x']+bbox['width'],bbox['y']+bbox['height']],100,100)
+                if point is not None and (not isinstance(point,dict) or not all(number(point.get(k)) and 0 <= point[k] <= 100 for k in ('x','y'))):
+                    raise ValueError('点坐标无效或越过原图边界')
+        for deletion in state.get('deletedFrameObjects',[]):
+            fi = deletion.get('frameIndex') if isinstance(deletion,dict) else None
+            if type(fi) is not int or fi < 0 or (number(count) and count > 0 and fi >= count):
+                raise ValueError('单帧删除帧号越过原视频范围')
+    except ValueError as exc:
+        raise HTTPException(422,str(exc)) from exc
+
+
 def validate_deletions(state: dict[str, Any]) -> None:
     global_ids = state.get("deletedObjectIds", [])
     frames = state.get("deletedFrameObjects", [])
@@ -71,6 +157,49 @@ def validate_deletions(state: dict[str, Any]) -> None:
             raise HTTPException(422, "单帧删除记录重复")
         seen.add(pair)
     state["deletedObjectIds"] = sorted(set(global_ids))
+
+
+def _feedback_samples(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    samples = {}
+    by_object = {}
+    for event in events:
+        if event.get('decision') == 'reset':
+            for key in by_object.pop(event.get('objectId'),set()):
+                samples.pop(key,None)
+        sample = event.get('sample')
+        if sample:
+            key = (sample.get('objectId'),sample.get('frameIndex'),sample.get('reason'))
+            samples.pop(key,None)
+            samples[key] = sample
+            by_object.setdefault(key[0],set()).add(key)
+    return list(samples.values())
+
+
+def _compact_receipt(receipt: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, Any]:
+    response = receipt['response']
+    historical = response.get('trackingFeedbackEvents')
+    if not isinstance(historical,list) or historical != events[:len(historical)]:
+        return receipt
+    response = {k:v for k,v in response.items() if k != 'trackingFeedbackEvents'}
+    derived = response.get('normalMotionSamples') == _feedback_samples(historical)
+    if derived:
+        response.pop('normalMotionSamples',None)
+    return {**receipt, 'response':response, 'feedbackEventCount':len(historical), 'derivedMotionSamples':derived}
+
+
+def _replay_response(receipt: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    if 'feedbackEventCount' not in receipt:
+        return receipt['response']
+    count = receipt['feedbackEventCount']
+    history = state.get('trackingFeedbackEvents',[])
+    if type(count) is not int or count < 0 or count > len(history):
+        log.error('annotation.receipt_history_missing media=%s',state.get('mediaId'))
+        raise HTTPException(500,'保存回执对应的反馈历史无法读取，请检查存储')
+    events = history[:count]
+    response = {**receipt['response'], 'trackingFeedbackEvents':events}
+    if receipt.get('derivedMotionSamples'):
+        response['normalMotionSamples'] = _feedback_samples(events)
+    return response
 
 
 def write_state(directory: Path, media_id: str, uid: int, key: str,
@@ -101,7 +230,7 @@ def write_state(directory: Path, media_id: str, uid: int, key: str,
         if prior["digest"] != digest:
             raise HTTPException(409, "同一重试标识不能用于不同操作")
         log.info("annotation.workspace_replay media=%s user=%s key=%s operation=%s", media_id, uid, key, operation)
-        return prior["response"]
+        return _replay_response(prior, previous)
     if type(expected) is not int or expected != revision:
         log.warning("annotation.workspace_conflict media=%s user=%s expected=%s actual=%s", media_id, uid, expected, revision)
         raise HTTPException(409, "工作区版本已变化，请保留当前编辑并重新读取")
@@ -123,6 +252,11 @@ def write_state(directory: Path, media_id: str, uid: int, key: str,
                         pausedAnomalies=clean.get("pausedAnomalies", []),
                         lastPausedContext=clean.get("lastPausedContext"))
     receipts[receipt_key] = {"digest": digest, "response": response}
+    # Events are immutable append-only history. Reference each committed prefix
+    # instead of embedding it again in every feedback receipt; replay still
+    # returns the exact historical response, including samples before a reset.
+    events = clean.get('trackingFeedbackEvents',[])
+    receipts = {k:_compact_receipt(v,events) for k,v in receipts.items()}
     # The workspace is a single atomic resource, including successful receipts.
     clean["_writeReceipts"] = receipts
     encoded = json.dumps(clean, ensure_ascii=False, allow_nan=False)
@@ -146,13 +280,38 @@ def write_state(directory: Path, media_id: str, uid: int, key: str,
     return response
 
 
-def read_rows(directory: Path) -> list[dict[str, Any]]:
+def remember_tracking_results(directory: Path) -> None:
+    """Remember published/legacy results independently of their continued existence."""
+    marker = directory / RESULT_META_FILE
+    if marker.is_file():
+        return
+    temporary = marker.with_name(marker.name + '.' + uuid.uuid4().hex + '.tmp')
+    try:
+        temporary.write_text('{"format":"tracking-results-state-v1","generated":true}', encoding='utf-8')
+        temporary.replace(marker)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def tracking_result_presence(directory: Path) -> str:
+    """Cheap lifecycle metadata; 'present' does not certify file contents."""
+    if (directory / 'tracker_results.json').is_file():
+        return 'present'
+    return 'missing' if (directory / RESULT_META_FILE).exists() else 'not_generated'
+
+
+def read_rows(directory: Path, *, validate_geometry: bool = False) -> list[dict[str, Any]]:
     path = directory / "tracker_results.json"
-    if not path.is_file():
+    presence = tracking_result_presence(directory)
+    if presence != 'present':
+        if presence == 'missing':
+            log.error('annotation.tracking_results_missing media=%s', directory.name)
+            raise HTTPException(409, {'code':'TRACKING_RESULTS_MISSING', 'message':'已生成的追踪结果文件缺失，请管理员检查存储或恢复备份'})
         return []
     try:
         raw = path.read_text(encoding="utf-8")
         if not raw.strip():
+            remember_tracking_results(directory)
             return []
         try:
             content = json.loads(raw)
@@ -161,6 +320,24 @@ def read_rows(directory: Path) -> list[dict[str, Any]]:
         rows = content if isinstance(content, list) else content.get("frames", content.get("results", [content]))
         if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
             raise ValueError("invalid tracking rows")
+        rows = [normalize_tracking_row(row) for row in rows]
+        seen_frames = set()
+        for row in rows:
+            fi = row['source_frame_index']
+            if fi in seen_frames:
+                raise ValueError('duplicate tracking frame')
+            seen_frames.add(fi)
+            for obj in row['objects']:
+                box = obj.get('bbox')
+                # Feedback has its own 422 geometry contract; result consumers
+                # must validate before converting/skipping any saved boxes.
+                if not validate_geometry:
+                    continue
+                if not isinstance(box, list) or len(box) != 4 or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in box):
+                    raise ValueError('invalid tracking geometry')
+                if box[2] <= box[0] or box[3] <= box[1]:
+                    raise ValueError('invalid tracking box extent')
+        remember_tracking_results(directory)
         return rows
     except (ValueError, OSError, AttributeError) as exc:
         log.exception("annotation.tracking_read_failed media=%s", directory.name)

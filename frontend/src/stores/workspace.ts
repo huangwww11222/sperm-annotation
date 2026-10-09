@@ -1053,7 +1053,7 @@ const createWorkspace = () => {
     { deep: true },
   )
 
-  const restoreWorkspaceState = async (mediaId: string): Promise<number | null> => {
+  const restoreWorkspaceState = async (mediaId: string, isCurrent: () => boolean): Promise<number | null> => {
     const media = mediaAssets.value.find((item) => item.id === mediaId)
     if (!media?.serverMediaId) return null
     try {
@@ -1064,10 +1064,13 @@ const createWorkspace = () => {
         if (controls?.feedback) pendingFeedback.value = { ...controls.feedback, mediaId }
       } catch (error) { console.warn('[annotation.controls_restore_failed]', { mediaId, error }) }
       await saveQueues.get(mediaId)?.catch(() => {})
+      if (!isCurrent()) return null
       let state = await trackApi.getWorkspaceState(media.serverMediaId)
+      if (!isCurrent()) return null
       const generationKey=`annotation-generation:${media.serverMediaId}`
       if(state.generationId&&localStorage.getItem(generationKey)!==state.generationId){
         await workspaceWrites.discardForReset(media.serverMediaId,state.revision||0)
+        if (!isCurrent()) return null
         clearResetCache(media.serverMediaId,state.revision||0)
         if(pendingDeletion.value?.mediaId===mediaId)pendingDeletion.value=null
         if(pendingFeedback.value?.mediaId===mediaId)pendingFeedback.value=null
@@ -1075,7 +1078,9 @@ const createWorkspace = () => {
         showToast('视频已覆盖重新标注，已清除旧工作区缓存')
       }else{
         await workspaceWrites.replay(media.serverMediaId)
+        if (!isCurrent()) return null
         state = await trackApi.getWorkspaceState(media.serverMediaId)
+        if (!isCurrent()) return null
       }
       workspaceGenerations.set(mediaId,state.generationId)
       workspaceWrites.setRevision(media.serverMediaId, state.revision || 0)
@@ -1124,12 +1129,13 @@ const createWorkspace = () => {
       const frame = Math.max(0, Math.min(maxFrameIndex.value, Number(state.currentFrame) || 0))
       return frame
     } catch (error) {
+      if (!isCurrent()) return null
       workspaceReadError.value = '工作区读取失败，请重新加载素材后再编辑，避免覆盖服务器状态'
       saveState.value = 'error'; saveError.value = workspaceReadError.value
       console.error('[annotation.workspace_load_failed]', { mediaId, error })
       return null
     } finally {
-      workspaceRestoreInProgress = false
+      if (isCurrent()) workspaceRestoreInProgress = false
     }
   }
 
@@ -1301,17 +1307,20 @@ const createWorkspace = () => {
     if (serial === fallbackPlaybackSerial) isPlaying.value = false
   }
 
-  const loadTrackingResult = async (mediaId: string, force = false, strict = false) => {
+  const loadTrackingResult = async (mediaId: string, force = false, strict = false, required = false) => {
     const media = mediaAssets.value.find((item) => item.id === mediaId)
     if (!media?.serverMediaId) return
     const serial = ++trackingLoadSerial
+    const actor = useAuth().user.value?.id
     try {
-      const result = await trackApi.getResult(media.serverMediaId)
-      if (serial !== trackingLoadSerial || mediaId !== currentMediaId.value) return
+      const result = await trackApi.getResult(media.serverMediaId, undefined, required)
+      if (serial !== trackingLoadSerial || mediaId !== currentMediaId.value || actor !== useAuth().user.value?.id) return
+      if ('state' in result && result.state === 'not_generated' && required) throw new Error('追踪任务应已生成结果，请管理员检查任务日志与存储')
       const frames = 'frames' in result ? result.frames : [result]
+      if (media.frameCount && frames.some(f => f.frameIndex >= media.frameCount!)) throw new Error('追踪结果帧号超过原视频范围')
       // 过滤掉前端已删除的 AI tracking 对象
       const deleted = deletedTrackingIds.value[mediaId]
-      const filtered = (frames || []).map((f: any) => ({ ...f, annotations: f.annotations.filter((a: any) => !isObjectDeleted(mediaId, a.objectId, f.frameIndex) && !deleted?.has(a.id) && !deleted?.has(String(a.objectId))) }))
+      const filtered = frames.map((f: any) => ({ ...f, annotations: f.annotations.filter((a: any) => !isObjectDeleted(mediaId, a.objectId, f.frameIndex) && !deleted?.has(a.id) && !deleted?.has(String(a.objectId))) }))
       trackingFramesByMedia.value[mediaId] = filtered
 
       // 将 AI tracking 结果合并到 annotationsByMedia（统一管理）
@@ -1324,8 +1333,8 @@ const createWorkspace = () => {
         .filter((o) => o.source === 'manual' && o.objectId != null)
         .map((o) => `${o.frameIndex ?? 0}:${o.objectId}`))
       // 手动新建 (objectId=null) 也保留; 有 objectId 的才走 key 粒度保护
-      const keyOf = (o: AnnotationObject) => `${o.frameIndex ?? 0}:${o.objectId ?? o.id}`
-      const existingByKey = new Map(existing.map((o) => [keyOf(o), o]))
+      // Full results are authoritative: absent AI rows belong to an obsolete branch.
+      const existingByKey = new Map<string, AnnotationObject>()
       // 先把手动标注全量放进去，并清理旧版本重复保存的同帧同 ID 项。
       let merged: AnnotationObject[] = dedupeAnnotationObjects(
         existing.filter((o) => o.source === 'manual').map((o) => ({ ...o })),
@@ -1417,6 +1426,7 @@ const createWorkspace = () => {
 
       annotationsByMedia.value = { ...annotationsByMedia.value, [mediaId]: merged }
     } catch (error) {
+      if (serial !== trackingLoadSerial || mediaId !== currentMediaId.value || actor !== useAuth().user.value?.id) return
       console.warn('[annotation.tracking_load_failed]', { mediaId, error })
       if(strict)throw error
     }
@@ -2019,7 +2029,7 @@ const createWorkspace = () => {
         if (status.status === 'paused' && status.paused) {
           const pauseFrame = status.pausedFrame ?? startFrame
           phase='读取追踪结果'
-          await loadTrackingResult(mediaId, true, true)
+          await loadTrackingResult(mediaId, true, true, true)
 
           if (mediaId === currentMediaId.value) {
             await seekVideo(frameToTime(pauseFrame))
@@ -2052,7 +2062,7 @@ const createWorkspace = () => {
       }
 
       phase='读取追踪结果'
-      await loadTrackingResult(mediaId, true, true)
+      await loadTrackingResult(mediaId, true, true, true)
 
       if (mediaId === currentMediaId.value) {
         const finalStatus = completedStatus!
@@ -2312,6 +2322,8 @@ const createWorkspace = () => {
   const resetAnnotationViewForMedia = async (mediaId = currentMediaId.value) => {
     if (mediaId !== currentMediaId.value) return
     const serial = ++restoreSerial
+    const actor = useAuth().user.value?.id
+    const isCurrent = () => serial === restoreSerial && mediaId === currentMediaId.value && actor === useAuth().user.value?.id
     cancelAnnotationGesture(); frameCache.clear(); exactFrameRequestSerial++; seekSerial++
     exactFrameLoading.value = false; isSeekingVideo = false; requestedFrame.value = null; frameError.value = ''
     workspaceRestoring.value = true
@@ -2333,32 +2345,38 @@ const createWorkspace = () => {
     zoom.value = 1
     videoPlaybackFallback.value = false
     stopFallbackPlayback()
+    // A local image has no server workspace to reload. In particular, the
+    // sample image after a real login must not inherit the account-change lock.
+    if (!isVideo.value) workspaceReadError.value = ''
     if (isVideo.value && mediaId === currentMediaId.value) {
       // 后端上传元数据在 <video> loadedmetadata/error 之前已可用。先采用
       // 它，避免不同 FPS 的 AVI 逐帧预览仍沿用默认 30 FPS 计算时间轴。
       const media = mediaAssets.value.find((item) => item.id === mediaId)
       if (media?.fps && media.fps > 0) videoFps.value = media.fps
       if (media?.frameCount && media.fps) videoDuration.value = media.frameCount / media.fps
-      const restoredFrame = await restoreWorkspaceState(mediaId)
-      if (serial !== restoreSerial || mediaId !== currentMediaId.value) return
+      const restoredFrame = await restoreWorkspaceState(mediaId, isCurrent)
+      if (!isCurrent()) return
       const targetFrame = restoredFrame ?? 0
       if (workspaceReadError.value) { workspaceRestoring.value = false; return }
       await nextTick()
+      if (!isCurrent()) return
       revokeExactFrameUrl()
       const video = videoRef.value
       if (video) {
         try { video.pause(); video.currentTime = frameToTime(targetFrame) } catch {}
       }
       await loadExactFrame(targetFrame, mediaId)
+      if (!isCurrent()) return
       try { await loadTrackingResult(mediaId, true, true) }
       catch(error) {
-        if(serial===restoreSerial&&mediaId===currentMediaId.value) {
-          workspaceReadError.value='追踪结果读取失败，请重新读取工作区后再编辑，避免将未知数据当成空帧'
+        if(isCurrent()) {
+          workspaceReadError.value=`追踪结果读取失败：${messageOf(error,'服务器响应异常')}。请重新读取工作区后再编辑，避免将未知数据当成空帧`
           saveState.value='error';saveError.value=workspaceReadError.value
           workspaceRestoring.value=false
         }
         return
       }
+      if (!isCurrent()) return
       try{
         const job=JSON.parse(sessionStorage.getItem(trackingJournalKey(mediaId))||'null') as TrackingJob|null
         if(job?.key&&job.mediaId===mediaId&&job.input.mediaId===media?.serverMediaId){
@@ -2367,7 +2385,7 @@ const createWorkspace = () => {
         }
       }catch(error){console.warn('[annotation.tracking_restore_failed]',{mediaId,error})}
     }
-    if (serial === restoreSerial) workspaceRestoring.value = false
+    if (isCurrent()) workspaceRestoring.value = false
   }
 
   /**
@@ -2441,6 +2459,8 @@ const createWorkspace = () => {
 
   watch(() => useAuth().user.value?.id, (next, previous) => {
     if (next === previous) return
+    restoreSerial++; trackingLoadSerial++
+    workspaceRestoreInProgress = false
     for (const timer of workspaceSaveTimers.values()) clearTimeout(timer)
     workspaceSaveTimers.clear()
     pendingDeletion.value = null; pendingFeedback.value = null

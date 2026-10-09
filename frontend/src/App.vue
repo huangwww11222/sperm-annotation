@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import AppLayout from './layouts/AppLayout.vue'
 import AnnotatePage from './pages/AnnotatePage.vue'
 import ResultsPage from './pages/ResultsPage.vue'
@@ -11,8 +11,20 @@ import { useAuth } from './stores/auth'
 import { useWorkspace } from './stores/workspace'
 
 const router = useRouter()
-const { isAuthenticated } = useAuth()
+const { isAuthenticated, restoreSession } = useAuth()
 const { loadServerMedia } = useWorkspace()
+const sessionReady = ref(false)
+const sessionError = ref('')
+const restoreLogin = async () => {
+  sessionError.value = ''
+  try {
+    await restoreSession()
+    sessionReady.value = true
+    syncRoute()
+  } catch (error) {
+    sessionError.value = (error as {message?: string})?.message || '登录状态读取失败，请重试'
+  }
+}
 
 const currentPath = computed(() => {
   if (!isAuthenticated.value) return '/login'
@@ -20,17 +32,22 @@ const currentPath = computed(() => {
 })
 
 const syncRoute = () => {
+  if (!sessionReady.value) return
   if (!isAuthenticated.value && router.path.value !== '/login') router.replace('/login')
   if (isAuthenticated.value && router.path.value === '/login') router.replace('/annotate')
   if (isAuthenticated.value) loadServerMedia()
 }
 
-onMounted(syncRoute)
+onMounted(restoreLogin)
 watch(isAuthenticated, syncRoute)
 </script>
 
 <template>
-  <LoginPage v-if="currentPath === '/login'" />
+  <div v-if="!sessionReady" class="session-loading" role="status">
+    <p>{{ sessionError || '正在验证登录状态…' }}</p>
+    <button v-if="sessionError" class="btn-primary" @click="restoreLogin">重新验证登录</button>
+  </div>
+  <LoginPage v-else-if="currentPath === '/login'" />
   <AppLayout v-else>
     <AnnotatePage v-if="currentPath === '/annotate'" />
     <ResultsPage v-else-if="currentPath === '/results'" />
@@ -38,3 +55,7 @@ watch(isAuthenticated, syncRoute)
     <ConfirmationPage v-else-if="currentPath === '/confirm'" />
   </AppLayout>
 </template>
+
+<style scoped>
+.session-loading { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; color: var(--text); background: var(--app-bg); }
+</style>

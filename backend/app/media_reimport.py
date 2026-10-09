@@ -27,12 +27,28 @@ def file_sha(path):
     return value.hexdigest()
 
 
+def source_fingerprint(path):
+    stat = path.stat()
+    return {'size':stat.st_size, 'mtimeNs':stat.st_mtime_ns, 'inode':stat.st_ino}
+
+
+def source_sha(directory, video):
+    try:
+        meta = json.loads((directory/'media.json').read_text(encoding='utf-8'))
+        sha = meta.get('sha256')
+        if isinstance(sha,str) and len(sha) == 64 and meta.get('sourceFingerprint') == source_fingerprint(video):
+            return sha
+    except (OSError,ValueError):
+        pass
+    return file_sha(video)
+
+
 def duplicate(directories, find_video, upload):
     sha = file_sha(upload)
     matches = []
     for directory in directories:
         video = find_video(directory)
-        if video and video.stat().st_size == upload.stat().st_size and file_sha(video) == sha:
+        if video and video.stat().st_size == upload.stat().st_size and source_sha(directory,video) == sha:
             matches.append(directory)
     # Older installations may already contain duplicate upload directories.
     # Prefer the source referenced by immutable A rather than an unused copy.
@@ -130,7 +146,7 @@ def reset(directory, uid, key, body, tracking_busy):
             if body['confirmDiscard'] is not True:
                 raise ReviewError('DISCARD_CONFIRMATION_REQUIRED', '请确认舍弃旧标注', 422)
             files = [p for p in directory.iterdir() if p.is_file() and (
-                p.name in {'workspace_state.json', 'tracker_results.json', 'tracker_overlay.mp4'}
+                p.name in {'workspace_state.json', 'tracker_results.json', annotation_state.RESULT_META_FILE, 'tracker_overlay.mp4'}
                 or (p.name.startswith('annotations_frame_') and p.suffix == '.json'))]
             folder = directory.parent / '_annotation_resets' / uuid.uuid4().hex
             folder.mkdir(parents=True)

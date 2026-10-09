@@ -39,7 +39,7 @@ const stageSize = computed(() => ({ w: Math.round(base.value.w * zoom.value), h:
 const visibleMedia = computed(() => mediaAssets.value.filter(m => m.name.toLowerCase().includes(search.value.toLowerCase())))
 const visibleObjects = computed(() => currentObjects.value.filter(o => o.name.toLowerCase().includes(objectSearch.value.toLowerCase()) || String(o.objectId).includes(objectSearch.value.trim().replace(/^#/,''))))
 const filter = computed(() => `${mediaFilterStyle.value} ${inverted.value ? 'invert(1)' : ''}`)
-const saveLabel = computed(() => selectedMedia.value?.serverMediaId ? ({ idle:'自动保存', saving:'保存中…', saved:'已保存', error:'保存失败' }[saveState.value]) : '本机自动保存')
+const saveLabel = computed(() => workspaceRecoveryRequired.value ? '需重新读取' : selectedMedia.value?.serverMediaId ? ({ idle:'自动保存', saving:'保存中…', saved:'已保存', error:'保存失败' }[saveState.value]) : '本机自动保存')
 // Shortcut help and the full guide share the same maintained Markdown source.
 const shortcutSection = userGuide.split(/^## 快捷键速查\s*$/m)[1] || ''
 const shortcutHelpNote = shortcutSection.trim().split(/\n\s*\n/)[0] || ''

@@ -7,7 +7,7 @@ import UserGuide from '../components/UserGuide.vue'
 const router = useRouter(), routePath = router.path
 const { user, logout } = useAuth()
 const { theme, toggleTheme } = useAppearance()
-async function signOut() { if (await router.canLeave()) { logout(); await router.replace('/login') } }
+async function signOut() { if (await router.canLeave()) { await logout(); await router.replace('/login') } }
 </script>
 <template>
   <div class="app-shell">

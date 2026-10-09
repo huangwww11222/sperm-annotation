@@ -5,6 +5,7 @@
  * 所以前端不用写死后端地址，也没有跨域问题。
  */
 
+import { withRequestTimeout } from '../utils/browserCompat'
 const BASE = '/api'
 export const TOKEN_KEY = 'rare-sperm-token'
 
@@ -30,36 +31,33 @@ export interface ApiError {
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const token = tokenStore.get()
-
-  let res: Response
   try {
-    res = await fetch(`${BASE}${path}`, {
-      ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        ...(options.headers ?? {}),
-      },
-    })
-  } catch {
-    // 后端没启动 / 网络不通
-    throw { message: '无法连接后端，请确认 FastAPI 已启动（python -m uvicorn app.main:app --host 127.0.0.1 --port 3000）', status: 0 } as ApiError
+    return await withRequestTimeout(30000, async signal => {
+      const res = await fetch(`${BASE}${path}`, {
+        ...options,
+        signal,
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...(options.headers ?? {}),
+        },
+      })
+      const data = await res.json().catch(() => null)
+      if (!res.ok) {
+        if (res.status === 401) notifyAuthExpired()
+        const detail = (data as any)?.detail
+        const detailMessage = Array.isArray(detail)
+          ? detail.map((item: any) => item?.msg || item?.message || JSON.stringify(item)).join('; ')
+          : typeof detail === 'string' ? detail : undefined
+        throw { message: (data as any)?.message ?? detailMessage ?? `请求失败 (${res.status})`, status: res.status } as ApiError
+      }
+      if (data === null) throw { message: '服务器响应无法读取，请重试', status: 0 } as ApiError
+      return data as T
+    }, options.signal)
+  } catch (error) {
+    if (typeof (error as ApiError)?.status === 'number') throw error
+    throw { message: '连接后端失败或请求超时，请稍后重试', status: 0 } as ApiError
   }
-
-  const data = await res.json().catch(() => ({}))
-
-  if (!res.ok) {
-    if (res.status === 401) {
-      notifyAuthExpired()
-    }
-    const detail = (data as any)?.detail
-    const detailMessage = Array.isArray(detail)
-      ? detail.map((item: any) => item?.msg || item?.message || JSON.stringify(item)).join('; ')
-      : typeof detail === 'string' ? detail : undefined
-    throw { message: (data as any)?.message ?? detailMessage ?? `请求失败 (${res.status})`, status: res.status } as ApiError
-  }
-
-  return data as T
 }
 
 export const http = {
