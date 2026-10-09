@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "test:review": "tsc src/review/geometry.ts --outDir ../work/review-geometry --target ES2022 --module ES2022 --skipLibCheck && node --test tests/review-geometry.test.mjs",
     "test:confirmation": "tsc src/confirmation/geometry.ts --outDir ../work/confirmation-geometry --target ES2022 --module ES2022 --skipLibCheck && node --test tests/confirmation-geometry.test.mjs",
-    "test:annotation": "tsc src/annotation/geometry.ts src/annotation/frameCache.ts --outDir ../work/annotation-helpers --target ES2022 --module ES2022 --skipLibCheck && node --test tests/annotation-geometry.test.mjs tests/workspace-writes.test.mjs",
+    "test:annotation": "tsc src/annotation/geometry.ts src/annotation/frameCache.ts --outDir ../work/annotation-helpers --target ES2022 --module ES2022 --skipLibCheck && tsc src/annotation/trackingResult.ts --outDir ../work/annotation-validation --target ES2022 --module ES2022 --skipLibCheck && node --test tests/annotation-geometry.test.mjs tests/workspace-writes.test.mjs tests/tracking-result.test.mjs",
     "test:compatibility": "tsc src/utils/browserCompat.ts --outDir ../work/browser-compat --target ES2020 --module ES2020 --skipLibCheck && node --test tests/browser-compat.test.mjs"
   },
   "dependencies": {
@@ -18,6 +18,7 @@
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.1",
     "autoprefixer": "^10.4.21",
+    "playwright": "1.62.1",
     "postcss": "^8.5.6",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.9.2",

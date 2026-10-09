@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process'
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright')
 const fixture = JSON.parse(fs.readFileSync('work/confirmation-browser-fixture.json'))
 const origin = process.env.CONFIRMATION_ORIGIN || 'http://127.0.0.1:5373'
-const browser = await chromium.launch({ channel: 'chrome', headless: true })
+const browser = await chromium.launch({ channel: process.env.CHROME_CHANNEL || 'chrome', headless: true })
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } })
 if (process.env.LEGACY_BROWSER === '1') await useLegacyBrowserAPIs(page)
 const errors = [], logs = []
@@ -59,7 +59,7 @@ try {
   await downloadFrom('生成并下载 ZIP','output/playwright/training-yolo.zip')
   const firstJob=await taskId()
   check((await page.locator('.training-export-job').innerText()).includes('已生成（YOLO）'),'real background job reaches ready and downloads')
-  const inspected=JSON.parse(execFileSync('work/review-venv/bin/python',['-c',`
+  const inspected=JSON.parse(execFileSync(process.env.TEST_PYTHON || 'work/review-venv/bin/python',['-c',`
 import zipfile,json,yaml,cv2,numpy as np,sys
 with zipfile.ZipFile(sys.argv[1]) as z:
  m=json.loads(z.read('manifest.json'));cfg=yaml.safe_load(z.read('data.yaml'))
@@ -107,7 +107,7 @@ with zipfile.ZipFile(sys.argv[1]) as z:
   await downloadFrom('重试导出请求','output/playwright/training-coco.zip')
   const cocoJob=await taskId()
   check(cocoJob!==firstJob,'new settings create a separate export job')
-  const coco=JSON.parse(execFileSync('work/review-venv/bin/python',['-c',`
+  const coco=JSON.parse(execFileSync(process.env.TEST_PYTHON || 'work/review-venv/bin/python',['-c',`
 import zipfile,json,sys
 with zipfile.ZipFile(sys.argv[1]) as z:
  assert 'data.yaml' not in z.namelist()

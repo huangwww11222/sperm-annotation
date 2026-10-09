@@ -7,7 +7,7 @@ const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright')
 const confirmation = JSON.parse(fs.readFileSync('work/confirmation-browser-fixture.json'))
 const review = JSON.parse(fs.readFileSync('work/browser-fixture.json'))
 const origin = process.env.CONFIRMATION_ORIGIN || 'http://127.0.0.1:5373'
-const browser = await chromium.launch({ channel: 'chrome', headless: true })
+const browser = await chromium.launch({ channel: process.env.CHROME_CHANNEL || 'chrome', headless: true })
 const page = await browser.newPage({ viewport: { width: 1366, height: 768 } })
 const logs = [], errors = []
 let checks = 0

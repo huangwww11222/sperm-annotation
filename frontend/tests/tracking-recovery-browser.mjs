@@ -5,7 +5,7 @@ const {chromium}=await import(process.env.PLAYWRIGHT_MODULE||'playwright')
 const fixture=JSON.parse(fs.readFileSync('work/tracking-recovery-fixture.json'))
 assert(fixture.directory.includes('/work/e2e-confirm-ux-'))
 const origin=process.env.CONFIRMATION_ORIGIN||'http://127.0.0.1:5387'
-const browser=await chromium.launch({channel:'chrome',headless:true})
+const browser=await chromium.launch({channel:process.env.CHROME_CHANNEL || 'chrome',headless:true})
 const page=await browser.newPage({viewport:{width:1366,height:768}})
 page.setDefaultTimeout(15000)
 const errors=[],checks=[],starts=[],saveAttempts=[],receipts=new Map(),taskStates=new Map(),logs=[]
@@ -56,7 +56,7 @@ try{
     const status=taskStates.get(new URL(route.request().url()).pathname.split('/').at(-1))
     await route.fulfill({json:modelFailure?{status:'failed',message:'injected model failure'}:{status:'success',stage:'completed',processedFrames:status.last-status.start+1,lastProcessedFrame:status.last,reachedVideoEnd:status.last===7}})
   })
-  await page.route('**/api/track/result/'+fixture.mid,async route=>{if(resultFailure){await route.fulfill({status:503,json:{detail:'injected result read failure'}});return}await route.continue()})
+  await page.route('**/api/track/result/'+fixture.mid+'*',async route=>{if(resultFailure){await route.fulfill({status:503,json:{detail:'injected result read failure'}});return}await route.continue()})
   await page.route('**/api/track/workspace/'+fixture.mid,async route=>{
     if(route.request().method()!=='PUT')return route.continue()
     const attempt={key:route.request().headers()['idempotency-key'],body:route.request().postDataJSON()};saveAttempts.push(attempt)

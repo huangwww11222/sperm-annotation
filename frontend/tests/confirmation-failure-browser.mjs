@@ -4,7 +4,7 @@ import fs from 'node:fs'
 const {chromium}=await import(process.env.PLAYWRIGHT_MODULE||'playwright')
 const fixture=JSON.parse(fs.readFileSync('work/confirmation-browser-fixture.json'))
 const origin=process.env.CONFIRMATION_ORIGIN||'http://127.0.0.1:5373',sid=fixture.failure.sid
-const browser=await chromium.launch({channel:'chrome',headless:true}),page=await browser.newPage({viewport:{width:1440,height:900}})
+const browser=await chromium.launch({channel:process.env.CHROME_CHANNEL || 'chrome',headless:true}),page=await browser.newPage({viewport:{width:1440,height:900}})
 if (process.env.LEGACY_BROWSER === '1') await useLegacyBrowserAPIs(page)
 const errors=[],logs=[];let checks=0
 page.on('pageerror',e=>errors.push(String(e)));page.on('console',m=>logs.push({type:m.type(),text:m.text()}))

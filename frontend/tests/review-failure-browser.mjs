@@ -3,7 +3,7 @@ import fs from 'node:fs'
 const { chromium }=await import(process.env.PLAYWRIGHT_MODULE || 'playwright')
 const fixture=JSON.parse(fs.readFileSync('work/browser-fixture.json'))
 const origin=process.env.REVIEW_ORIGIN || 'http://127.0.0.1:5373'
-const browser=await chromium.launch({channel:'chrome',headless:true})
+const browser=await chromium.launch({channel:process.env.CHROME_CHANNEL || 'chrome',headless:true})
 const page=await browser.newPage({viewport:{width:1440,height:900}})
 const errors=[],logs=[];page.on('pageerror',e=>errors.push(String(e)));page.on('console',m=>logs.push({type:m.type(),text:m.text()}))
 const inView=loc=>loc.evaluate(e=>{const r=e.getBoundingClientRect();return r.top>=70&&r.bottom<=innerHeight&&e.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2))})

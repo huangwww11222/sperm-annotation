@@ -109,6 +109,30 @@ def test_unversioned_request_cannot_add_new_deletion_rules(controls):
     assert annotation_state.read_state(root)["revision"] == 0
 
 
+@pytest.mark.parametrize('legacy_id', ['7','ai-0-7'])
+def test_unversioned_request_cannot_add_legacy_deletion_rules(controls, legacy_id):
+    client, root, state = controls
+    before = (root/'workspace_state.json').read_bytes()
+    response = client.put('/api/track/workspace/control-video', json={'deletedTrackingIds':[legacy_id]})
+    assert response.status_code == 428
+    assert (root/'workspace_state.json').read_bytes() == before
+
+
+def test_unversioned_stale_legacy_deletions_preserve_current_rules_without_adding(controls):
+    client, root, state = controls
+    state['deletedTrackingIds'] = ['7']
+    assert save(client,state).status_code == 200
+    # An old cached client may omit existing deletions or resend only a subset.
+    assert client.put('/api/track/workspace/control-video',json={'deletedTrackingIds':[]}).status_code == 200
+    assert annotation_state.read_state(root)['deletedTrackingIds'] == ['7']
+    before = (root/'workspace_state.json').read_bytes()
+    assert client.put('/api/track/workspace/control-video',json={'deletedTrackingIds':['7','9']}).status_code == 428
+    assert (root/'workspace_state.json').read_bytes() == before
+    current = annotation_state.read_state(root)
+    assert save(client,{**current,'deletedTrackingIds':[]},current['revision'],'restore-versioned').status_code == 200
+    assert annotation_state.read_state(root)['deletedTrackingIds'] == []
+
+
 def test_normal_feedback_uses_server_metrics_and_clears_only_selected_issue(controls):
     client, root, state = controls
     result = feedback(client, motionNormalized=999).json()

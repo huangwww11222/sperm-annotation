@@ -66,7 +66,7 @@ def test_removed_annotation_folder_entry_retains_server_media_restore() -> None:
     assert "loadTrackerFolder" not in store
     assert "loadServerMedia" in store
     assert "const existing = byServerId.get(item.mediaId)" in store
-    assert "restoreWorkspaceState(mediaId)" in store
+    assert "restoreWorkspaceState(mediaId, isCurrent)" in store
     assert '"directoryName": entry.name' in backend
     assert '"sourceVideoName": base_name' in backend
     assert "directoryName: string" in api
@@ -96,7 +96,7 @@ def test_workspace_state_is_restored_before_tracking_results_and_uses_canonical_
     tracker = (ROOT / "backend/app/tracker.py").read_text(encoding="utf-8")
 
     reset_block = store[store.index("const resetAnnotationViewForMedia"):store.index("const loadServerMedia")]
-    assert reset_block.index("restoreWorkspaceState(mediaId)") < reset_block.index("loadTrackingResult(mediaId, true, true)")
+    assert reset_block.index("restoreWorkspaceState(mediaId, isCurrent)") < reset_block.index("loadTrackingResult(mediaId, true, true)")
     assert "media.serverMediaId || mediaId" in store
     assert "getWorkspaceState" in api and "saveWorkspaceState" in api
     assert 'WORKSPACE_STATE_FILE_NAME = "workspace_state.json"' in tracker

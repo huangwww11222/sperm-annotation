@@ -5,7 +5,7 @@ import fs from 'node:fs'
 const {chromium}=await import(process.env.PLAYWRIGHT_MODULE||'playwright')
 const fixture=JSON.parse(fs.readFileSync('work/workflow-transitions-browser-fixture.json'))
 const origin=process.env.CONFIRMATION_ORIGIN||'http://127.0.0.1:5427'
-const browser=await chromium.launch({channel:'chrome',headless:true})
+const browser=await chromium.launch({channel:process.env.CHROME_CHANNEL || 'chrome',headless:true})
 const page=await browser.newPage({viewport:{width:1366,height:768}})
 page.setDefaultTimeout(15000)
 const errors=[],checks=[]
@@ -77,7 +77,8 @@ try{
   await button('AI Tracking').click()
   const [manualResponse,seedResponse,runResponse]=await Promise.all([manual,seed,run])
   check(manualResponse.status()===201&&seedResponse.status()===201&&manualResponse.request().postDataJSON().generationId===newState.generationId&&seedResponse.request().postDataJSON().generationId===newState.generationId,'current-generation manual records and seed succeed on real backend')
-  check(requests.rewind.generationId===newState.generationId&&requests.run.generationId===newState.generationId&&runResponse.status()===503,'rewind and tracking carry current generation to disabled GPU boundary')
+  const expectedStart = process.env.CRITICAL_AI_MODE === 'simulated' ? 202 : 503
+  check(requests.rewind.generationId===newState.generationId&&requests.run.generationId===newState.generationId&&runResponse.status()===expectedStart,'rewind and tracking carry current generation to the configured model boundary')
   await page.waitForFunction(()=>!window.ws.isAiBusy.value&&window.ws.saveState.value==='saved')
   await page.unroute('**/api/track/rewind')
   await asset('pending');await page.locator('[data-testid=withdraw-submission]').first().waitFor()
