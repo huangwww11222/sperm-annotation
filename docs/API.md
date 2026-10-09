@@ -6,6 +6,8 @@
 
 活动业务接口使用 `Authorization: Bearer <token>`。B/C/送审/训练导出的业务写请求还要求 `X-Review-Contract: 2` 与 `Idempotency-Key`。同一次未知结果/网络失败重试使用**相同 key、相同请求体**；用户新的业务意图才生成新 key。
 
+原视频也必须登录。为支持原生 `<video>` 与 Range 请求，登录/注册/`GET /api/auth/me` 同时签发仅用于 `/api/track/video/` 的 HttpOnly、SameSite=Strict 播放 Cookie；HTTPS 使用 Secure，医院 HTTP 环境仍可播放。它不能作为工作区或其他业务接口凭据，也不放入 URL。显式无效 Bearer 不被旧 Cookie 掩盖。`POST /api/auth/logout` 清除播放 Cookie；启动先校验身份再挂载工作区。401 才清除失效身份，超时/500 保留账号及待重试请求并允许重新验证。
+
 服务端以 `BEGIN IMMEDIATE`、期望版本及成功回执保护写入。回执重放先于版本校验；业务数据与回执同时提交/回滚。帧、视频、决定和游标各自有版本；游标更新不改变业务完成状态。
 
 错误包含 `message`、`code`、`requestId`（亦可从 `X-Request-ID` 获取）。401 处理登录；409 处理冲突并保留意图；422 不合法参数；428 契约需要更新。不要统一吞掉错误返回空数据。具体错误以路由为准。
@@ -33,7 +35,19 @@
 
 `AnnotationObject` 定义在 [annotation.ts](../frontend/src/types/annotation.ts)：界面 `id` 与稳定 `objectId` 不等价，`frameIndex` 为实际 0 起帧号；工作区 bbox 为百分比 `{x,y,width,height}`。seed / Tracking / B/C 使用原图像素 xyxy，转换不能重复进行。追踪结果文件虽后缀 `.json`，实际逐行 JSONL。
 
+`GET /api/track/result/{mediaId}` 区分结果生命周期：源视频存在但尚未生成结果时返回 200 `{format:"sam3-tracking-results-jsonl",state:"not_generated",frames:[],count:0}`，不生成文件、不声明空帧；全量结果存在时为 `state:"available"`，有效零对象帧仍在 frames 中。可选 `required=true` 用于追踪任务成功/暂停后的读取，此时缺失返回 409 `TRACKING_RESULTS_MISSING`。服务端记录已发布/成功读取过的结果，之后文件丢失同样返回 409；送审预览及送审也拒绝这个状态，不能用显式空帧确认绕过。媒体缺失返回 404 `MEDIA_NOT_FOUND`。格式/对象几何损坏返回 500 并记录日志，不忽略坏框后伪造空结果。客户端不能将所有 404 或所有异常统一忽略。
+
+素材列表增加 `trackingResultState:'not_generated'|'present'|'missing'`；`hasTrackingResult` 分别为 false / true / null。null 明确表示已知结果丢失，不能当作尚未追踪。列表只查询文件/标记状态，不为列出素材读取全部 JSONL；`present` 表示文件存在，不代表内容已验证。详情和原始下载再校验格式、对象身份及几何。
+
+`GET /api/track/result-file/{mediaId}` 在健康未追踪时返回 404 `TRACKING_RESULTS_NOT_GENERATED`（没有可下载文件），媒体缺失为 404 `MEDIA_NOT_FOUND`，已知结果丢失为 409 `TRACKING_RESULTS_MISSING`；可选 `required=true` 时尚未生成也为 409。损坏结果返回 500，不能下载坏框充当正常 JSONL；有效零对象结果仍可下载。列表、详情和下载遵守同一结果生命周期，404 不是可以统一忽略的成功响应。
+
 工作区 GET 返回 `revision`（旧工作区首次为 0）；新版 PUT 携带 `expectedRevision` 和 `Idempotency-Key`，返回新的 `revision`。未知保存结果必须沿用原键和原正文，成功回执重放先于版本校验。无版本的旧客户端仍可保存普通编辑，但不能变更新删除规则，也不能覆盖服务端反馈、样本和回执。新前端始终使用版本和幂等键。
+
+工作区写入在提交回执前校验人工对象：正整数稳定 ID、同帧身份唯一、原始帧号在视频范围内、百分比框及点为有限数值并在 0–100 内；人工基准使用原图像素 xyxy。合法点标注仍允许。非法输入返回 422，不改变文件、版本或回执。seed 同样校验规范 mediaId、仍存在的原视频及帧/像素框，以临时文件原子替换；删除后的迟到 seed 返回 404，不重建孤立目录，写入/替换失败保留旧来源并记录日志。
+
+历史 Tracking 的 `object_id` / `objectId` / `sam3_object_id` 统一转换为稳定 `object_id`；存在真实 `source_frame_index` 时它优先于模型内部 `frame_index`。详情、下载、删除及送审采用同一转换，重复或矛盾的稳定身份不能静默接受。客户端也校验成功响应的数组、计数、帧、身份与几何结构，HTTP 200 不等于数据有效。完整重读替换 AI 集合，保留人工修改，不保留已撤销分支的旧 AI 框。
+
+旧无版本请求携带的 `deletedTrackingIds` 只能是当前已有历史删除标记的子集（也可省略）；服务端保留完整当前集合，不删除既有标记。尝试新增历史删除标记同样返回 428，不能利用旧字段绕过版本校验。带版本及幂等键的当前客户端可正常删除和撤销。
 
 `POST /api/track` 新前端另携带 `Idempotency-Key`，同账号原键/输入在当前后端进程内返回同一个 taskId，原键用于不同输入返回 409；覆盖轮次仍校验，不能借回执绕过 generationId。旧无键客户端保持兼容。状态 GET 含 `stage`（queued/decoding/preparing_model/tracking/saving_results/paused/completed）、处理帧数与原始 `lastProcessedFrame`，不暴露请求 hash/key。模型失败在任务状态返回 failed 与具体 message，短 HTTP 超时不等于后台任务已失败。工作区浏览状态可在追踪中保存；改人工框、基准或删除规则返回 409。rewind 成功的 `overlayRegenerated` 为 false，不重编码源视频；结果发布原子完成。
 

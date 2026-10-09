@@ -7,6 +7,7 @@
 1. 读 [当前流程与不可变规则](docs/WORKFLOW.md) 和 [代码地图](docs/PROJECT_STRUCTURE.md)。先检查 `git status`，保留已有未提交改动。
 2. 标注、追踪、画布或快捷键任务读 [ANNOTATION.md](docs/ANNOTATION.md)。接口或数据库任务读 [API.md](docs/API.md) 与 [STORAGE_LAYOUT.md](docs/STORAGE_LAYOUT.md)。
 3. 修改前确定 [TESTING.md](docs/TESTING.md) 中与任务对应的测试；在隔离数据上复现，按日志定位失败，再做修复和回归。
+   修改工作区加载、认证、读写/重试、公共 API、缓存或依赖/构建时，必须执行 TESTING.md 的固定浏览器回归入口；不能只挑本次功能的专项用例。缺陷先补能在旧行为下失败的行为测试，正常状态与故障恢复成对验证。数量多、构建通过、静态字符串断言均不能替代用户完整流程。
 4. 用户当前明确要求优先。代码和当前文档不一致时调查原因，不能从旧原型、旧报告或旧注释推断现有规则。
 
 ## 关键边界

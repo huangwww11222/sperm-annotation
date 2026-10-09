@@ -12,6 +12,8 @@ Vue 3 + TypeScript + Vite；FastAPI + SQLite；SAM3 在后端按需加载。前�
 | 容器启动前检查 | `backend/app/deployment_check.py`、`backend/docker-entrypoint.sh` |
 | 模型随仓库交付 | `model-distribution/manifest.json` 与 `LICENSE-SAM.txt`、`scripts/prepare_model.py` / `build_model_bundle.py` |
 | 仓库与容器验收 | `scripts/check_repository.py`、`scripts/docker_smoke.py`、`.github/workflows/` |
+| 固定浏览器回归与执行记录 | `scripts/run_browser_regression.py`；`frontend/tests/critical-workflows-browser.mjs` 从真实登录/上传走完整用户流程；测试专用模拟模型只在 `backend/tests/browser_server.py` |
+| 输入完整性、读取竞态与登录恢复 | `annotation/trackingResult.ts`、`stores/workspace.ts`、`stores/auth.ts`；`test_independent_integrity_audit.py`、`test_integrity_recovery.py` 及固定 `independent-integrity-browser.mjs` |
 | 路由/认证/布局/主题 | `frontend/src/router/index.ts`、`stores/auth.ts`、`layouts/AppLayout.vue`、`stores/appearance.ts`、`style.css` |
 | 三页共享工作台 | `components/WorkbenchHeader.vue` / `WorkbenchLayout.vue`、`workbench/workbench.css`；`stores/workbench.ts` 保存跨页视频列表收起偏好，布局约束见 WORKFLOW |
 | 人工标注 UI / 状态 | `pages/AnnotatePage.vue`、`stores/workspace.ts`、`annotation/annotation.css` |

@@ -2,6 +2,46 @@
 
 测试需要证明目标行为和核心边界；不要为纯文案反复跑 GPU，也不要以构建通过代替交互验证。
 
+## 固定回归入口与发布门禁
+
+修改工作区加载、认证、持久化/重试、公共 API、缓存、依赖或构建时，在专项测试之外必须运行下列固定入口。它从新的隔离目录启动自己的服务，顺序生成各套夹具，执行全部十组浏览器回归，结束后只关闭自己启动的进程。不能手工挑掉失败的套件后宣称完整回归通过。
+
+```bash
+npm ci --prefix frontend
+npx --prefix frontend playwright install chromium
+python3 scripts/run_browser_regression.py --python work/review-venv/bin/python --channel chromium
+```
+
+也可用本机 Chrome：`--channel chrome`。CI 使用已构建的 Python 3.12 后端镜像：`python3 scripts/run_browser_regression.py --backend-image annotation-ci-backend:cpu --channel chromium`。镜像模式仍使用独立 `work/e2e-confirm-ux-regression-*` 数据和单后端进程。`--critical-only` 仅用于定位问题，报告明确标记为子集，不能用于完整验收。
+
+固定套件：`critical-workflows`、`workflow-transitions`、`annotation-ux`、`tracking-recovery`、`review-failure`、`confirmation-failure`、`confirmation`、`training-export`、`workbench-consistency`、`independent-integrity`。每组前按依赖重建夹具；不得并行消费或重置共享夹具。执行记录、版本/未提交文件清单、各组退出状态、耗时与日志保存在该次隔离目录；失败会非零退出并记录尚未执行的范围，不能把旧报告当成本次结果。CI 保留服务/套件日志及截图子目录；夹具 JSON 可能包含 token，禁止上传。
+
+`independent-integrity` 保留独立审查中的行为断言：坏结构的成功响应、完整结果撤销后的 SPA 重读、跨素材迟到失败/成功、真实编码 4K 与 50,000 合成对象的读入/保存/刷新。另验证匿名/无效凭据不能读视频，HTTP 下真实 H.264 原生播放和 Range 正常，退出后不能读；真实保存已提交但响应丢失，再遇 `/auth/me` 500/网络失败/401，检查原请求保留、同账号重放与恢复后再次保存。首次新上传还从真实 Tracking/异常检测进入两个对象暂停，逐个正常确认后继续发布结果；只有模型预测被模拟。
+
+该合成负载设置宽松 CI 停滞门槛：全量结果读取 <8 s、首次恢复 <15 s、同步人工缓存 <64 KiB、最长主线程任务 <1.5 s，并保留实测耗时。这是隔离回归预算，不是医院 GPU、GB 视频或内网延迟的 SLA。慢盘测试以可释放的哈希阻塞注入证明同事件循环的健康请求与其他媒体保存仍在 2 s 内完成；不能将它称为真实医院慢盘实测。
+
+后端 `test_independent_integrity_audit.py` 保留独立审查用例；`test_integrity_recovery.py` 补 seed 临时写/替换失败、坏历史来源、合法点与像素边界、同事件循环慢盘上传时读取/另一视频写入、查重途中删除的竞态、长期反馈回执体积及重置后的准确重放。前端 `tracking-result.test.mjs` 通过 `npm run test:annotation` 校验结构故障组合，不能只靠静态源码断言。规范 ID 校验后，路径探针直接构造不安全目标；原子 seed 修复后，磁盘故障注入同时覆盖目标和临时文件，保留所有旧数据与错误断言。
+
+`critical-workflows-browser.mjs` 不导入前端 store，也不预先生成工作区、AI 结果或 A/B/C 任务：真实登录 → 上传原视频 → 画框保存/刷新 → 保存成功但响应丢失 → 刷新沿用原键/原正文重放 → 再次画框保存/刷新 → 删除重传 → 取消/覆盖重标 → 追踪 → 送审 → B 改框、逐帧提交、显式完成 → C 选择、显式完成 → 下载真实 ZIP → 重新确认关闭导出。夹具只产生输入视频。CI 还在实际生产前端镜像上运行同一用例的 CPU 模式，并启用旧浏览器 API 兼容检查，避免只验证 Vite 开发页面。
+
+完整回归中的模型输出由仅存在于 `backend/tests/browser_server.py` 的测试引擎模拟；视频解码、追踪编排、任务状态、结果发布与其余 API/数据库均走真实代码。测试入口拒绝业务数据路径，生产服务不导入它。CPU 镜像用例验证“AI 未启用后仍可人工完成流程”。两者都不代表真实 GPU 或模型准确率验收。医院 GPU 验收须另列，不能混入这些通过数量。
+
+### 用例设计必须检查的状态组合
+
+| 变化点 | 必须覆盖的正常路径 | 成对故障与恢复路径 |
+| --- | --- | --- |
+| 认证/首次进入 | 真实登录、空服务器、默认本地图片、首次上传可操作 | 账号变化后的锁只保护需要重新读取的服务器数据，不能永久锁住本地图片和导入 |
+| AI 结果读取 | 尚未生成、有效零对象、有对象、人工与 AI 合并 | 断网、超时、404 媒体缺失、500、200 坏 JSON、已生成文件丢失；保留数据，恢复后可再次操作 |
+| 列表/详情/原始结果下载 | 文件/标记四种组合，列表不读取全量 JSONL；旧文件首次读取补记 | marker 存在而结果丢失均明确异常；恢复真实文件后各端点恢复；坏格式/几何不能下载为成功结果 |
+| 删除/覆盖 | 删除后重传、覆盖后刷新和新标注保存、取消保留旧数据 | 拒绝已送审覆盖、版本冲突、提交成功但响应丢失的原键重放 |
+| 工作流转换 | 草稿→逐帧提交→显式完成 B→逐项选择→显式完成 C→真实导出 | 保存失败不增进度、不离页；100% 不自动完成；重审/重新确认立即关闭旧导出 |
+
+- 新增读取失败保护时，必须同时证明健康空态不会被锁；新增重试时，既测试持续故障，也测试恢复后再次完成实际操作。
+- 回归缺陷先补行为测试，并记录修复前的预期失败；不能用搜索某段源码存在代替行为验证。性能夹具预置结果可以用于测量，但不能替代全新上传的验收。
+- 断言检查实际画框/保存/刷新后的数据和用户下一步能否完成，不能止于“接口返回 200”“页面显示空列表”“错误条消失”。不能为了通过而删除保护断言；业务契约改变时同时解释并更新正常/失败两侧用例。
+- CI 的浏览器步骤与后端/单元测试同为发布条件，不使用 `continue-on-error`。发布/交付说明分别列出实际通过、失败、未执行及模拟范围。分支保护是否将工作流设为必需检查属于仓库设置，不能仅凭本地 YAML 声称已经启用。
+- 子套件打印 PASS 但运行器整体退出非零时，只能记录该子套件通过及进程/清理故障，不能判定完整验收通过；修正执行环境后重跑取得实际退出码。`--critical-only` 也不能代替十组固定回归。
+
 ## 先隔离数据
 
 后端导入/启动会初始化 DB 和表。运行 pytest、夹具、调试服务器前同时指定 `APP_DATA_DIR`、`APP_DB_FILE`、`APP_STORAGE_DIR`，不要使用业务默认目录。夹具只允许 `work/` 下规定的路径。旧 `backend/track_data` 仍可能被兼容读取，浏览器标注测试应筛选测试媒体，不能随便点用户素材。
@@ -31,6 +71,7 @@ npm run build --prefix frontend
 | 删除范围、人工正常反馈、重试 | `test:annotation`（含写入队列重放/账号隔离/版本冲突）；`test_annotation_controls.py`、`test_anomaly_detector.py`、`test_tracking_adaptive_feedback.py` | `annotation-delete-feedback-browser.mjs`（67；反馈/删除真后端，GPU模拟） |
 | Tracking 调用/完成定位 | seed、rewind、timing、manual baseline、frontend tracking contract pytest | `annotation-tracking-ui.mjs`（14，模拟响应，无真实 GPU） |
 | 4K 准备、保存锁与失败恢复 | `test_tracking_performance.py`、`test_video_timing.py`、`test_tracking_adaptive_feedback.py`；真实 4K 连续窗口/坐标、慢模型期间读写、启动重放、预览缓存和原子发布失败 | `tracking-recovery-browser.mjs`（25；真实 4K 视频/保存/抽帧，模拟模型与网络故障，查询恢复/原键重放/冲突备份） |
+| 工作区初始状态、结果生命周期、删除重传 | `test_tracking_result_lifecycle.py`；尚未生成/零对象/损坏/丢失、重置回滚、缺失结果不能当空帧送审 | 固定十组回归；`critical-workflows-browser.mjs` 必须从真实登录和原视频上传开始，不预置结果 |
 | 帧解码、追踪内存、大量修改项性能 | `test_video_frames.py`（逐帧身份/随机访问/失败 seek/缓存限量与原子失败/真实 processor 输入一致/掩码几何一致/首次模型 dtype）、`test_confirmation_performance.py`（5,000 项/紧凑回执/升级前重放/精确进度） | `performance-browser.mjs`（27；外部真实 4K 副本、50,000 AI 对象、初次读取失败/坏 JPEG 原位重试、C 同帧图像复用/增量回复/并发版本跳变） |
 | Chrome 93 / HTTP、素材删除 | `test:compatibility`、`test_media_deletion.py` | `browser-compat-media.mjs`；下述旧 API 回归模式 |
 | 送审 | `test_review_completion.py` | `review-ingress-browser.mjs`（6） |
@@ -215,6 +256,7 @@ python3 scripts/check_repository.py
 | `audit.captured`、`audit.export_failed/uncovered/extracted` | 自动固定快照、只读提取失败、旧包覆盖范围与提取数量；CLI 诊断在 stderr，不混入 ZIP |
 | `annotation.frame_slow/frame_failed/prefetch_failed` | 媒体、目标帧、耗时；慢阈值 250ms |
 | `annotation.workspace_save_failed/tracking_load_failed` | 媒体、保存序号与实际读取异常 |
+| `annotation.tracking_read_failed/tracking_results_missing/completion_results_missing`、`tracking.expected_result_missing` | 区分损坏、已有结果丢失、送审被阻止及任务报告完成却无结果；正常尚未追踪不记录为故障 |
 | `media.deleted/delete_failed/delete_rejected`、`annotation.media_deleted/media_delete_failed/media_list_failed` | 删除结果、媒体 ID、操作者、文件系统异常；前端网络失败不得当删除成功 |
 | `annotation.local_save_failed/selection_save_failed`、`ui.preference_save_failed` | 本机存储不可用 |
 | `annotation.feedback_saved`、`tracking.anomaly_pause/completed` | 正常确认原因、尺寸参照帧/来源、运动样本及实际续追起止帧；区分清除当前暂停与后续检测是否读取确认参照 |
@@ -226,32 +268,9 @@ python3 scripts/check_repository.py
 
 ## 最近验证记录
 
-2026-10-08 Linux CI 帧身份回归：`e3b6339` 的两个窗口读取测试以 MJPG 编码前的灰度值推断帧号，Linux 解码亮度舍入导致失败。夹具改用间隔明显的亮度，逐帧与独立顺序解码的 RGB 像素精确比较，仍校验真实帧号、尾部窗口和尺寸，不放宽容差或跳过检查。相关本地回归 **24 项通过**；远程 Actions 的 Linux 镜像结果以修复提交对应运行记录为准。
+2026-10-09 推送前验收：隔离后端全套 **430 项通过、1 项跳过**（需外部统计仓库的联调），前端单元 **37 项通过**，类型检查/生产构建通过；固定 **十组浏览器回归全部通过**，运行器退出码为 0。完整用户流程、正常与故障恢复、认证/播放/Range、迟到请求、4K 编码帧及 50,000 合成对象均按固定入口验证，模型预测使用测试引擎模拟。此轮使用 macOS CPU 与本机 Chrome，未验证医院 CUDA 或实际 Chrome 93 引擎，也不等于新提交远程 Actions 已通过。日志在 `work/push-1009/`，完整范围在 `work/e2e-confirm-ux-regression-511dd565bc/run.json`，测试服务已由运行器清理。
 
-2026-10-08 外部真实 4K 与性能：两段只读原视频均为 **4096×3000 MP4**，分别 630 帧/8.557 FPS、129 帧/7.94 FPS。独立顺序解码的帧 JPEG 与优化 API 相同；真实 processor 的前 8 帧在原整窗口/新分批方式下输入张量逐帧 SHA 完全一致，原文件与隔离副本完整 SHA 一致。中段连续窗口及尾帧通过真实解码/预处理、模拟推理的编排验证；未运行 CUDA 模型。
-
-本机 macOS CPU 测量：连续 12 个首次读取帧均值 **74.7→33.0 ms、62.6→23.5 ms**（含首帧开解码器，不含浏览器绘制/网络）；回退 **1–2 ms**，不编码视频。120 帧真实 processor 准备 **3.37/3.51 秒**，进程峰值 RSS **1,483/1,460 MiB**，CPU 模型输入 697.7 MiB；不包含 GPU 模型/推理显存。8 帧对照峰值 **1,755→1,304 MiB、1,631→1,304 MiB**。5,000 修改项旧兼容全量游标回复约 **2.2 MB/38 ms**，新版约 **1 KB/1.4 ms**；这是隔离测试中的处理时间/JSON 序列化大小，不是医院服务器测速。
-
-隔离全量后端 **376 项通过、1 项跳过**，前端单元 **20+6+4+5 项**、类型检查/生产构建和仓库检查通过。浏览器 **27 项真实视频/密集对象/坏 JPEG 恢复**、**25 项追踪恢复**、**48 项标注交互**、**34 项 C 故障**、**19 项 B 故障**、**124 项三页布局**通过，合计 **277 项**。同帧上下文的新缓存行为用断网不重复读图检查替换旧重复下载的故障注入；原键游标恢复仍验证。新请求/解码失败不能伪装成功，已缓存可用图像不因未请求的网络故障失效。日志 `work/performance-*.log/json`，数据 `work/performance-*`、`work/e2e-confirm-ux-performance-*`，图像在 `output/playwright/`。医院完整推理耗时、显存与精度仍需 GPU 实机验收。
-
-2026-10-08 前一阶段 4K 准备与超时恢复：先复现 rewind 全段重编码、长时推理占来源锁与忙时人工框写入三个失败，再修复并通过隔离后端全量 **361 项、1 项跳过**。前端几何/写入/兼容 **18+6+4+5 项**、类型检查和生产构建通过。真实 3840×2160 合成 AVI 验证连续窗口读取、原始帧号/像素框与按需预览；浏览器恢复专项 **25 项**、三页工作台 **124 项**、原追踪定位/显式反馈 **14 项通过**。模型和故障响应由测试模拟；当时尚未取得现场原视频。日志 `work/4k-*.log`；隔离数据 `work/e2e-confirm-ux-4k-*`；截图及失败诊断 `output/playwright/tracking-recovery-*`。
-
-2026-09-30 撤回送审、重复视频覆盖与本帧重审：隔离后端全量 **351 项通过、1 项跳过**；前端几何/写入/兼容 **18+6+4+5 项通过**，类型检查和生产构建通过。专项浏览器 **37 项**、既有三页工作台 **124 项通过**，覆盖两尺寸浅深主题、覆盖取消/响应丢失后刷新重试、旧窗口请求拒绝与待重试草稿清理、当前轮次人工记录/seed，以及 C→B→C 完整重审和其他帧决定保留。删除后的异常回归使用模拟推理，未运行真实 GPU。日志位于 `work/workflow-*.log`，数据在 `work/e2e-confirm-transitions-*`，截图在 `output/playwright/transitions-*`。
-
-2026-09-30 通用离线发布与升级：新增升级器 **64 项**（真实隔离 SQLite/文件、模拟 Docker 边界）及相关部署回归合计 **85 项通过**。Windows 打包工具 **19 组**模拟 Git/Docker 场景通过，实际运行环境为本机已有 PowerShell 7.4 容器（禁网）；真实 Git 快照归档检查通过。Windows 5.1 的执行已接入 CI，但本地结果不能称为 Windows 5.1 实机或远端 CI 通过。
-
-实际隔离 Compose 从 `2488003` 完整后端代码接管到当前应用，验证未知旧指纹拒绝、检查模式、完整镜像导入、备份升级、重复包无操作、恢复旧版本、回滚后再次升级以及受管理版本到下一版本的连续升级；升级后及回滚后旧登录令牌、工作区、C 确认和训练 ZIP 保留。本机使用 Linux ARM64 CPU 镜像，后端在依赖未变化的旧 CPU 镜像上替换完整代码，前端使用当前生产构建；不是重新下载依赖的完整 GPU 构建或医院 L20 验收。前端类型检查/生产构建通过。镜像、数据和日志隔离在 `work/offline-system-test/` 与 `work/offline-*.log`；未操作医院服务器。
-
-
-2026-09-29 Chrome 93 / HTTP 与素材删除修复：后端和离线更新脚本 **169 项通过**（其中更新脚本 7 项验证 CPU/GPU 配置选择、版本/运行配置不符停止、AI 忙/构建失败不切换服务、重启失败自动恢复原镜像）；前端兼容/几何/缓存 **5+5+6+4 项通过**，类型检查与 Chrome 93 目标构建通过。浏览器专项 **21**、B **27**、C **39**、C 故障恢复 **30**、训练导出 **29**、离线生产页面 **4**，合计 **150 项通过**；业务流程回归禁用了新版超时、UUID 和视频帧回调 API，专项/生产页面另验证真正的非安全 HTTP。
-
-实际隔离 CPU Compose 在旧镜像上运行小型补丁；发现并修正解压目录权限导致的 Nginx 403，新增首页与 API 双检查。真实验证安装、原镜像回滚、再次安装，以及升级前登录令牌、工作区、确认结果和训练包保留。容器中的生产构建实际通过上传/提帧、删除后刷新、人工框送审。补丁以现有本地镜像加 COPY 层，构建禁止拉取与网络，不传模型。Linux/Windows 7 Chrome 93 的实际客户端与 GPU 推理仍需医院端验收；本机缺失 API 测试和 CPU 容器不能代替它们。
-
-数据位于 `work/e2e-confirm-ux-compat-*`、`work/compat-offline-test/runtime`，日志 `work/compat-*.log`，截图 `output/playwright/compat-*`。以上为旧专项补丁的验证记录；当前完整更新包入口见 [Docker 部署说明](DOCKER_DEPLOYMENT.md#医院内网可复用的离线升级流程)。`test_offline_compat_update.py` 使用模拟 Docker，不访问真实服务器；生产页面脚本为 `offline-update-browser.mjs`，默认验证本机隔离容器 18087 端口，可用 `COMPAT_PRODUCTION_PORT` 修改端口，需先生成上述三帧 AVI 夹具。
-
-模型交付的专项验收：2026-09-28 部署测试 18 项通过，完整模型包校验、下载续传与缓存复用、处理器加载及公开 Release 附件检查完成；未运行真实 GPU 推理。固定模型信息以 `model-distribution/manifest.json` 为准。
-
-更早的环境、数量和故障过程集中保存在 [历史验证记录](archive/README.md#历史验证记录)，不作为本次修改自动通过的证明。
+此前生命周期、独立审查、4K 性能、部署及审计联调的过程和数量统一保存在 [历史验证记录](archive/README.md#历史验证记录)，不作为当前提交通过的证明。
 
 ### 自动审计与统计仓库联调
 
@@ -267,5 +286,3 @@ work/review-venv/bin/python -m pytest backend/tests/test_quality_audit.py backen
 interop 夹具生成真实 YOLO/COCO/双格式、多视频及重新确认前后的完整训练包和一份运维审计包。独立统计仓库检出到 `标注统计/` 时，将 `ANNOTATION_AUDIT_INTEROP_DIR` 指向该绝对目录，在统计仓库的 PYTHONPATH 下运行它的 pytest；两个进程不共用名为 app 的模块。没有设置联调路径时用例明确跳过。统计真实浏览器入口及运行方式见该仓库当前说明。
 
 容器 smoke 可设置 `SMOKE_STATE_FILE` 指向本次隔离 work 目录，避免覆盖其他测试的令牌文件。CPU 容器生成训练集后，用 `export-audit.sh` 实际提取，再让统计 CLI 导入；测试包含只读连接、输出拒绝覆盖、失败无半包，以及升级/恢复时运维脚本一起还原。
-
-2026-09-30 自动审计交付：主仓库完整后端 **333 项通过**（包含真实视频联调产物、审计事务/幂等/不可变、只读提取和脚本/恢复）；统计仓库 **23 项通过**，真实浏览器 **21 项通过**，两边类型检查/生产构建通过。PowerShell 打包 **19 组**模拟 Git/Docker 场景通过（本机 PowerShell 7.4 容器，非 Windows 5.1 实机）。隔离 CPU Compose 完成真实上传→A/B/C→训练 ZIP，`export-audit.sh` 从运行 DB 提取后由统计 CLI 在 Python 3.12 CPU 容器导入。该容器复用已有 CPU 依赖镜像并覆盖完整应用代码，未执行新 GPU 镜像构建或医院 L20 验收。npm 安装在本机遇到 CA 错误，前端构建复用了项目已安装、与锁文件一致的依赖；没有关闭 TLS 校验。证据位于 `work/audit-tests/`、`output/playwright/statistics-audit.png`。
