@@ -1,4 +1,5 @@
 import { useLegacyBrowserAPIs } from './legacy-browser-profile.mjs'
+import { statisticsExportChecks } from './statistics-export-checks.mjs'
 // Uses only the disposable confirmation fixtures and isolated test servers.
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -144,6 +145,7 @@ with zipfile.ZipFile(sys.argv[1]) as z:
   await button('关闭').click()
   await page.locator(`[data-session-id="${fixture.main.sid}"]`).click();await idle();await openExport()
   check(await taskId()===currentJob,'returning to a video restores only its own export job')
+  await statisticsExportChecks(page,fixture,origin)
   check(errors.length===0,'no uncaught browser errors across export and recovery flows')
   console.log(`SUCCESS ${checks} checks`)
 } finally {

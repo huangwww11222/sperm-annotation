@@ -20,7 +20,7 @@ const sections = guide.split(/^## /m).slice(1).map(part => {
 const matches = computed(() => sections.filter(s => s.text.toLowerCase().includes(search.value.trim().toLowerCase())))
 const current = computed(() => matches.value.find(s => s.title === selected.value) || matches.value[0])
 async function open() {
-  selected.value = ({ '/annotate': '人工标注', '/review': '审查模式', '/confirm': '对比确认' } as Record<string,string>)[props.page] || '开始使用'
+  selected.value = ({ '/annotate': '人工标注', '/review': '审查模式', '/confirm': '对比确认', '/results': '标注记录与统计导出' } as Record<string,string>)[props.page] || '开始使用'
   search.value = ''
   await nextTick()
   priorOverflow = document.body.style.overflow

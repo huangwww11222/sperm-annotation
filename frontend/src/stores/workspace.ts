@@ -5,7 +5,7 @@ import { hitHandle, moveBox, resizeBox, type Box } from '../annotation/geometry'
 import type { AnnotationObject, AnnotationTool, EffectResult, MediaAsset, SavedAnnotationFile } from '../types/annotation'
 // 登录、人工标注、视频目录、SAM3 Tracking 均走真实后端
 import { httpAnnotationApi } from '../api/httpAnnotationApi'
-import { trackApi, type DuplicateVideo, type TrackUploadResponse, type TrackStatusResponse, type ObjectDeletionSummary, type NormalMotionSample, type TrackingWarningSummary, type TrackingFeedbackEvent, type TrackingFeedbackResponse, type TrackingFeedbackInput } from '../api/trackApi'
+import { trackApi, type DuplicateVideo, type TrackUploadResponse, type TrackStatusResponse, type ObjectDeletionSummary, type NormalMotionSample, type TrackingWarningSummary, type TrackingFeedbackEvent, type TrackingFeedbackResponse, type TrackingFeedbackInput, type TrackingRestartInput } from '../api/trackApi'
 import { WorkspaceWrites, type WorkspaceDraft } from '../annotation/workspaceWrites'
 import { useAuth } from './auth'
 import { reviewWorkflowApi } from '../api/reviewWorkflowApi'
@@ -96,6 +96,12 @@ const createWorkspace = () => {
   const saveTickets = new Map<string, number>()
   const workspaceWrites = new WorkspaceWrites()
   const workspaceReadError = ref('')
+  type TrackingRestartIntent = { actorId: string; mediaId: string; serverMediaId: string; key: string; body: TrackingRestartInput; phase: 'restart' | 'start' | 'conflict' }
+  const pendingRestart = ref<TrackingRestartIntent | null>(null)
+  const trackingRestartBusy = ref(false), trackingRestartError = ref(''), trackingRestartStorageWarning = ref('')
+  const trackingRestartPendingAction = computed(() => pendingRestart.value?.mediaId === currentMediaId.value ? pendingRestart.value : null)
+  let restartController: AbortController | null = null, restartEpoch = 0
+  const cancelTrackingRestartRequest = () => { restartController?.abort(); restartController = null; restartEpoch++; trackingRestartBusy.value = false }
   const zoom = ref(1)
   const isInteracting = () => !!tempBbox.value || !!draggingObjectId || !!bboxStart
   const zoomIn = (step = 0.1) => { if (isInteracting()) return; zoom.value = Math.min(5, +(zoom.value + step).toFixed(2)) }
@@ -360,7 +366,7 @@ const createWorkspace = () => {
   const duplicateImport = ref<(DuplicateVideo & {key:string;pending:boolean;error:string})|null>(null)
   const importError = ref('')
   let finishDuplicate: ((result:TrackUploadResponse|null)=>void)|null=null
-  const editingBlocked = computed(() => submissionBusy.value || mediaImportBusy.value || !!duplicateImport.value || objectDeletionBusy.value || trackingFeedbackBusy.value || !!pendingDeletion.value || !!pendingFeedback.value || !!workspaceReadError.value || isAiBusy.value || !!deletingMediaId.value || exactFrameLoading.value || isPlaying.value || workspaceRestoring.value || !!frameError.value)
+  const editingBlocked = computed(() => submissionBusy.value || mediaImportBusy.value || !!duplicateImport.value || objectDeletionBusy.value || trackingFeedbackBusy.value || trackingRestartBusy.value || !!pendingRestart.value || !!pendingDeletion.value || !!pendingFeedback.value || !!workspaceReadError.value || isAiBusy.value || !!deletingMediaId.value || exactFrameLoading.value || isPlaying.value || workspaceRestoring.value || !!frameError.value)
   const workspaceRestoring = ref(false)
   const selectedObject = computed(() => currentObjects.value.find((item) => item.id === selectedObjectId.value) ?? null)
   const selectedEffect = computed(() => effectResults.value.find((item) => item.id === selectedEffectId.value) ?? effectResults.value[0] ?? null)
@@ -751,7 +757,7 @@ const createWorkspace = () => {
   }
 
   persistWorkspaceState = async (mediaId: string, useCurrentUiState = false) => {
-    if (deletingMediaId.value === mediaId || pendingDeletion.value || pendingFeedback.value) return
+    if (deletingMediaId.value === mediaId || pendingDeletion.value || pendingFeedback.value || pendingRestart.value) return
     const media = mediaAssets.value.find(item => item.id === mediaId)
     if (!media?.serverMediaId || workspaceRestoreInProgress || (workspaceRestoring.value && mediaId === currentMediaId.value)) return
     if (workspaceReadError.value) throw new Error(workspaceReadError.value)
@@ -776,7 +782,7 @@ const createWorkspace = () => {
   }
 
   scheduleWorkspaceStateSave = (mediaId: string) => {
-    if (mediaImportBusy.value || duplicateImport.value || deletingMediaId.value === mediaId || pendingDeletion.value || pendingFeedback.value || objectDeletionBusy.value || trackingFeedbackBusy.value || workspaceReadError.value) return
+    if (mediaImportBusy.value || duplicateImport.value || deletingMediaId.value === mediaId || pendingDeletion.value || pendingFeedback.value || pendingRestart.value || trackingRestartBusy.value || objectDeletionBusy.value || trackingFeedbackBusy.value || workspaceReadError.value) return
     if (!mediaId || workspaceRestoreInProgress || workspaceRestoring.value || !mediaAssets.value.find(m => m.id === mediaId)?.serverMediaId) return
     if (mediaId === currentMediaId.value) saveState.value = 'saving'
     const previous = workspaceSaveTimers.get(mediaId)
@@ -803,10 +809,11 @@ const createWorkspace = () => {
   const reloadWorkspaceFromServer = async () => {
     const mediaId=currentMediaId.value
     // Explicit reload keeps a local backup of geometry and pending intent.
-    const payload={workspace:buildWorkspaceState(mediaId,true),objects:annotationsByMedia.value[mediaId]||[],tracking:trackingFramesByMedia.value[mediaId]||[],pendingDeletion:pendingDeletion.value,pendingFeedback:pendingFeedback.value}
+    const payload={workspace:buildWorkspaceState(mediaId,true),objects:annotationsByMedia.value[mediaId]||[],tracking:trackingFramesByMedia.value[mediaId]||[],pendingDeletion:pendingDeletion.value,pendingFeedback:pendingFeedback.value,pendingRestart:pendingRestart.value}
     const url=URL.createObjectURL(new Blob([JSON.stringify(payload,null,2)],{type:'application/json'}))
     const anchor=document.createElement('a');anchor.href=url;anchor.download='annotation-recovery-'+createRequestId()+'.json';anchor.click();setTimeout(()=>URL.revokeObjectURL(url),1000)
     cancelScheduledSave(mediaId)
+    if (pendingRestart.value?.phase === 'conflict' && pendingRestart.value.mediaId === mediaId) { rememberRestart(pendingRestart.value, true); pendingRestart.value = null; trackingRestartError.value = '' }
     annotationsByMedia.value={...annotationsByMedia.value,[mediaId]:(annotationsByMedia.value[mediaId]||[]).filter(o=>o.source==='manual')}
     trackingFramesByMedia.value[mediaId]=[]
     await resetAnnotationViewForMedia(mediaId)
@@ -836,6 +843,119 @@ const createWorkspace = () => {
       workspaceReadError.value = `${error.message}；请重新加载素材`
       saveState.value = 'error'; saveError.value = workspaceReadError.value
     }
+  }
+  const restartJournalKey = (actorId: string, serverMediaId: string) => `annotation-restart:${actorId}:${serverMediaId}`
+  const rememberRestart = (intent: TrackingRestartIntent, remove = false) => {
+    try {
+      const key = restartJournalKey(intent.actorId, intent.serverMediaId)
+      if (remove) sessionStorage.removeItem(key)
+      else sessionStorage.setItem(key, JSON.stringify(intent))
+    } catch (error) {
+      trackingRestartStorageWarning.value = '浏览器无法保存重追恢复记录。请保留当前页面重试；刷新或关闭页面后无法保证恢复此次请求。'
+      console.error('[annotation.restart_journal_failed]', { mediaId: intent.serverMediaId, error })
+    }
+  }
+  const restoreRestart = (mediaId: string) => {
+    const media = mediaAssets.value.find(item => item.id === mediaId)
+    const actorId = useAuth().user.value?.id
+    if (!media?.serverMediaId || !actorId) return
+    try {
+      const intent = JSON.parse(sessionStorage.getItem(restartJournalKey(actorId, media.serverMediaId)) || 'null') as TrackingRestartIntent | null
+      if (!intent) return
+      if (intent.actorId !== actorId || intent.serverMediaId !== media.serverMediaId || !intent.key
+        || !['restart', 'start', 'conflict'].includes(intent.phase) || !Number.isSafeInteger(intent.body?.expectedRevision)
+        || !Number.isSafeInteger(intent.body?.startFrame) || !Number.isSafeInteger(intent.body?.expectedPausedFrame)
+        || intent.body.startFrame < 0 || intent.body.startFrame >= intent.body.expectedPausedFrame || intent.body.confirmDiscardFuture !== true) throw new Error('回退重追恢复记录损坏')
+      intent.mediaId = mediaId
+      if (trackingJobs.has(mediaId)) { rememberRestart(intent, true); return }
+      pendingRestart.value = intent
+      trackingRestartError.value = intent.phase === 'conflict' ? '回退时工作区发生冲突，请备份并重新读取工作区后再选择起点。'
+        : intent.phase === 'start' ? '旧分支已替换，新追踪尚未开始。请继续从已确认的起点追踪。'
+          : '上次回退请求结果尚未确认，请重试原请求；不能重新创建或替换起点。'
+      if (intent.phase === 'conflict') workspaceReadError.value = trackingRestartError.value
+    } catch (error) {
+      trackingRestartError.value = '回退重追恢复记录无法读取，请保留页面并联系管理员检查。'
+      workspaceReadError.value = trackingRestartError.value
+      console.error('[annotation.restart_restore_failed]', { mediaId: media.serverMediaId, error })
+    }
+  }
+  const retryTrackingRestart = async (): Promise<boolean> => {
+    const intent = pendingRestart.value
+    if (!intent || trackingRestartBusy.value || intent.phase === 'conflict' || currentMediaId.value !== intent.mediaId || useAuth().user.value?.id !== intent.actorId) return false
+    const serial = ++restartEpoch, actorId = intent.actorId
+    restartController?.abort(); restartController = new AbortController()
+    const isCurrent = () => serial === restartEpoch && actorId === useAuth().user.value?.id && currentMediaId.value === intent.mediaId && pendingRestart.value === intent
+    trackingRestartBusy.value = true; trackingRestartError.value = ''
+    try {
+      if (intent.phase === 'restart') {
+        const result = await trackApi.restartBranch(intent.serverMediaId, intent.body, intent.key, restartController.signal)
+        if (!isCurrent()) return false
+        workspaceWrites.setRevision(intent.serverMediaId, result.revision)
+        intent.phase = 'start'; rememberRestart(intent)
+        console.info('[annotation.restart_committed]', { mediaId: intent.serverMediaId, startFrame: intent.body.startFrame, pausedFrame: intent.body.expectedPausedFrame, revision: result.revision, removedRows: result.removedRows })
+      }
+      if (!isCurrent()) return false
+      // A replayed restart receipt confirms the past file operation. It does
+      // not grant permission to seed a source that has since been submitted.
+      if (submissionBusy.value) throw new Error('当前有送审操作尚未结束，请先完成或关闭送审操作，再继续原起点追踪')
+      const submission = await reviewWorkflowApi.submissionStatus(intent.serverMediaId)
+      if (!isCurrent()) return false
+      if (!Array.isArray(submission.items)) throw new Error('送审状态响应无法读取，已停止续追；请重试查询原起点')
+      if (submission.items.length) throw Object.assign(new Error('该视频已送审，不能继续重追或改写起始框；请先在允许撤回时撤回送审'), {status:409,code:'TRACKING_SOURCE_SUBMITTED'})
+      const start = intent.body.startFrame
+      // Human edits anywhere in the video survive replacing an AI branch.
+      annotationsByMedia.value = { ...annotationsByMedia.value, [intent.mediaId]: (annotationsByMedia.value[intent.mediaId] || []).filter(object => object.source === 'manual' || (object.frameIndex ?? 0) <= start) }
+      trackingFramesByMedia.value[intent.mediaId] = (trackingFramesByMedia.value[intent.mediaId] || []).filter(frame => frame.frameIndex <= start)
+      pausedAnomalies.value = []; lastPausedContext.value = null; anomalyObjectIds.value = []; anomalyPanelVisible.value = false
+      anomalyFrames.value = anomalyFrames.value.filter(frame => frame.frame_index <= start)
+      delete videoDeletionHistory.value[intent.mediaId]
+      for (const key of histories.keys()) if (key.startsWith(`${intent.mediaId}:`)) histories.delete(key)
+      historyRevision.value++; rememberControls(intent.mediaId)
+      if (currentFrame.value !== start || frameError.value) await seekVideo(frameToTime(start))
+      if (!isCurrent() || currentFrame.value !== start || frameError.value || exactFrameLoading.value) throw new Error('分支回退已保存，但起始帧未读取成功；请重试从原起点继续追踪')
+      await performTracking(false, intent)
+      if (pendingRestart.value === intent && isCurrent()) {
+        const failure = trackingErrors.value[intent.mediaId]
+        trackingRestartError.value = failure ? `${failure.phase}失败：${failure.message}。已替换的分支保留，请继续原起点。` : '新追踪尚未开始，请重试从原起点继续追踪。'
+        delete trackingErrors.value[intent.mediaId]
+        return false
+      }
+      return true
+    } catch (error) {
+      if (!isCurrent()) return false
+      const requestId = (error as {requestId?: string}).requestId
+      trackingRestartError.value = `${messageOf(error, '回退重追失败，请重试原请求')}${requestId ? `（记录号 ${requestId}）` : ''}`
+      if (definiteRejection(error)) {
+        intent.phase = 'conflict'; rememberRestart(intent)
+        workspaceReadError.value = `${trackingRestartError.value}；请备份并重新读取工作区，不能自动覆盖新状态`
+        saveState.value = 'error'; saveError.value = workspaceReadError.value
+      }
+      console.error('[annotation.restart_failed]', { mediaId: intent.serverMediaId, startFrame: intent.body.startFrame, pausedFrame: intent.body.expectedPausedFrame, phase: intent.phase, requestId, error })
+      return false
+    } finally {
+      if (serial === restartEpoch && actorId === useAuth().user.value?.id) trackingRestartBusy.value = false
+    }
+  }
+  const restartTrackingFromEarlierFrame = async (startFrame: number, pausedFrame: number): Promise<boolean> => {
+    const media = selectedMedia.value, actorId = useAuth().user.value?.id
+    if (!media?.serverMediaId || !actorId || editingBlocked.value || isInteracting() || startFrame !== currentFrame.value
+      || pausedFrame !== trackingPausedFrame.value || startFrame >= pausedFrame || !currentObjects.value.some(object => object.bbox)) return false
+    const serial = ++restartEpoch
+    const isCurrent = () => serial === restartEpoch && actorId === useAuth().user.value?.id && media.id === currentMediaId.value
+    trackingRestartBusy.value = true; trackingRestartError.value = ''; trackingRestartStorageWarning.value = ''
+    try {
+      cancelScheduledSave(media.id)
+      await persistWorkspaceState(media.id)
+      if (!isCurrent()) return false
+      const expectedRevision = workspaceWrites.getRevision(media.serverMediaId)
+      if (expectedRevision == null) throw new Error('工作区版本尚未读取，请重新读取素材后再重追')
+      pendingRestart.value = { actorId, mediaId: media.id, serverMediaId: media.serverMediaId, key: createRequestId(), phase: 'restart', body: { expectedRevision, expectedPausedFrame: pausedFrame, startFrame, confirmDiscardFuture: true, ...(workspaceGenerations.get(media.id) ? {generationId: workspaceGenerations.get(media.id)} : {}) } }
+      rememberRestart(pendingRestart.value)
+    } catch (error) {
+      if (isCurrent()) { trackingRestartError.value = messageOf(error, '请先重试保存当前修正，再重新追踪'); markVersionConflict(error); console.error('[annotation.restart_prepare_failed]', {mediaId:media.serverMediaId,startFrame,error}) }
+      return false
+    } finally { if (isCurrent()) trackingRestartBusy.value = false }
+    return retryTrackingRestart()
   }
   const getObjectDeletionSummary = async (objectId: number): Promise<ObjectDeletionSummary> => {
     const media = selectedMedia.value
@@ -1618,10 +1738,12 @@ const createWorkspace = () => {
     }
   }
 
-  const buildCurrentFrameSam3Objects = async (mediaId: string) => {
+  type TrackingSeedSnapshot = {frameIndex:number;timestampMs:number;objects:AnnotationObject[]}
+  const buildCurrentFrameSam3Objects = async (mediaId: string, snapshot?: TrackingSeedSnapshot) => {
     const media = mediaAssets.value.find((item) => item.id === mediaId)
     if (!media) return []
-    const objects = (annotationsByMedia.value[mediaId] ?? []).filter((obj) => (obj.frameIndex ?? 0) === currentFrame.value)
+    const frameIndex = snapshot?.frameIndex ?? currentFrame.value, timestampMs = snapshot?.timestampMs ?? Math.round(currentTime.value * 1000)
+    const objects = snapshot?.objects ?? (annotationsByMedia.value[mediaId] ?? []).filter((obj) => (obj.frameIndex ?? 0) === currentFrame.value)
     if (!objects.length) throw new Error(`第 ${currentFrame.value + 1} 帧没有人工标注`)
 
     // ID 完整性是断点续追的硬约束：不能在生成 seed JSON 时丢失 objectId，
@@ -1648,8 +1770,8 @@ const createWorkspace = () => {
         objectId,
         name: obj.name,
         source: obj.source,
-        frameIndex: currentFrame.value,
-        timestampMs: Math.round(currentTime.value * 1000),
+        frameIndex,
+        timestampMs,
       }
       if (obj.bbox) {
         item.bbox = [
@@ -1843,9 +1965,10 @@ const createWorkspace = () => {
    * AI Tracking 开始前自动把当前帧的人工标注写入数据库。
    * 每次 AI Tracking 点击时自动提交当前帧人工标注。
    */
-  const persistCurrentFrameManualAnnotations = async (media: MediaAsset, mediaId: string) => {
-    const current = (annotationsByMedia.value[mediaId] ?? []).filter(
-      (obj) => (obj.frameIndex ?? 0) === currentFrame.value && obj.source === 'manual'
+  const persistCurrentFrameManualAnnotations = async (media: MediaAsset, mediaId: string, snapshot?: TrackingSeedSnapshot) => {
+    const frameIndex = snapshot?.frameIndex ?? currentFrame.value, timestampMs = snapshot?.timestampMs ?? Math.round(currentTime.value * 1000)
+    const current = (snapshot?.objects ?? annotationsByMedia.value[mediaId] ?? []).filter(
+      (obj) => (obj.frameIndex ?? 0) === frameIndex && obj.source === 'manual'
     )
     if (!current.length) return { count: 0, batchId: undefined as string | undefined }
 
@@ -1858,8 +1981,8 @@ const createWorkspace = () => {
       mediaName: media.name,
       mediaWidth: pixel?.width ?? media.width,
       mediaHeight: pixel?.height ?? media.height,
-      frameIndex: media.type === 'video' ? currentFrame.value : undefined,
-      timestampMs: media.type === 'video' ? Math.round(currentTime.value * 1000) : undefined,
+      frameIndex: media.type === 'video' ? frameIndex : undefined,
+      timestampMs: media.type === 'video' ? timestampMs : undefined,
       objects: JSON.parse(JSON.stringify(current)),
       annotationVersion: 'annotation-v8-ai-tracking-autosave',
     })
@@ -1869,8 +1992,8 @@ const createWorkspace = () => {
       mediaId: canonicalMediaId,
       mediaName: media.name,
       mediaType: media.type,
-      frameIndex: media.type === 'video' ? currentFrame.value : undefined,
-      timestampMs: media.type === 'video' ? Math.round(currentTime.value * 1000) : undefined,
+      frameIndex: media.type === 'video' ? frameIndex : undefined,
+      timestampMs: media.type === 'video' ? timestampMs : undefined,
       savedAt: new Date().toISOString(),
       filename: '',
       batchId: result.batchId,
@@ -1880,7 +2003,7 @@ const createWorkspace = () => {
       savedResult,
       ...savedResults.value.filter((item) => !(
         item.mediaId === canonicalMediaId
-        && (item.frameIndex ?? 0) === currentFrame.value
+        && (item.frameIndex ?? 0) === frameIndex
         && item.username === savedResult.username
       )),
     ]
@@ -1893,7 +2016,7 @@ const createWorkspace = () => {
     try{const job=trackingJobs.get(mediaId);if(job)sessionStorage.setItem(trackingJournalKey(mediaId),JSON.stringify(job));else sessionStorage.removeItem(trackingJournalKey(mediaId))}
     catch(error){console.warn('[annotation.tracking_journal_failed]',{mediaId,error})}
   }
-  const performTracking = async (resume=false) => {
+  const performTracking = async (resume=false, restartIntent?: TrackingRestartIntent) => {
     if(trackingRetryBusy.value)return
     const mediaId = currentMediaId.value
     const media = mediaAssets.value.find((item) => item.id === mediaId)
@@ -1903,10 +2026,18 @@ const createWorkspace = () => {
     }
 
     let job=resume?trackingJobs.get(mediaId):undefined
-    const startFrame = job?.startFrame ?? currentFrame.value
+    const startFrame = job?.startFrame ?? restartIntent?.body.startFrame ?? currentFrame.value
+    const restartSerial = restartEpoch
+    let preparingRestartSeed = !!restartIntent
+    const restartSeedSnapshot: TrackingSeedSnapshot | undefined = restartIntent ? {frameIndex:startFrame,timestampMs:Math.round(frameToTime(startFrame)*1000),objects:clone((annotationsByMedia.value[mediaId]??[]).filter(object=>(object.frameIndex??0)===startFrame))} : undefined
+    const ensureRestartCurrent = () => {
+      if (restartIntent && (restartSerial !== restartEpoch || restartIntent.actorId !== useAuth().user.value?.id || mediaId !== currentMediaId.value)) throw new DOMException('账号或素材已切换，已停止本页续追', 'AbortError')
+      if (preparingRestartSeed && (currentFrame.value !== startFrame || exactFrameLoading.value || !!frameError.value)) throw new Error('重追起始帧已变化或尚未读取完成，未继续写入起始框；请重试从原起点追踪')
+      if (preparingRestartSeed && submissionBusy.value) throw new Error('当前有送审操作尚未结束，已停止准备起始框；请完成送审操作后再继续原起点追踪')
+    }
     let phase='保存工作区'
     let seed: Record<string, unknown>[]
-    if (pendingDeletion.value || pendingFeedback.value || workspaceReadError.value || (isAiBusy.value&&!resume)) return
+    if (pendingDeletion.value || pendingFeedback.value || (pendingRestart.value && pendingRestart.value !== restartIntent) || workspaceReadError.value || (isAiBusy.value&&!resume)) return
     if (!job&&lastPausedContext.value?.mediaId === mediaId && pausedAnomalies.value.some(item => !isObjectDeleted(mediaId, item.objectId, lastPausedContext.value!.frameIndex))) {
       anomalyPanelVisible.value = true
       showToast('请先逐项确认暂停对象，或修正框后确认，再继续追踪')
@@ -1928,12 +2059,14 @@ const createWorkspace = () => {
       }else{
       // 固化完整工作区（人工框、稳定 ID/名称、人工基准和异常状态），
       // 确保后端本轮 Tracking 与以后重新加载使用同一份人工基准。
-      await persistWorkspaceState(mediaId)
+      if (!restartIntent) await persistWorkspaceState(mediaId)
+      ensureRestartCurrent()
       // ① AI Tracking 点击即自动落库：当前帧人工标注先进入数据库，
       // 然后才写 seed JSON / 启动 SAM3。任何一步失败都不会“假保存”。
       statusMessage.value = `① 正在将第 ${startFrame + 1} 帧人工标注写入数据库……`
       phase='保存人工标注记录'
-      const persisted = await persistCurrentFrameManualAnnotations(media, mediaId)
+      const persisted = await persistCurrentFrameManualAnnotations(media, mediaId, restartSeedSnapshot)
+      ensureRestartCurrent()
       if (persisted.count) {
         showToast(`第 ${startFrame + 1} 帧 ${persisted.count} 个人工标注已写入数据库`)
       }
@@ -1943,11 +2076,12 @@ const createWorkspace = () => {
       // 当前帧保留，作为新的分支锚点；其上的 AI 框和人工修改/新增框会一起成为新 seed。
       statusMessage.value = `①b 正在从第 ${startFrame + 1} 帧切断旧 Tracking 未来分支……`
       phase='整理旧追踪分支'
-      const rewind = await trackApi.rewind({
+      const rewind = restartIntent ? null : await trackApi.rewind({
         mediaId: media.serverMediaId,
         generationId: workspaceGenerations.get(mediaId),
         startFrame,
       })
+      ensureRestartCurrent()
       // The future branch is now replaced. Old AI snapshots can no longer be
       // durably restored by an editor-only undo, so invalidate that history.
       delete videoDeletionHistory.value[mediaId]
@@ -1959,16 +2093,17 @@ const createWorkspace = () => {
       // 把 N 帧当前页面上最终存在的全部 bbox（旧 AI + 人工新增/修改）作为新 seed。
       annotationsByMedia.value = {
         ...annotationsByMedia.value,
-        [mediaId]: existingAfterRewind.filter((obj) => (obj.frameIndex ?? 0) <= startFrame),
+        [mediaId]: existingAfterRewind.filter((obj) => obj.source === 'manual' || (obj.frameIndex ?? 0) <= startFrame),
       }
       trackingFramesByMedia.value[mediaId] = (trackingFramesByMedia.value[mediaId] ?? [])
         .filter((frame) => frame.frameIndex <= startFrame)
       console.info(
-        `[ai-track] rewind branch at frame=${startFrame}: removedRows=${rewind.removedRows}, ` +
-        `deletedFutureSeedFiles=${rewind.deletedFutureSeedFiles}`
+        `[ai-track] ${restartIntent ? 'confirmed restart' : 'rewind'} branch at frame=${startFrame}: removedRows=${rewind?.removedRows ?? 0}, ` +
+        `deletedFutureSeedFiles=${rewind?.deletedFutureSeedFiles ?? 0}`
       )
 
-      seed = await buildCurrentFrameSam3Objects(mediaId)
+      seed = await buildCurrentFrameSam3Objects(mediaId, restartSeedSnapshot)
+      ensureRestartCurrent()
       if (!seed.length) {
         throw new Error(`第 ${startFrame + 1} 帧没有人工 bbox 标注`)
       }
@@ -1976,6 +2111,7 @@ const createWorkspace = () => {
       // 尺寸来自后端上传元数据。统一从该函数获取，保证 seed 与 Tracking
       // 请求使用同一套像素坐标系。
       const pixelSize = await getMediaPixelSize(media)
+      ensureRestartCurrent()
 
       // Phase 2: 把“当前页面正在看的这一帧”固化成后端 JSON seed。
       statusMessage.value = `② 正在生成第 ${startFrame + 1} 帧标注 JSON……`
@@ -1987,9 +2123,10 @@ const createWorkspace = () => {
         mediaWidth: pixelSize.width,
         mediaHeight: pixelSize.height,
         frameIndex: startFrame,
-        timestampMs: Math.round(currentTime.value * 1000),
+        timestampMs: restartSeedSnapshot?.timestampMs ?? Math.round(currentTime.value * 1000),
         annotations: seed,
       })
+      ensureRestartCurrent()
 
       // 后端以 SAM3_TRACK_FRAMES（包含 seed 帧）和剩余视频帧数为上限。
       statusMessage.value = `③ SAM3 将从第 ${startFrame + 1} 帧持续向后追踪，直到异常、单轮上限或视频末尾……`
@@ -2003,9 +2140,16 @@ const createWorkspace = () => {
         annotations: seed,
       }
       phase='启动追踪任务'
+      preparingRestartSeed = false
       trackingJobs.set(mediaId,{mediaId,startFrame,input,key:createRequestId()})
       job=trackingJobs.get(mediaId)!;rememberTracking(mediaId)
+      if (restartIntent && pendingRestart.value === restartIntent) {
+        // The durable tracking journal now owns recovery. Replaying a restart
+        // after this point must never truncate newly generated model results.
+        rememberRestart(restartIntent, true); pendingRestart.value = null; trackingRestartError.value = ''
+      }
       task=await trackApi.run(input,job.key)
+      ensureRestartCurrent()
       job.taskId=task.taskId;job.maxFrames=task.maxFrames;rememberTracking(mediaId)
       }
 
@@ -2017,6 +2161,7 @@ const createWorkspace = () => {
       for (;;) {
         phase='查询追踪任务'
         const status = await trackApi.getStatus(task.taskId)
+        ensureRestartCurrent()
         trackingProgress.value=status.stage==='decoding'?'正在读取本轮原始帧':status.stage==='preparing_model'?'正在准备模型和输入':status.stage==='saving_results'?'正在保存追踪结果':status.lastProcessedFrame!=null?`正在追踪第 ${status.lastProcessedFrame+1} 帧`:status.status==='queued'?'等待模型任务启动':'正在追踪'
 
         trackingWarningSummary.value = status.warningSummary ?? []
@@ -2030,6 +2175,7 @@ const createWorkspace = () => {
           const pauseFrame = status.pausedFrame ?? startFrame
           phase='读取追踪结果'
           await loadTrackingResult(mediaId, true, true, true)
+          ensureRestartCurrent()
 
           if (mediaId === currentMediaId.value) {
             await seekVideo(frameToTime(pauseFrame))
@@ -2063,6 +2209,7 @@ const createWorkspace = () => {
 
       phase='读取追踪结果'
       await loadTrackingResult(mediaId, true, true, true)
+      ensureRestartCurrent()
 
       if (mediaId === currentMediaId.value) {
         const finalStatus = completedStatus!
@@ -2079,6 +2226,7 @@ const createWorkspace = () => {
       }
       trackingJobs.delete(mediaId);rememberTracking(mediaId);delete trackingErrors.value[mediaId]
     } catch (error) {
+      if (restartIntent && (restartIntent.actorId !== useAuth().user.value?.id || restartSerial !== restartEpoch || mediaId !== currentMediaId.value)) return
       if (job&&(definiteRejection(error)||messageOf(error,'').includes('此服务器未启用 AI Tracking'))) {trackingJobs.delete(mediaId);rememberTracking(mediaId)}
       const message=phase==='查询追踪任务'&&Number((error as {status?:number})?.status)===404?'后台任务已不存在，服务器可能已重启。请检查已保存的结果，再重新追踪。':messageOf(error,'AI Tracking 失败')
       trackingErrors.value[mediaId]={phase,frameIndex:startFrame,message}
@@ -2088,10 +2236,14 @@ const createWorkspace = () => {
         showToast(statusMessage.value)
       }
     } finally {
-      isAiBusy.value = trackingJobs.size>0
-      trackingRetryBusy.value=false
-      trackingProgress.value = ''
-      if(!isAiBusy.value)scheduleWorkspaceStateSave(mediaId)
+      // A restarted request can finish after this page/account has moved on.
+      // Its cleanup must not release a newer operation's lock or erase progress.
+      if (!restartIntent || (restartIntent.actorId === useAuth().user.value?.id && restartSerial === restartEpoch && mediaId === currentMediaId.value)) {
+        isAiBusy.value = trackingJobs.size>0
+        trackingRetryBusy.value=false
+        trackingProgress.value = ''
+        if(!isAiBusy.value)scheduleWorkspaceStateSave(mediaId)
+      }
     }
   }
   const runAiTrack = () => performTracking()
@@ -2324,6 +2476,8 @@ const createWorkspace = () => {
     const serial = ++restoreSerial
     const actor = useAuth().user.value?.id
     const isCurrent = () => serial === restoreSerial && mediaId === currentMediaId.value && actor === useAuth().user.value?.id
+    restartController?.abort(); restartController = null; restartEpoch++
+    trackingRestartBusy.value = false; pendingRestart.value = null; trackingRestartError.value = ''; trackingRestartStorageWarning.value = ''
     cancelAnnotationGesture(); frameCache.clear(); exactFrameRequestSerial++; seekSerial++
     exactFrameLoading.value = false; isSeekingVideo = false; requestedFrame.value = null; frameError.value = ''
     workspaceRestoring.value = true
@@ -2384,6 +2538,7 @@ const createWorkspace = () => {
           trackingErrors.value[mediaId]={frameIndex:job.startFrame,phase:'恢复任务状态',message:'上次追踪结果尚未确认，请查询原任务，避免重复启动。'}
         }
       }catch(error){console.warn('[annotation.tracking_restore_failed]',{mediaId,error})}
+      restoreRestart(mediaId)
     }
     if (isCurrent()) workspaceRestoring.value = false
   }
@@ -2464,6 +2619,8 @@ const createWorkspace = () => {
     for (const timer of workspaceSaveTimers.values()) clearTimeout(timer)
     workspaceSaveTimers.clear()
     pendingDeletion.value = null; pendingFeedback.value = null
+    restartController?.abort(); restartController = null; restartEpoch++
+    pendingRestart.value = null; trackingRestartBusy.value = false; trackingRestartError.value = ''; trackingRestartStorageWarning.value = ''
     videoDeletionHistory.value = {}; histories.clear(); historyRevision.value++
     objectDeletionError.value = ''; trackingFeedbackError.value = ''
     trackingJobs.clear();trackingErrors.value={};isAiBusy.value=false
@@ -2471,6 +2628,7 @@ const createWorkspace = () => {
   })
 
   return {
+    restartTrackingFromEarlierFrame, retryTrackingRestart, cancelTrackingRestartRequest, trackingRestartBusy, trackingRestartError, trackingRestartPendingAction, trackingRestartStorageWarning,
     trackingError,trackingProgress,trackingRetryLabel,trackingRetryBusy,retryTracking,workspaceRecoveryRequired,saveRecoveryLabel,retryWorkspaceSave,reloadWorkspaceFromServer,
     getObjectDeletionSummary, removeObjectAcrossVideo, undoVideoObjectDeletion, retryObjectDeletion, canUndoVideoDeletion, lastVideoObjectDeletion, objectDeletionBusy, objectDeletionError, objectDeletionPendingAction, confirmTrackingAnomaly, retryTrackingAnomalyFeedback, trackingFeedbackBusy, trackingFeedbackError, trackingFeedbackPending, trackingFeedbackPendingAction, trackingCalibrationSummary, resetTrackingCalibration, trackingWarningSummary,
     deleteMedia, deletingMediaId, mediaDeleteError, persistWorkspaceState, retryExactFrame, saveState, saveError, playbackRate, pausePlayback, displayObjects, editingBlocked, workspaceRestoring, frameError, loadExactFrame, nudgeSelected, cancelAnnotationGesture, canUndo, canRedo,

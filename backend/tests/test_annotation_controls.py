@@ -297,16 +297,18 @@ def test_old_warning_or_different_paused_frame_cannot_calibrate_current_motion(c
     assert feedback(client, frameIndex=0).status_code == 409
     state["pausedAnomalies"] = []
     state["lastPausedContext"] = None
-    assert save(client, state).status_code == 200
-    assert feedback(client, expectedRevision=1).status_code == 409
+    # A historical completed workspace is a fixture, not a client accepting a
+    # live pause by clearing the protected server control fields.
+    (root / "workspace_state.json").write_text(json.dumps(state))
+    assert feedback(client).status_code == 409
     assert annotation_state.read_state(root).get("normalMotionSamples", []) == []
 
 
 def test_resolved_legacy_pause_item_is_not_a_pending_anomaly(controls):
     client, root, state = controls
     state["pausedAnomalies"] = [{"objectId": 7, "resolved": True}]
-    assert save(client, state).status_code == 200
-    assert feedback(client, expectedRevision=1).status_code == 409
+    (root / "workspace_state.json").write_text(json.dumps(state))
+    assert feedback(client).status_code == 409
 
 
 def shape_pause(root):

@@ -239,3 +239,78 @@ test('a malformed successful write receipt cannot clear pending state or remove 
   assert.equal(h.commits.length, 1)
   assert.deepEqual(writes(h).map(call => call.body.expectedRevision), [0, 0])
 })
+
+// Run the real tracking finalizer after a delayed response. This verifies the
+// observable cleanup behavior without starting a model or touching user data.
+const trackingSource = readFileSync(new URL('../src/stores/workspace.ts', import.meta.url), 'utf8')
+const trackingTree = ts.createSourceFile('workspace.ts', trackingSource, ts.ScriptTarget.Latest, true)
+let trackingOperation
+function findTrackingOperation(node) {
+  if (ts.isVariableDeclaration(node) && node.name.getText(trackingTree) === 'performTracking') trackingOperation = node.initializer
+  ts.forEachChild(node, findTrackingOperation)
+}
+findTrackingOperation(trackingTree)
+assert(trackingOperation?.body, 'the actual tracking operation must be available to the cleanup harness')
+const trackingFinalizer = trackingOperation.body.statements.find(node => ts.isTryStatement(node))?.finallyBlock
+assert(trackingFinalizer, 'the actual tracking operation must finish with cleanup')
+const delayedTrackingCleanup = ts.transpileModule(
+  `(async () => { try { await responseGate } finally ${trackingFinalizer.getText(trackingTree)} })()`,
+  { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
+).outputText
+function trackingCleanupHarness({ restart = true, activeJobs = true } = {}) {
+  const gate = deferred(), scheduled = []
+  const context = {
+    responseGate: gate.promise,
+    restartIntent: restart ? { actorId: 'actor-A' } : undefined,
+    restartSerial: 7,
+    restartEpoch: 7,
+    currentActor: 'actor-A',
+    mediaId: 'media-A',
+    currentMediaId: { value: 'media-A' },
+    trackingJobs: new Map(activeJobs ? [['current-job', { taskId: 'current-job' }]] : []),
+    isAiBusy: { value: true },
+    trackingRetryBusy: { value: true },
+    trackingProgress: { value: '正在查询当前任务' },
+    scheduleWorkspaceStateSave: mediaId => scheduled.push(mediaId),
+  }
+  context.useAuth = () => ({ user: { value: { id: context.currentActor } } })
+  const completion = runInNewContext(delayedTrackingCleanup, context)
+  return { context, scheduled, completion, resolve: gate.resolve }
+}
+
+for (const [reason, switchContext] of [
+  ['account changed', context => { context.currentActor = 'actor-B' }],
+  ['restart was cancelled or page unmounted', context => { context.restartEpoch++ }],
+  ['media changed', context => { context.currentMediaId.value = 'media-B' }],
+]) {
+  test(`a late restarted tracking response preserves the current UI when ${reason}`, async () => {
+    const h = trackingCleanupHarness()
+    switchContext(h.context)
+    h.resolve(); await h.completion
+    assert.equal(h.context.isAiBusy.value, true, 'the current job must remain busy')
+    assert.equal(h.context.trackingRetryBusy.value, true, 'a stale operation must not release the current retry lock')
+    assert.equal(h.context.trackingProgress.value, '正在查询当前任务', 'a stale operation must not erase current progress')
+    assert.deepEqual(h.scheduled, [], 'a stale operation must not schedule a save')
+  })
+}
+
+test('a matching restart still clears its retry state and schedules its completed workspace', async () => {
+  const h = trackingCleanupHarness({ activeJobs: false })
+  h.resolve(); await h.completion
+  assert.equal(h.context.isAiBusy.value, false)
+  assert.equal(h.context.trackingRetryBusy.value, false)
+  assert.equal(h.context.trackingProgress.value, '')
+  assert.deepEqual(h.scheduled, ['media-A'])
+})
+
+test('ordinary tracking retains its existing cleanup behavior', async () => {
+  const h = trackingCleanupHarness({ restart: false, activeJobs: false })
+  h.context.currentActor = 'actor-B'
+  h.context.restartEpoch++
+  h.context.currentMediaId.value = 'media-B'
+  h.resolve(); await h.completion
+  assert.equal(h.context.isAiBusy.value, false)
+  assert.equal(h.context.trackingRetryBusy.value, false)
+  assert.equal(h.context.trackingProgress.value, '')
+  assert.deepEqual(h.scheduled, ['media-A'])
+})

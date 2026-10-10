@@ -102,6 +102,8 @@ def test_real_4k_segment_keeps_source_frame_numbers_and_pixel_boxes(tmp_path, mo
 
 def test_lost_tracking_start_response_replays_same_job_without_duplicate_inference(controls,monkeypatch):
     client,root,state=controls
+    state.update(pausedAnomalies=[], lastPausedContext=None)
+    (root / 'workspace_state.json').write_text(json.dumps(state))
     monkeypatch.setattr(main,'SAM3_ENABLED',True)
     submissions=[]
     class Executor:

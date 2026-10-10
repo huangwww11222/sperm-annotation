@@ -17,8 +17,10 @@ const jsonRequest = async <T>(path: string, init: RequestInit = {}): Promise<T> 
   if (!res.ok) {
     if (res.status === 401) notifyAuthExpired()
     const detail = (data as any)?.message || (data as any)?.detail
-    const error = new Error(typeof detail === 'string' ? detail : detail?.message || `请求失败 (${res.status})`) as Error & { status: number }
+    const error = new Error(typeof detail === 'string' ? detail : detail?.message || `请求失败 (${res.status})`) as Error & { status: number; code?: string; requestId?: string }
     error.status = res.status
+    error.code = data?.code || (typeof data?.detail === 'object' ? data.detail?.code : undefined)
+    error.requestId = data?.requestId || res.headers.get('X-Request-ID') || undefined
     throw error
   }
   return data as T
@@ -46,6 +48,26 @@ export interface TrackRunResponse {
   maxFrames?: number
   trackFrames?: number
   seedFile?: string
+}
+
+export interface TrackingRestartInput {
+  expectedRevision: number
+  expectedPausedFrame: number
+  startFrame: number
+  confirmDiscardFuture: true
+  generationId?: string
+}
+export interface TrackingRestartResponse {
+  ok: true
+  mediaId: string
+  revision: number
+  pausedAnomalies: []
+  lastPausedContext: null
+  cutoffFrame: number
+  removedRows: number
+  keptRows: number
+  deletedFutureSeedFiles: 0
+  overlayRegenerated: false
 }
 
 
@@ -251,6 +273,20 @@ export const trackApi = {
       method: 'POST',
       body: JSON.stringify(input),
     })
+  },
+
+  async restartBranch(mediaId: string, input: TrackingRestartInput, requestKey: string, signal?: AbortSignal) {
+    const result = await jsonRequest<TrackingRestartResponse>(`/track/restart-branch/${encodeURIComponent(mediaId)}`, {
+      method: 'POST', signal, headers: { 'Idempotency-Key': requestKey }, body: JSON.stringify(input),
+    })
+    if (result.ok !== true || result.mediaId !== mediaId || result.cutoffFrame !== input.startFrame
+      || !Number.isSafeInteger(result.revision) || result.revision < 0
+      || !Array.isArray(result.pausedAnomalies) || result.pausedAnomalies.length || result.lastPausedContext !== null
+      || !Number.isSafeInteger(result.removedRows) || result.removedRows < 0
+      || !Number.isSafeInteger(result.keptRows) || result.keptRows < 0) {
+      throw new Error('服务器未返回有效分支回退结果，请重试原请求')
+    }
+    return result
   },
 
   async run(input: {

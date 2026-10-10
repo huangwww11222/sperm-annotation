@@ -106,7 +106,11 @@ try{
   await page.unroute('**/api/track/workspace/ux-video');await uiButton('重试保存').click();await page.waitForFunction(()=>window.ws.saveState.value==='saved')
   check(!(await page.locator('.error-banner').count()),'retry persists data and clears the saving error')
   const persisted=(await state()).objects
-  await page.reload();await page.evaluate(async()=>{window.ws=(await import(performance.getEntriesByType('resource').find(r=>r.name.includes('/src/stores/workspace.ts')).name)).useWorkspace()});await idle();check((await state()).frame===35,'refresh resumes the last selected video and exact frame');await selectMedia('ux-video.avi');await go(35)
+  await page.reload();await page.evaluate(async()=>{window.ws=(await import(performance.getEntriesByType('resource').find(r=>r.name.includes('/src/stores/workspace.ts')).name)).useWorkspace()})
+  // Login validation precedes workspace mounting. Idle alone can be true
+  // before restoration starts; require the original frame to actually return.
+  await page.waitForFunction(()=>window.ws.currentFrame.value===35&&!window.ws.workspaceRestoring.value&&!window.ws.exactFrameLoading.value)
+  check((await state()).frame===35,'refresh resumes the last selected video and exact frame');await selectMedia('ux-video.avi');await go(35)
   check(JSON.stringify((await state()).objects)===JSON.stringify(persisted),'manual geometry survives reload from the real workspace endpoint')
   await selectMedia('ux-portrait.avi');check(Math.abs((await rect()).width/(await rect()).height-450/800)<.01,'portrait media uses the correct source aspect ratio')
   await page.setViewportSize({width:1180,height:760});await page.waitForTimeout(150)

@@ -57,6 +57,8 @@ app.add_middleware(
 )
 
 register_review_routers(app)
+from .statistics_export_routes import router as statistics_router
+app.include_router(statistics_router)
 
 # GPU tracking strictly serialized for 4GB cards; FastAPI remains responsive.
 TRACK_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sam3-track")
@@ -98,6 +100,10 @@ def startup() -> None:
     TRACK_DATA_DIR.mkdir(parents=True, exist_ok=True)
     for root in (TRACK_DATA_DIR, LEGACY_TRACK_DATA_DIR):
         media_reimport.recover(root)
+        from .tracking_restart import recover as recover_tracking_restart
+        recover_tracking_restart(root)
+    for directory in iter_media_dirs():
+        annotation_state.recover_pause_publication(directory)
     DATASET_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     print("=" * 70)
     print("✅ FastAPI backend started")
@@ -116,6 +122,8 @@ def shutdown() -> None:
     frames.close()
     from .training_export import shutdown as stop_training_exports
     stop_training_exports()
+    from .statistics_export_jobs import shutdown as stop_statistics_exports
+    stop_statistics_exports()
     TRACK_EXECUTOR.shutdown(wait=False, cancel_futures=True)
 
 
@@ -664,6 +672,9 @@ def get_workspace_state(media_id: str, user: dict[str, Any] = Depends(current_us
     directory = media_dir(media_id)
     if not directory.is_dir() or not find_video(directory):
         raise HTTPException(404, "素材不存在")
+    from .tracking_restart import recover_directory
+    recover_directory(directory)
+    annotation_state.recover_pause_publication(directory)
     path = directory / WORKSPACE_STATE_FILE_NAME
     if not path.is_file():
         return {**(_legacy_workspace_state(directory, media_id) or {"exists": False, "mediaId": media_id}), "revision": 0}
@@ -721,6 +732,7 @@ def save_workspace_state(media_id: str, payload: dict[str, Any], user: dict[str,
         # remain authoritative and those boxes never become effective again.
         clean["manualAnnotations"] = [obj for obj in manual_annotations if not annotation_state.is_deleted(clean, int(obj.get("frameIndex", 0)), int(obj.get("objectId") or 0))]
         clean["manualBaselines"] = [obj for obj in manual_baselines if not annotation_state.is_deleted(clean, int(obj.get("frameIndex", 0)), int(obj.get("objectId") or 0))]
+        annotation_state.preserve_pause(previous, clean, payload, directory)
         return clean
     return annotation_state.write_state(directory, media_id, int(user["uid"]), idempotency_key if isinstance(idempotency_key, str) else "", payload, "workspace", build)
 
@@ -762,10 +774,11 @@ def _effective_track_frames(start_frame: int, total_frames: int, requested_frame
 
 
 def _require_pause_resolved(workspace: dict[str, Any], frame: int) -> None:
-    unresolved = [item for item in workspace.get("pausedAnomalies", []) if not annotation_state.is_deleted(workspace, frame, int(item.get("object_id", item.get("objectId", 0))))]
     context = workspace.get("lastPausedContext") or {}
-    if unresolved and context.get("frameIndex") == frame:
-        raise HTTPException(409, "请逐个明确确认本帧异常或修正框后继续，AI Tracking 不会自动接受异常")
+    pause_frame = context.get("frameIndex", frame)
+    unresolved = [item for item in workspace.get("pausedAnomalies", []) if not item.get("resolved") and not annotation_state.is_deleted(workspace, pause_frame, int(item.get("object_id", item.get("objectId", 0))))]
+    if unresolved:
+        raise HTTPException(409, "请逐个明确确认暂停帧的异常；要从更早帧重新追踪，请先确认重建追踪分支")
 
 
 def _run_tracking_task(task_id: str, req: TrackRequest, video: Path, seed_file: Path, output_file: Path) -> None:
@@ -778,6 +791,9 @@ def _run_tracking_task(task_id: str, req: TrackRequest, video: Path, seed_file: 
         result = track_video(str(video), str(seed_file), str(output_file), max_frames=req.maxFrames, bbox_mode="pixel", start_frame=req.startFrame, normal_feedback=workspace.get("normalMotionSamples", []),
                             progress=lambda **patch: _set_task(task_id, elapsedSeconds=round(time.perf_counter() - began, 1), **patch))
         anomaly_paused = result.get("anomaly_paused")
+        # The real tracker publishes pause metadata with the JSONL intent;
+        # finish an interrupted publication before reporting a successful task.
+        annotation_state.recover_pause_publication(video.parent)
         if anomaly_paused:
             _set_task(
                 task_id,
@@ -856,6 +872,15 @@ def rewind_tracking(req: dict[str, Any], user: dict[str, Any] = Depends(current_
             "overlayRegenerated": False,
         }
     return {"ok": True, "mediaId": media_id, **info}
+
+
+@app.post("/api/track/restart-branch/{media_id}")
+@source_write
+def restart_tracking_branch(media_id: str, payload: dict[str, Any], user: dict[str, Any] = Depends(current_user), idempotency_key: str = Header(default="")) -> dict[str, Any]:
+    from .tracking_restart import restart
+    require_tracking_enabled()
+    directory = media_dir(media_id)
+    return restart(directory, int(user["uid"]), idempotency_key, payload, source_media_info(directory), tracking_is_busy)
 
 
 @app.post("/api/track", status_code=202)
@@ -1184,6 +1209,8 @@ def delete_media(media_id: str, user: dict[str, Any] = Depends(current_user)) ->
     directory = media_dir(media_id)
     if not directory.is_dir():
         raise HTTPException(404, "素材不存在")
+    from .tracking_restart import recover_directory
+    recover_directory(directory)
     from .db import connect
     with connect() as conn:
         referenced = conn.execute('SELECT 1 FROM annotation_baselines a JOIN media_revisions m ON m.id=a.media_revision_id WHERE m.media_id=? LIMIT 1',(media_id,)).fetchone()

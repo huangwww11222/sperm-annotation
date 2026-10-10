@@ -105,6 +105,7 @@
 .annotation-page.focused .tracking-anomaly{max-height:28vh}
 
 .object-delete-dialog{width:535px;max-width:calc(100vw - 40px);margin:auto;padding:23px}
+.tracking-restart-dialog{width:560px;max-width:calc(100vw - 40px);max-height:calc(100vh - 48px);margin:auto;padding:23px;overflow:auto}.tracking-restart-dialog::backdrop{background:#0c203577}.tracking-restart-dialog header{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:16px}.tracking-restart-dialog h2{font-size:18px}.tracking-restart-dialog p,.tracking-restart-dialog ul{font-size:12px;line-height:1.9;margin:12px 0;color:var(--muted)}.tracking-restart-dialog ul{list-style:disc;padding-left:18px}.tracking-restart-dialog .error-banner{display:flex;align-items:center;flex-wrap:wrap;gap:8px;font-size:11px}.tracking-restart-dialog .error-banner span{overflow-wrap:anywhere}
 .object-delete-dialog::backdrop{background:#0c203577}
 .object-delete-heading{display:flex;align-items:flex-start;gap:10px;justify-content:space-between}
 .object-delete-heading h2{margin:0 0 7px;font-size:18px}

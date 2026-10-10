@@ -134,8 +134,14 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
         text += "\n"
     temporary = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
     try:
-        temporary.write_text(text, encoding="utf-8")
+        import os
+        with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
         temporary.replace(path)
+        from .tracking_restart import _sync_directory
+        _sync_directory(path.parent)
         remember_tracking_results(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
@@ -658,7 +664,7 @@ def track_video(
             break
 
     if progress: progress(stage='saving_results', message='正在保存追踪结果')
-    merged_rows = _merge_rows(Path(output_json), new_rows, keep_before_source_frame=seed_source_idx)
+    merged_rows = _merge_rows(Path(output_json), new_rows, keep_before_source_frame=seed_source_idx, pause=result_anomaly_paused)
 
     result = {
         "frames": [{**row, "objects": [obj for obj in row.get("objects", []) if not is_deleted(workspace, int(row["source_frame_index"]), int(obj["object_id"]))]} for row in merged_rows],
@@ -703,6 +709,7 @@ def _merge_rows(
     path: Path,
     new_rows: list[dict[str, Any]],
     keep_before_source_frame: int | None = None,
+    pause: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Merge a new tracking segment into the result file.
 
@@ -711,6 +718,8 @@ def _merge_rows(
     old future tracking results after the pause frame. Rows strictly before the
     new seed are retained, while the new segment owns the seed-and-later range.
     """
+    from .tracking_restart import recover_directory
+    recover_directory(path.parent)
     merged: dict[int, dict[str, Any]] = {}
     for row in _read_jsonl(path):
         try:
@@ -728,7 +737,10 @@ def _merge_rows(
         merged[key] = row
 
     ordered = [merged[key] for key in sorted(merged)]
+    from .annotation_state import prepare_pause_publication, recover_pause_publication
+    prepare_pause_publication(path.parent, ordered, pause)
     _write_jsonl(path, ordered)
+    recover_pause_publication(path.parent)
     (path.parent / OVERLAY_FILE_NAME).unlink(missing_ok=True)
     return ordered
 

@@ -41,6 +41,7 @@ export class WorkspaceWrites {
     } catch (error) { console.warn('[annotation.pending_cache_failed]', { mediaId, error }) }
   }
   setRevision(mediaId: string, revision: number) { this.revisions.set(this.storageKey(mediaId), revision); this.conflicts.delete(this.storageKey(mediaId)) }
+  getRevision(mediaId: string) { return this.revisions.get(this.storageKey(mediaId)) }
   discardForReset(mediaId: string, revision: number) {
     // Only a confirmed server generation change authorizes dropping an old
     // ambiguous request. Ordinary conflicts must retain the reload requirement.

@@ -22,6 +22,10 @@ def integer(value, label):
 
 
 def source(directory, uid, info):
+    from .tracking_restart import recover_directory
+    recover_directory(directory)
+    from .annotation_state import recover_pause_publication
+    recover_pause_publication(directory)
     tracker = directory / "tracker_results.json"
     if not tracker.exists() and (directory / RESULT_META_FILE).exists():
         logging.getLogger('review.annotation').error('annotation.completion_results_missing media=%s', directory.name)

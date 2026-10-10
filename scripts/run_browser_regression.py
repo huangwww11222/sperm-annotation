@@ -51,6 +51,18 @@ def wait_http(url, process):
     raise RuntimeError('Test server readiness timed out: '+url)
 
 
+def preserve_review_logs(base):
+    """Keep the backend's fault stacks in the existing CI log artifact scope."""
+    for source in (base / 'data' / 'logs').glob('review.log*'):
+        if not source.is_file() or source.is_symlink():
+            continue
+        suffix = source.name.removeprefix('review.log')
+        target = base / ('review' + suffix + '.log')
+        content = source.read_text(encoding='utf-8', errors='replace')
+        content = re.sub(r'eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+', '[redacted-test-token]', content)
+        target.write_text(content, encoding='utf-8')
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--python', default=sys.executable)
@@ -88,7 +100,7 @@ def main():
     # Preserve virtualenv symlinks: resolving bin/python selects the base env.
     python = [os.path.abspath(args.python)]
     if args.backend_image:
-        python = ['docker', 'exec', '-w', '/workspace', container, 'python']
+        python = ['docker', 'exec', '-i', '-w', '/workspace', container, 'python']
     # Existing ZIP checks execute Python; keep them on the same dependency/runtime version.
     wrapper = base/'python-under-test'
     wrapper.write_text('#!/bin/sh\nexec '+shlex.join(python)+' "$@"\n')
@@ -98,6 +110,8 @@ def main():
     report = {'scope':'critical-only' if args.critical_only else 'mandatory',
               'gitHead':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
               'workingTree':subprocess.check_output(['git','status','--short'],text=True).splitlines(),
+              'backendMode':'container' if args.backend_image else 'local',
+              'backendRuntime':args.backend_image or python[0], 'browserChannel':args.channel,
               'model':'simulated; no GPU validation', 'requiredSuites':[s for s,_ in selected],
               'suites':[], 'status':'running'}
     processes, handles = [], []
@@ -135,7 +149,11 @@ def main():
             docker_env = {k:env[k] for k in ('APP_DATA_DIR','APP_DB_FILE','APP_STORAGE_DIR','PYTHONPATH','BROWSER_SIMULATED_MODEL','SAM3_ENABLED','SAM3_DEVICE')}
             docker_env['CRITICAL_VIDEO'] = str(runtime_base/'critical-input.avi')
             docker_env['INDEPENDENT_AUDIT_ROOT'] = str(runtime_base)
-            backend_command = ['docker','run','--rm','--name',container,'--entrypoint','python','-w','/workspace',
+            # Fixtures share the host checkout: root-owned files cannot be
+            # translated or cleaned by the unprivileged Linux Actions runner.
+            backend_command = ['docker','run','--rm','--name',container,
+                               '--user',f'{os.getuid()}:{os.getgid()}',
+                               '--entrypoint','python','-w','/workspace',
                                '-v',str(ROOT)+':/workspace','-p',f'127.0.0.1:{backend_port}:{backend_port}']
             for k,v in docker_env.items(): backend_command += ['-e', k+'='+v]
             backend_command += [args.backend_image,'backend/tests/browser_server.py','--host','0.0.0.0','--port',str(backend_port)]
@@ -170,6 +188,12 @@ def main():
                 try: process.wait(timeout=10)
                 except subprocess.TimeoutExpired: os.killpg(process.pid, signal.SIGKILL)
         for handle in handles: handle.close()
+        try:
+            preserve_review_logs(base)
+        except OSError as error:
+            report['diagnosticsError'] = str(error)
+            save_report()
+            print('Could not preserve backend review logs: '+str(error), file=sys.stderr)
         lock.rmdir()
         print('Regression evidence: '+str(base/'run.json'), flush=True)
 

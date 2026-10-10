@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import uuid
 from pathlib import Path
 from typing import Any, Callable
@@ -19,10 +20,14 @@ from fastapi import HTTPException
 log = logging.getLogger("review.annotation")
 FILE_NAME = "workspace_state.json"
 RESULT_META_FILE = "tracker_results.meta.json"
-SERVER_FIELDS = {"normalMotionSamples", "trackingFeedbackEvents", "_writeReceipts", "revision", "deletedAnnotationFrames", "generationId"}
+SERVER_FIELDS = {"normalMotionSamples", "trackingFeedbackEvents", "_writeReceipts", "revision", "deletedAnnotationFrames", "generationId", "pausedAnomalies", "lastPausedContext"}
 
 
-def read_state(directory: Path) -> dict[str, Any]:
+def read_state(directory: Path, *, recover_pause: bool = True) -> dict[str, Any]:
+    from .tracking_restart import recover_directory
+    recover_directory(directory)
+    if recover_pause:
+        recover_pause_publication(directory)
     path = directory / FILE_NAME
     if not path.is_file():
         return {}
@@ -295,6 +300,9 @@ def remember_tracking_results(directory: Path) -> None:
 
 def tracking_result_presence(directory: Path) -> str:
     """Cheap lifecycle metadata; 'present' does not certify file contents."""
+    from .tracking_restart import recover_directory
+    recover_directory(directory)
+    recover_pause_publication(directory)
     if (directory / 'tracker_results.json').is_file():
         return 'present'
     return 'missing' if (directory / RESULT_META_FILE).exists() else 'not_generated'
@@ -451,4 +459,128 @@ def feedback_state(previous: dict[str, Any], directory: Path, body: dict[str, An
     ]
     if not result["pausedAnomalies"]:
         result["lastPausedContext"] = None
+    candidates = previous.get("_pauseCandidates", previous.get("pausedAnomalies", []))
+    result["_pauseCandidates"] = [item for item in candidates if decision == "reset" or item.get("object_id", item.get("objectId")) != object_id]
+    result["_pauseContext"] = (previous.get("_pauseContext") or previous.get("lastPausedContext")) if result["_pauseCandidates"] else None
     return result
+
+
+def preserve_pause(previous: dict[str, Any], clean: dict[str, Any], payload: dict[str, Any], directory: Path | None = None) -> None:
+    """PUT can enrich labels or delete/undo objects, but cannot accept a pause."""
+    candidates = previous.get("_pauseCandidates", previous.get("pausedAnomalies", []))
+    context = previous.get("_pauseContext") or previous.get("lastPausedContext")
+    labels = {item.get("objectId", item.get("object_id")): item for item in payload.get("pausedAnomalies", []) if isinstance(item, dict)} if isinstance(payload.get("pausedAnomalies", []), list) else {}
+    display_fields = ("displayName", "title", "summary", "metrics", "baselineFrame", "reviewRange", "reviewNotice", "suggestion", "geometryReferenceFrame", "geometryReferenceSource")
+    enriched = [{**item, **{field: labels.get(item.get("objectId", item.get("object_id")), {}).get(field, item.get(field)) for field in display_fields if field in labels.get(item.get("objectId", item.get("object_id")), {})}} for item in candidates]
+    clean["_pauseCandidates"] = enriched
+    clean["_pauseContext"] = context
+    pause_frame = (context or {}).get("frameIndex")
+    clean["pausedAnomalies"] = [item for item in enriched if not item.get("resolved") and not is_deleted(clean, pause_frame, item.get("objectId", item.get("object_id")))] if type(pause_frame) is int else []
+    if directory is not None and not previous.get("pausedAnomalies") and clean["pausedAnomalies"]:
+        # A discarded branch must not be restored merely by undoing a deletion.
+        if not any(row["source_frame_index"] == pause_frame for row in read_rows(directory)):
+            clean["_pauseCandidates"] = []
+            clean["_pauseContext"] = None
+            clean["pausedAnomalies"] = []
+    clean["lastPausedContext"] = context if clean["pausedAnomalies"] else None
+
+
+def publish_tracking_pause(directory: Path, media_id: str, pause: dict[str, Any] | None, publication_id: str | None = None) -> None:
+    """Persist real task output without advancing the editor's saved revision."""
+    from .review_source_lock import source_write
+    @source_write
+    def publish():
+        state = read_state(directory, recover_pause=False)
+        if not (directory / FILE_NAME).is_file():
+            # Creating pause metadata cannot hide legacy durable manual seeds.
+            from .main import _legacy_workspace_state
+            state = _legacy_workspace_state(directory, media_id) or state
+        notices = []
+        if pause:
+            titles = {"disappearance": "目标丢失", "overlap": "目标框发生重叠", "size_shrink": "框相对最近人工标注明显缩小", "size_growth": "框相对最近人工标注明显扩大或变形", "shape_change": "框相对最近人工标注明显扩大或变形", "tracking_motion": "目标运动异常"}
+            for item in pause.get("reasons", []):
+                oid = item.get("object_id", item.get("objectId"))
+                if type(oid) is not int or oid <= 0:
+                    raise HTTPException(500, "追踪暂停对象身份无效")
+                reasons = item.get("reasons", [])
+                geometry = item.get("type") in {"size_shrink", "size_growth", "shape_change"} or any(str(r).startswith(("manual_area_ratio=", "manual_width_ratio=", "manual_height_ratio=", "manual_aspect_change=")) for r in reasons)
+                notices.append(dict(objectId=oid, displayName=item.get("display_name") or item.get("name") or f"精子 {oid}", title=titles.get(item.get("type"), "追踪异常"), summary="请检查当前目标及暂停前的框是否正确。", metrics=[], suggestion="修正后确认，或回到更早的错误帧重建追踪分支。", acceptsGeometry=geometry, canLearn=any(str(r).startswith("adjacent_center_shift=") for r in reasons), rawReasons=reasons))
+        context = {"mediaId": media_id, "frameIndex": pause["frame_index"]} if pause and notices else None
+        state.update(_pauseCandidates=notices, _pauseContext=context, pausedAnomalies=notices, lastPausedContext=context)
+        if publication_id is not None:
+            state["_pausePublicationId"] = publication_id
+        temporary = directory / ("." + FILE_NAME + "." + uuid.uuid4().hex + ".tmp")
+        try:
+            with temporary.open("w", encoding="utf-8") as stream:
+                json.dump(state, stream, ensure_ascii=False, allow_nan=False)
+                stream.flush()
+                os.fsync(stream.fileno())
+            temporary.replace(directory / FILE_NAME)
+            from .tracking_restart import _sync_directory
+            _sync_directory(directory)
+        finally:
+            temporary.unlink(missing_ok=True)
+    publish()
+
+
+PAUSE_PENDING_FILE = ".tracking-pause-publication.json"
+
+
+def prepare_pause_publication(directory: Path, rows: list[dict[str, Any]], pause: dict[str, Any] | None) -> None:
+    """Write intent before publishing the matching JSONL; reads finish a crash."""
+    digest = hashlib.sha256()
+    for row in rows:
+        digest.update((json.dumps(row, ensure_ascii=False) + "\n").encode())
+    target = directory / PAUSE_PENDING_FILE
+    temporary = target.with_name(target.name + "." + uuid.uuid4().hex + ".tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as stream:
+            json.dump({"format": "tracking-pause-publication-v1", "publicationId": uuid.uuid4().hex, "resultSha256": digest.hexdigest(), "pause": pause}, stream, ensure_ascii=False, allow_nan=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(target)
+        from .tracking_restart import _sync_directory
+        _sync_directory(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def recover_pause_publication(directory: Path) -> None:
+    if not (directory / PAUSE_PENDING_FILE).is_file():
+        return
+    from .review_source_lock import source_write
+    @source_write
+    def recover():
+        marker = directory / PAUSE_PENDING_FILE
+        if not marker.is_file():
+            return
+        try:
+            intent = json.loads(marker.read_text(encoding="utf-8"))
+            if intent.get("format") != "tracking-pause-publication-v1" or not isinstance(intent.get("publicationId"), str) or not intent["publicationId"]:
+                raise ValueError("invalid pause publication intent")
+            state = read_state(directory, recover_pause=False)
+            if state.get("_pausePublicationId") != intent["publicationId"]:
+                result = directory / "tracker_results.json"
+                digest = hashlib.sha256()
+                if result.is_file():
+                    with result.open("rb") as stream:
+                        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                            digest.update(chunk)
+                if result.is_file() and digest.hexdigest() == intent["resultSha256"]:
+                    publish_tracking_pause(directory, directory.name, intent["pause"], intent["publicationId"])
+                    log.warning("tracking.pause_publication_recovered media=%s", directory.name)
+            # Even an already-applied ID must have its rename made durable
+            # before cleanup, including a prior directory-sync failure.
+            from .tracking_restart import _sync_directory
+            _sync_directory(directory)
+            try:
+                marker.unlink()
+                _sync_directory(directory)
+            except OSError:
+                # Applied publication IDs make cleanup retries harmless after
+                # a later normal/corrected feedback or a branch restart.
+                log.exception("tracking.pause_cleanup_pending media=%s", directory.name)
+        except Exception as exc:
+            log.exception("tracking.pause_publication_failed media=%s", directory.name)
+            raise HTTPException(503, "追踪暂停状态尚未保存，请保留当前编辑并重试读取") from exc
+    recover()

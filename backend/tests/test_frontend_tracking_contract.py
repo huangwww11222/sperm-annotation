@@ -24,7 +24,11 @@ def test_anomaly_panel_contract_keeps_markers_and_uses_real_names() -> None:
     assert "const trackingPausedFrame = computed" in store
     assert "pausedFrame + 1" in panel
     assert "查看前几帧是否已经偏移" in panel
-    assert "返回暂停帧再确认" in panel
+    # Per-object feedback remains bound to the pause frame, while an explicit
+    # earlier-frame restart is a separate action (covered by browser checks).
+    assert "请返回暂停帧确认" in panel
+    assert "从本帧修正并重新追踪" in panel and "旧暂停不视为“无异常”" in panel
+    assert "currentFrame!==pausedFrame" in panel
 
 
 def test_tracking_requires_explicit_per_object_feedback_before_resume() -> None:

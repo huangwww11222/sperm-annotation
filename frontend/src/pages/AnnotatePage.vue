@@ -25,13 +25,14 @@ const {
   confirmTrackingAnomaly, trackingFeedbackBusy, trackingFeedbackError, trackingFeedbackPending, trackingFeedbackPendingAction, retryTrackingAnomalyFeedback,
   trackingCalibrationSummary, resetTrackingCalibration, trackingWarningSummary,
   trackingError,trackingProgress,trackingRetryLabel,trackingRetryBusy,retryTracking,workspaceRecoveryRequired,saveRecoveryLabel,retryWorkspaceSave,reloadWorkspaceFromServer,
+  restartTrackingFromEarlierFrame, retryTrackingRestart, cancelTrackingRestartRequest, trackingRestartBusy, trackingRestartError, trackingRestartPendingAction, trackingRestartStorageWarning,
 } = useWorkspace()
 const importDialog=ref<HTMLElement|null>(null)
 watch(duplicateImport,async value=>{if(value){await nextTick();importDialog.value?.querySelector<HTMLElement>('button:not(:disabled)')?.focus()}})
 function importDialogKeys(e:KeyboardEvent){if(e.key==='Escape'){e.preventDefault();cancelDuplicateImport()}if(e.key==='Tab'){const nodes=Array.from(importDialog.value?.querySelectorAll<HTMLElement>('button:not(:disabled)')||[]);if(nodes.length){e.preventDefault();const i=nodes.indexOf(document.activeElement as HTMLElement);nodes[(i+(e.shiftKey?-1:1)+nodes.length)%nodes.length]?.focus()}}}
 const scrollContainerRef = ref<HTMLDivElement | null>(null), stageRef = ref<HTMLDivElement | null>(null), loupe = ref<HTMLCanvasElement | null>(null)
 const help = ref(false), helpDialog = ref<HTMLElement | null>(null), focused = ref(false), labels = ref(true), hiddenBoxes = ref(false), magnifier = ref(false), inverted = ref(false), enhancing = ref(false), spaceHeld = ref(false)
-const mediaBusy = computed(() => submissionBusy.value || mediaImportBusy.value || !!duplicateImport.value || isAiBusy.value || !!deletingMediaId.value || objectDeletionBusy.value || trackingFeedbackBusy.value || !!objectDeletionPendingAction.value || trackingFeedbackPending.value)
+const mediaBusy = computed(() => submissionBusy.value || mediaImportBusy.value || !!duplicateImport.value || isAiBusy.value || !!deletingMediaId.value || objectDeletionBusy.value || trackingFeedbackBusy.value || trackingRestartBusy.value || !!trackingRestartPendingAction.value || !!objectDeletionPendingAction.value || trackingFeedbackPending.value)
 const search = ref(''), objectSearch = ref(''), jumpFrame = ref(1)
 const size = ref({ w: 0, h: 0 }), base = ref({ w: 800, h: 450 })
 const mousePixel = ref<{ x: number; y: number } | null>(null)
@@ -60,6 +61,7 @@ const feedbackTarget = computed(() => {
     || unresolvedAnomalies.value[0] || null
 })
 const hasPausedTracking = computed(() => trackingPausedFrame.value != null && pausedAnomalies.value.length > 0)
+const canRestartEarlier = computed(() => hasPausedTracking.value && trackingPausedFrame.value != null && currentFrame.value < trackingPausedFrame.value && currentObjects.value.some(object => object.bbox))
 const feedbackBlocked = computed(() => isAiBusy.value || !!deletingMediaId.value || exactFrameLoading.value || isPlaying.value || workspaceRestoring.value || !!frameError.value || objectDeletionBusy.value || trackingFeedbackBusy.value || (editingBlocked.value && !trackingFeedbackPending.value))
 const deleteDialog = ref<HTMLDialogElement | null>(null), deletionDialogOpen = ref(false)
 type DeletionSummary = Awaited<ReturnType<typeof getObjectDeletionSummary>>
@@ -95,6 +97,38 @@ async function returnToPausedFrame() {
   if (trackingPausedFrame.value==null || isAiBusy.value || trackingFeedbackBusy.value) return
   frameInput.value = trackingPausedFrame.value
   await seekToInputFrame()
+}
+const restartDialog = ref<HTMLDialogElement | null>(null), restartDialogOpen = ref(false)
+const restartTarget = ref<{mediaId:string;startFrame:number;pausedFrame:number} | null>(null)
+let restartPriorFocus: HTMLElement | null = null, restartPriorOverflow = ''
+async function openRestartDialog() {
+  if (editingBlocked.value || !canRestartEarlier.value || trackingPausedFrame.value == null) return
+  cancelPointer(); pausePlayback()
+  restartTarget.value = {mediaId:currentMediaId.value,startFrame:currentFrame.value,pausedFrame:trackingPausedFrame.value}
+  restartPriorFocus = document.activeElement as HTMLElement; restartPriorOverflow = document.body.style.overflow
+  document.body.style.overflow = 'hidden'
+  await nextTick(); restartDialog.value?.showModal(); restartDialogOpen.value = true
+}
+function finishRestartDialog() {
+  if (!restartDialogOpen.value) return
+  restartDialogOpen.value = false; document.body.style.overflow = restartPriorOverflow
+  if (restartPriorFocus?.isConnected && !(restartPriorFocus as HTMLButtonElement).disabled) restartPriorFocus.focus({preventScroll:true})
+  else focusButton.value?.focus({preventScroll:true})
+}
+function closeRestartDialog() { restartDialog.value?.close(); finishRestartDialog() }
+async function confirmRestart() {
+  const target = restartTarget.value
+  if (!target || target.mediaId !== currentMediaId.value || trackingRestartBusy.value) return
+  const success = trackingRestartPendingAction.value ? await retryTrackingRestart() : await restartTrackingFromEarlierFrame(target.startFrame,target.pausedFrame)
+  if (success) closeRestartDialog()
+}
+function requestTracking() { if (canRestartEarlier.value) void openRestartDialog(); else void runAiTrack() }
+function restartDialogKeys(event: KeyboardEvent) {
+  if (event.key !== 'Tab') return
+  const nodes = Array.from(restartDialog.value?.querySelectorAll<HTMLElement>('button:not(:disabled)') || [])
+  const first=nodes[0],last=nodes[nodes.length-1]
+  if(event.shiftKey&&document.activeElement===first){event.preventDefault();last?.focus()}
+  else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first?.focus()}
 }
 function finishDeleteDialog() {
   deletionSummarySerial++
@@ -284,14 +318,15 @@ function keys(e:KeyboardEvent){
 }
 function keyup(e:KeyboardEvent){if(e.key===' ')spaceHeld.value=false}
 function blur(){spaceHeld.value=false;cancelPointer()}
-function beforeUnload(e:BeforeUnloadEvent){if(mediaImportBusy.value||duplicateImport.value||saveState.value==='saving'||saveState.value==='error'||objectDeletionBusy.value||trackingFeedbackBusy.value||objectDeletionPendingAction.value||trackingFeedbackPending.value){e.preventDefault();e.returnValue=''}}
+function beforeUnload(e:BeforeUnloadEvent){if(mediaImportBusy.value||duplicateImport.value||saveState.value==='saving'||saveState.value==='error'||objectDeletionBusy.value||trackingFeedbackBusy.value||trackingRestartBusy.value||trackingRestartPendingAction.value||objectDeletionPendingAction.value||trackingFeedbackPending.value){e.preventDefault();e.returnValue=''}}
+watch(trackingRestartPendingAction,(value,previous)=>{if(!value&&previous&&restartDialogOpen.value)closeRestartDialog()})
 watch(help,async value=>{if(value){helpPriorFocus=document.activeElement as HTMLElement;await nextTick();helpDialog.value?.querySelector<HTMLElement>('button')?.focus()}else helpPriorFocus?.focus()})
 watch(()=>selectedObject.value?.id,()=>{if(selectedObject.value)objectNameInput.value=selectedObject.value.name})
 watch(selectedObjectId,()=>{if(!trackingFeedbackPending.value&&selectedObject.value?.objectId!=null)feedbackTargetId.value=selectedObject.value.objectId})
 watch(()=>feedbackTarget.value?.objectId,()=>{if(!trackingFeedbackPending.value)learnNormalMotion.value=true})
 watch(trackingPausedFrame,()=>{feedbackTargetId.value=null;if(!trackingFeedbackPending.value)learnNormalMotion.value=true})
 watch(currentFrame,value=>{jumpFrame.value=value+1;mousePixel.value=null})
-watch(selectedMediaId,async id=>{cancelPointer();objectSearch.value='';mousePixel.value=null;fit();await nextTick();await resetAnnotationViewForMedia(id);scrollContainerRef.value?.scrollTo(0,0)})
+watch(selectedMediaId,async id=>{closeRestartDialog();cancelPointer();objectSearch.value='';mousePixel.value=null;fit();await nextTick();await resetAnnotationViewForMedia(id);scrollContainerRef.value?.scrollTo(0,0)})
 watch(()=>[selectedMedia.value?.width,selectedMedia.value?.height],fit)
 onMounted(()=>{
   restoreImportIntent()
@@ -301,7 +336,7 @@ onMounted(()=>{
   removeGuard=addLeaveGuard(async()=>{if(mediaBusy.value)return false;cancelPointer();pausePlayback();try{await persistWorkspaceState(currentMediaId.value,true);return true}catch{return false}})
   if(selectedMedia.value)void resetAnnotationViewForMedia(selectedMediaId.value)
 })
-onUnmounted(()=>{if(deleteDialog.value?.open){deleteDialog.value.close();document.body.style.overflow=deletionPriorOverflow}if(focused.value)restorePage();observer?.disconnect();cancelPointer();pausePlayback();removeGuard?.();window.removeEventListener('keydown',keys);window.removeEventListener('keyup',keyup);window.removeEventListener('blur',blur);window.removeEventListener('beforeunload',beforeUnload)})
+onUnmounted(()=>{cancelTrackingRestartRequest();closeRestartDialog();if(deleteDialog.value?.open){deleteDialog.value.close();document.body.style.overflow=deletionPriorOverflow}if(focused.value)restorePage();observer?.disconnect();cancelPointer();pausePlayback();removeGuard?.();window.removeEventListener('keydown',keys);window.removeEventListener('keyup',keyup);window.removeEventListener('blur',blur);window.removeEventListener('beforeunload',beforeUnload)})
 </script>
 <template>
   <section class="annotation-page workbench-page" :class="{focused}" data-testid="annotation-page">
@@ -328,6 +363,8 @@ onUnmounted(()=>{if(deleteDialog.value?.open){deleteDialog.value.close();documen
     <div v-if="importError" class="error-banner" role="alert">{{ importError }}</div>
     <div v-if="saveError" class="error-banner" role="alert" data-testid="workspace-save-error">{{ saveError }} <button class="quiet-button" :disabled="saveState==='saving'||workspaceRestoring||trackingRetryBusy||!!deletingMediaId||objectDeletionBusy||trackingFeedbackBusy" @click="retrySave">{{ saveState==='saving'?'正在重试保存…':saveRecoveryLabel }}</button></div>
     <div v-if="trackingError" class="error-banner tracking-error-banner" role="alert" data-testid="tracking-error"><span>第 {{ trackingError.frameIndex+1 }} 帧 · {{ trackingError.phase }}失败：{{ trackingError.message }}</span><button class="quiet-button" :disabled="trackingRetryBusy||workspaceRestoring||saveState==='saving'||!!objectDeletionPendingAction||trackingFeedbackPending" @click="retryTracking">{{ trackingRetryBusy?'正在重试…':trackingRetryLabel }}</button></div>
+    <div v-if="trackingRestartError&&!restartDialogOpen" class="error-banner tracking-error-banner" role="alert" data-testid="tracking-restart-error"><span>{{ trackingRestartError }}</span><button v-if="trackingRestartPendingAction&&trackingRestartPendingAction.phase!=='conflict'" class="quiet-button" data-testid="tracking-restart-retry" :disabled="trackingRestartBusy||workspaceRestoring" @click="retryTrackingRestart">{{ trackingRestartBusy?'正在恢复…':trackingRestartPendingAction.phase==='start'?'继续从原起点追踪':'重试原回退请求' }}</button><button v-else-if="trackingRestartPendingAction?.phase==='conflict'" class="quiet-button" :disabled="trackingRestartBusy||workspaceRestoring" @click="reloadWorkspaceFromServer">备份并重新读取</button></div>
+    <div v-if="trackingRestartStorageWarning" class="error-banner" role="status">{{ trackingRestartStorageWarning }}</div>
     <div v-if="mediaDeleteError" class="error-banner" role="alert">{{ mediaDeleteError }}</div>
     <div v-if="objectDeletionError && !deletionDialogOpen" class="error-banner" role="alert">{{ objectDeletionError }} <button class="quiet-button" :disabled="objectDeletionBusy" @click="objectDeletionPendingAction?.action==='delete'?openVideoDeletion():retryObjectDeletion()">重试本次{{ objectDeletionPendingAction?.action==='undo'?'撤销':objectDeletionPendingAction?.action==='redo'?'重做':'删除' }}</button></div>
     <WorkbenchLayout library-label="素材库" :immersive="focused">
@@ -339,7 +376,7 @@ onUnmounted(()=>{if(deleteDialog.value?.open){deleteDialog.value.close();documen
         </div><p v-if="!visibleMedia.length" class="sidebar-empty">{{ search?'没有匹配素材':'导入视频或图片开始标注' }}</p></div>
       </aside></template>
       <template #canvas><section class="panel annotation-workbench">
-        <div class="workbench-title"><div><strong :title="selectedMedia?.name">{{ selectedMedia?.name || '开始一个新的标注' }}</strong><span>{{ selectedMedia?.width || '—' }} × {{ selectedMedia?.height || '—' }}<template v-if="isVideo"> · {{ videoFps.toFixed(1) }} fps</template></span></div><div class="workbench-actions"><template v-if="focused"><span class="save-indicator" :class="saveState" role="status"><i />{{ saveLabel }}</span><button class="quiet-button" :disabled="editingBlocked||hasPausedTracking||trackingFeedbackPending||!!objectDeletionPendingAction||!isVideo||!currentObjects.some(o=>o.bbox)" @click="runAiTrack">{{ isAiBusy?'正在追踪…':'AI Tracking' }}</button><UserGuide page="/annotate" /><button class="quiet-button" @click="help=true" aria-label="快捷键"><AppIcon name="help" :size="16" /></button><SendToReview /></template><button ref="focusButton" class="quiet-button" :aria-pressed="focused" :title="focused?'退出专注模式 (F / Esc)':'专注模式 (F)'" @click="toggleFocus"><AppIcon name="fit" :size="16" />{{ focused?'退出专注':'专注' }}<kbd v-if="focused">Esc</kbd></button></div></div>
+        <div class="workbench-title"><div><strong :title="selectedMedia?.name">{{ selectedMedia?.name || '开始一个新的标注' }}</strong><span>{{ selectedMedia?.width || '—' }} × {{ selectedMedia?.height || '—' }}<template v-if="isVideo"> · {{ videoFps.toFixed(1) }} fps</template></span></div><div class="workbench-actions"><template v-if="focused"><span class="save-indicator" :class="saveState" role="status"><i />{{ saveLabel }}</span><button class="quiet-button" :disabled="editingBlocked||(hasPausedTracking&&!canRestartEarlier)||trackingFeedbackPending||!!objectDeletionPendingAction||!isVideo||!currentObjects.some(o=>o.bbox)" @click="requestTracking">{{ isAiBusy?'正在追踪…':canRestartEarlier?'从本帧重新追踪…':'AI Tracking' }}</button><UserGuide page="/annotate" /><button class="quiet-button" @click="help=true" aria-label="快捷键"><AppIcon name="help" :size="16" /></button><SendToReview /></template><button ref="focusButton" class="quiet-button" :aria-pressed="focused" :title="focused?'退出专注模式 (F / Esc)':'专注模式 (F)'" @click="toggleFocus"><AppIcon name="fit" :size="16" />{{ focused?'退出专注':'专注' }}<kbd v-if="focused">Esc</kbd></button></div></div>
         <div class="annotation-toolbar" aria-label="标注工具">
           <div class="tool-group"><button v-for="tool in ([['select','cursor','选择','V'],['bbox','box','画框','B'],['point','point','标点','P']] as const)" :key="tool[0]" class="tool-btn" :class="{active:activeTool===tool[0]}" :aria-pressed="activeTool===tool[0]" :disabled="editingBlocked" :title="`${tool[2]} (${tool[3]})`" @click="selectTool(tool[0])"><AppIcon :name="tool[1]" :size="16" />{{ tool[2] }}<kbd>{{ tool[3] }}</kbd></button></div>
           <div class="tool-group"><button class="icon-button" title="撤销最近操作 (Ctrl/⌘ Z)" aria-label="撤销本帧操作" :disabled="editingBlocked||!!objectDeletionPendingAction||trackingFeedbackPending||!canUndo" @click="undo"><AppIcon name="undo" :size="17" /></button><button class="icon-button" title="重做最近操作 (Ctrl/⌘ Shift Z)" aria-label="重做本帧操作" :disabled="editingBlocked||!!objectDeletionPendingAction||trackingFeedbackPending||!canRedo" @click="redo"><AppIcon name="redo" :size="17" /></button><button class="icon-button delete-frame-tool" title="只删除本帧选中对象 (Delete / Backspace)" aria-label="删除本帧选中对象" :disabled="editingBlocked||!selectedObject||!!objectDeletionPendingAction||trackingFeedbackPending" @click="deleteSelectedFrame"><AppIcon name="trash" :size="16" /></button></div>
@@ -363,7 +400,7 @@ onUnmounted(()=>{if(deleteDialog.value?.open){deleteDialog.value.close();documen
           <div v-if="magnifier" class="loupe"><canvas ref="loupe" width="200" height="150" :style="{filter}" /><span>4× 原图局部 · {{ mousePixel?`${mousePixel.x}, ${mousePixel.y}`:'移动指针查看' }}</span></div>
           <div class="canvas-bottom"><span class="canvas-hint">{{ hiddenBoxes?'标注已隐藏 · H 恢复':spaceHeld?'拖动画面':activeTool==='bbox'?'拖拽画框 · 空格拖动画面':activeTool==='select'?'拖动移动 · 角点缩放':'单击添加标注点' }}</span><div class="canvas-zoom"><button aria-label="缩小画面" @click="zoomAt(-.25)">−</button><button title="适应画面 (0)" @click="fitView">{{ Math.round(zoom*100) }}%</button><button aria-label="放大画面" @click="zoomAt(.25)">＋</button><button aria-label="适应画面" @click="fitView"><AppIcon name="fit" :size="15" /></button></div></div>
         </div>
-        <AnnotationTrackingFeedback v-if="hasPausedTracking || (trackingFeedbackError && trackingFeedbackPendingAction?.decision!=='reset')" :paused-frame="trackingPausedFrame" :current-frame="currentFrame" :notices="pausedAnomalies" :target="feedbackTarget" :remaining="unresolvedAnomalies.length" v-model:learn="learnNormalMotion" :disabled="feedbackBlocked" :busy="trackingFeedbackBusy" :pending="trackingFeedbackPending" :error="trackingFeedbackError" @select="selectFeedbackObject" @return="returnToPausedFrame" @confirm="confirmFeedback" @retry="retryTrackingAnomalyFeedback" />
+        <AnnotationTrackingFeedback v-if="hasPausedTracking || (trackingFeedbackError && trackingFeedbackPendingAction?.decision!=='reset')" :paused-frame="trackingPausedFrame" :current-frame="currentFrame" :notices="pausedAnomalies" :target="feedbackTarget" :remaining="unresolvedAnomalies.length" v-model:learn="learnNormalMotion" :disabled="feedbackBlocked" :busy="trackingFeedbackBusy" :pending="trackingFeedbackPending" :error="trackingFeedbackError" :can-restart-earlier="canRestartEarlier" @restart="openRestartDialog" @select="selectFeedbackObject" @return="returnToPausedFrame" @confirm="confirmFeedback" @retry="retryTrackingAnomalyFeedback" />
         <div v-if="trackingWarningSummary.length && !hasPausedTracking" class="tracking-warning-summary" role="status"><AppIcon name="check" :size="14" /><span>{{ trackingWarningSummary.reduce((count,item)=>count+item.count,0) }} 次同类运动变化已合并提示，追踪继续。新的风险仍会检测。</span><details><summary>详情</summary><p v-for="item in trackingWarningSummary" :key="`${item.objectId}:${item.reason}`">#{{ item.objectId }} · 第 {{ item.firstFrame+1 }}–{{ item.lastFrame+1 }} 帧 · {{ item.count }} 次{{ item.calibrated?' · 参考已确认正常样本':'' }}</p></details></div>
         <div v-if="focused && trackingCalibrationSummary.length" class="focus-calibration"><span>异常检测持续开启 · 已保存正常确认</span><button v-for="item in trackingCalibrationSummary" :key="item.objectId" class="quiet-button" :disabled="feedbackBlocked||trackingFeedbackPending" @click="resetTrackingCalibration(item.objectId)">#{{ item.objectId }} 恢复默认判断</button></div>
         <div v-if="focused && trackingFeedbackError && trackingFeedbackPendingAction?.decision==='reset'" class="focus-calibration tracking-feedback-error" role="alert"><span>{{ trackingFeedbackError }}</span><button class="quiet-button" :disabled="trackingFeedbackBusy" @click="retryTrackingAnomalyFeedback">重试恢复默认判断</button></div>
@@ -377,7 +414,7 @@ onUnmounted(()=>{if(deleteDialog.value?.open){deleteDialog.value.close();documen
         <section class="panel ai-panel">
           <div class="ai-heading"><AppIcon name="spark" :size="18"/><strong>AI 辅助追踪</strong><span class="ai-state">{{ isAiBusy?'追踪中':hasPausedTracking?'待人工核对':'就绪' }}</span></div>
           <p>{{ trackingProgress|| (hasPausedTracking?'先核对画布下的暂停对象，明确确认后继续。':'以当前帧为起点，自动追踪已有目标。') }}</p>
-          <button class="btn-primary" :disabled="editingBlocked||hasPausedTracking||trackingFeedbackPending||!!objectDeletionPendingAction||!isVideo||!currentObjects.some(o=>o.bbox)" @click="runAiTrack">{{ isAiBusy?'正在追踪…':'AI Tracking' }}</button>
+          <button class="btn-primary" :disabled="editingBlocked||(hasPausedTracking&&!canRestartEarlier)||trackingFeedbackPending||!!objectDeletionPendingAction||!isVideo||!currentObjects.some(o=>o.bbox)" @click="requestTracking">{{ isAiBusy?'正在追踪…':canRestartEarlier?'从本帧重新追踪…':'AI Tracking' }}</button>
           <div v-if="trackingCalibrationSummary.length" class="tracking-calibration"><strong>已保存的正常确认 · 异常检测持续开启</strong><div v-for="item in trackingCalibrationSummary" :key="item.objectId"><span>#{{ item.objectId }}<template v-if="item.sampleCount"> · {{ item.sampleCount }} 次正常运动确认</template><template v-if="item.geometryFrame!=null"> · 第 {{ item.geometryFrame+1 }} 帧尺寸已确认</template></span><button class="quiet-button" :disabled="feedbackBlocked||trackingFeedbackPending" @click="resetTrackingCalibration(item.objectId)">恢复默认判断</button></div></div>
           <div v-if="trackingFeedbackError && trackingFeedbackPendingAction?.decision==='reset'" class="tracking-feedback-error" role="alert">{{ trackingFeedbackError }}<button class="quiet-button" :disabled="trackingFeedbackBusy" @click="retryTrackingAnomalyFeedback">重试恢复默认判断</button></div>
         </section>
@@ -406,6 +443,14 @@ onUnmounted(()=>{if(deleteDialog.value?.open){deleteDialog.value.close();documen
       </aside></template>
     </WorkbenchLayout>
     <Teleport to="body">
+      <dialog ref="restartDialog" class="app-dialog tracking-restart-dialog" aria-labelledby="tracking-restart-title" @cancel.prevent="closeRestartDialog" @close="finishRestartDialog" @keydown.stop="restartDialogKeys">
+        <header><h2 id="tracking-restart-title">从第 {{ (restartTarget?.startFrame??0)+1 }} 帧重新追踪？</h2><button class="icon-button" aria-label="关闭重新追踪确认" @click="closeRestartDialog"><AppIcon name="close" /></button></header>
+        <p>使用第 {{ (restartTarget?.startFrame??0)+1 }} 帧当前已修正的框作为起点，重新生成后续 AI 追踪。</p>
+        <ul><li>替换此帧之后的旧 AI 结果和第 {{ (restartTarget?.pausedFrame??0)+1 }} 帧的待确认暂停。</li><li>保留所有人工标注、人工基准及历史反馈。</li><li>这次操作不视为“无异常”，不添加正常样本；新分支仍执行异常检测。</li></ul>
+        <div v-if="trackingRestartError&&restartDialogOpen" class="error-banner" role="alert" data-testid="tracking-restart-error"><span>{{ trackingRestartError }}</span><button v-if="trackingRestartPendingAction&&trackingRestartPendingAction.phase!=='conflict'" class="quiet-button" data-testid="tracking-restart-retry" :disabled="trackingRestartBusy" @click="confirmRestart">{{ trackingRestartPendingAction.phase==='start'?'继续从原起点追踪':'重试原回退请求' }}</button><button v-else-if="trackingRestartPendingAction?.phase==='conflict'" class="quiet-button" @click="closeRestartDialog">关闭后重新读取工作区</button></div>
+        <p v-if="trackingRestartBusy" role="status">正在保存修正并确认分支，请稍候…</p>
+        <div class="app-dialog-actions"><button class="btn-secondary" data-testid="tracking-restart-cancel" @click="closeRestartDialog">{{ trackingRestartPendingAction||trackingRestartBusy?'关闭':'取消' }}</button><button v-if="!trackingRestartPendingAction" class="btn-primary" data-testid="tracking-restart-confirm" :disabled="trackingRestartBusy" @click="confirmRestart">确认修正并重新追踪</button></div>
+      </dialog>
       <dialog ref="deleteDialog" class="app-dialog object-delete-dialog" data-object-delete-dialog aria-labelledby="object-delete-title" aria-describedby="object-delete-description" @cancel.prevent="closeDeleteDialog" @close="finishDeleteDialog" @keydown.stop="deletionDialogKeys">
         <header class="object-delete-heading"><div><h2 id="object-delete-title">删除整段视频中的此对象？</h2><p id="object-delete-description">只删除「{{ deletionTarget?.mediaName }}」中稳定 ID 为 #{{ deletionTarget?.objectId }} 的标注。</p></div><button class="icon-button" aria-label="关闭删除确认" :disabled="objectDeletionBusy" @click="closeDeleteDialog"><AppIcon name="close" /></button></header>
         <div v-if="deletionSummaryLoading" class="object-delete-loading" role="status">正在核对全视频的实际删除范围…</div>

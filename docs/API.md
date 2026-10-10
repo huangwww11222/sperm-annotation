@@ -30,6 +30,7 @@
 | `POST /api/annotation/annotations/manual` | 保存人工对象记录 |
 | `GET /api/annotation/projects/{projectId}/results` | 人工标注记录查询 |
 | `POST /api/track/annotations`、`/api/track/rewind`、`/api/track` | seed、回退、发起追踪 |
+| `POST /api/track/restart-branch/{mediaId}` | 异常暂停后，从更早帧修正并显式重建分支；版本与原键恢复，成功后才续追 |
 | `GET /api/track/status/{taskId}`、`/api/track/result/{mediaId}` | 追踪状态与对象 |
 | `GET /api/track/result-file/{mediaId}`、`/api/track/overlay/{mediaId}` | JSONL 与按需生成的完整带框视频；预览缓存以当前视频/追踪/删除规则校验，生成时输入变化返回 409，失败 503 不影响已保存 JSONL |
 
@@ -58,6 +59,14 @@
 反馈请求为 `{expectedRevision,objectId,frameIndex,decision:'normal'|'corrected'|'reset',calibrate:boolean}`，使用 `Idempotency-Key`，与工作区共享版本。`reset` 不要求帧号，清该对象活动运动样本并使已确认尺寸参照失效，保留审计。`normal` 只在明确勾选校准且持久化追踪结果包含位移依据时生成 `normalMotionSamples`；每条为 `{objectId,frameIndex,reason:'motion',decision:'normal',calibrate:true,features:{motionNormalized}}`。数值取自服务端追踪数据，不接受客户提供阈值。`corrected` 要求当前帧已保存的人工框实际不同于异常原框，且不生成正常样本。 对尺寸/形状原因的 `normal`，服务端从实际追踪行取有效像素框，在该条 `trackingFeedbackEvents` 中保存 `geometryReference:{objectId,frameIndex,bbox,source:"confirmed-normal"}`；无须重画，且不依赖运动校准勾选。不接受客户端提供参照，不能将该框改写为人工标注。该字段为兼容旧事件的可选扩展。
 
 反馈响应包含 `{ok,mediaId,revision,normalMotionSamples,trackingFeedbackEvents,pausedAnomalies,lastPausedContext}`。正常/已修正请求必须匹配当前持久化暂停帧及未解决对象，并核验真实追踪行；新键不能再次确认已解决的历史异常。每次只移除选定对象及已被删除的暂停项；仍有待处理对象时保留暂停上下文。运动样本按媒体、对象和位移原因隔离；尺寸参照单独按确认事件恢复，不豁免重叠或丢失检测。普通工作区 PUT 不能注入校准样本。Tracking 状态另返回 `warningSummary`，用于合并轻提示，不把每次轻微抖动升级为阻塞弹窗。
+
+### 异常暂停后从较早帧重新追踪
+
+`POST /api/track/restart-branch/{mediaId}` 使用 Bearer 和 `Idempotency-Key`，正文为 `{expectedRevision,expectedPausedFrame,startFrame,confirmDiscardFuture:true,generationId?}`，帧号全部为原始 0 起编号。首次执行必须 `startFrame < expectedPausedFrame`、服务器暂停仍未解决、起点有有效框、原视频存在、轮次/工作区版本一致，且未送审、无运行中的 Tracking。暂停帧及之后只能使用逐项异常确认；普通 rewind/track 不得绕过未解决暂停。
+
+成功返回 `{ok,mediaId,revision,pausedAnomalies:[],lastPausedContext:null,cutoffFrame,removedRows,keptRows,deletedFutureSeedFiles:0,overlayRegenerated:false}`。只截断起点之后的旧 AI 行，清除旧分支的当前暂停及未来派生提示；所有人工框、seed/基准、删除规则、历史反馈和正常样本保留，不生成 normal/corrected 事件。操作不自动启动模型；客户端成功核对后保存该早帧 seed，再启动追踪，不重复普通 rewind。
+
+跨文件发布通过持久日志与 SQL `review_write_receipts` 协调，收据重放早于业务版本/暂停校验，但轮次重置后不重放旧轮次操作；同账号原键原正文恢复已完成的重建，不再截断之后新模型的结果。相同 key 用不同意图返回 409。合法收据只证明过去已完成的分支操作；客户端恢复后另查询当前送审状态，已送审时停止 seed/模型启动，查询失败保留原起点待重试，不当作未送审。发布失败和重启按提交证据恢复两份文件，读取不能混用中间状态；临时故障保留原请求、暂停和数据，冲突需明确重读。当前暂停由真实追踪任务持久化，普通工作区 PUT 可以补展示信息和删除/撤销对象，但不能清空或伪造已确认暂停；显式反馈或重建才解除。运行时暂停更新不改变人工工作区 revision。
 
 ## A 完成与 B
 
@@ -126,6 +135,22 @@ C 权限另带 `canReturn`；返回状态为 `returned`，`returnedReview:{frame
 | `POST /api/export/dataset` | 旧入口拒绝，410 `FINAL_CONFIRMATION_REQUIRED` |
 
 创建请求幂等；任务生成状态与资格共同决定是否可下载，不得仅按 ZIP 文件存在就返回。资格与产物规则见 [WORKFLOW.md](WORKFLOW.md)。
+
+## 全量标注流程统计导出
+
+入口在标注记录页；实现为 `statistics_export.py` / `statistics_export_jobs.py` / `statistics_export_routes.py`，前端 `StatisticsDataExport.vue` 与 `statisticsExportApi.ts`。按外部脚本的 annotation-confirmation-statistics-v1 格式导出全实例，包含未完成和历史 A/B/C/F、人员与流程记录，不受页面筛选影响。现有登录账号可申请全量包；当前没有额外管理员角色。生成的任务和下载仅对创建账号开放，匿名拒绝、其他账号不能读取该任务。
+
+| 方法与路径 | 作用 |
+| --- | --- |
+| `POST /api/statistics/exports` | 空 JSON `{}`，必需 `Idempotency-Key`（1–128 字符）；202 返回后台任务，当前进程的有效回执内同账号原键返回同任务，不要求 X-Review-Contract |
+| `GET /api/statistics/exports/{id}` | 本人任务状态 `queued/running/ready/failed`、阶段、表数/行数进度、文件名、大小、错误、到期时间 |
+| `GET /api/statistics/exports/{id}/download` | ready 时鉴权下载 ZIP，不返回数据库文件；未就绪 409，生成失败 409，输出丢失 410 |
+
+全实例同时最多生成一个包，新请求遇到已有运行任务返回 409 `STATISTICS_EXPORT_BUSY`；有效回执的原键恢复优先。临时输出保留 24 小时、最多 20 份，任务/回执有上限。已取得任务 ID 的查询在服务重启或任务过期后返回 410 `STATISTICS_EXPORT_EXPIRED`，用户可明确新建。输出文件丢失为 `STATISTICS_EXPORT_FILE_MISSING`，需重新生成。瞬时创建/查询/下载错误保留可重试状态；前端按账号保存创建键和任务 ID，未知创建结果沿用原键。回执是进程内临时状态：若创建响应未返回 ID 且服务随后重启，或回执 24 小时到期，旧键的手动重试可能生成新只读包，不承诺跨重启/过期仍是同任务；这不会重复修改业务数据。请求日志不记录 token。
+
+ZIP 包含 15 个必需 CSV/JSONL、2 个可选历史表（存在时）和 manifest，逐文件校验和与行数用于传输校验。users 仅 id/username/created_at；密码、JWT、原始视频、原 SQLite 文件均排除。`sourceSystemId` 优先读取已有 `audit_source_identity` 部署身份，旧库无身份时 CLI 须显式提供或配置 STATISTICS_SOURCE_SYSTEM_ID，不能默认把多个医院当同一个来源。`final_versions.is_current` 表示读取时已确认会话的最新 F，不代表历史 F 可训练导出；空帧和旧版本保留。
+
+该包与下节 annotation-quality-audit 包分别维护。消费者必须支持此全量格式的导入和展示；本地统计项目和远程仓库可能使用不同前端入口，联调必须核对实际部署版本。相同来源的新全量包会包含旧记录，消费者需要按稳定身份处理重复或更新，不能把主键冲突当正常增量行为，也不能将首包导入成功当成反复导入验收。本功能不改变训练集准入、快照或流程状态。
 
 ## 审计传输契约
 

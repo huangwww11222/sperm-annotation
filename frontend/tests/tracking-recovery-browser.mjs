@@ -1,6 +1,7 @@
 // Real 4K source/workspace APIs. Model responses and lost HTTP replies are injected.
 import fs from 'node:fs'
 import assert from 'node:assert/strict'
+import { publishTrackingFixture, trackingRestartChecks } from './tracking-restart-checks.mjs'
 const {chromium}=await import(process.env.PLAYWRIGHT_MODULE||'playwright')
 const fixture=JSON.parse(fs.readFileSync('work/tracking-recovery-fixture.json'))
 assert(fixture.directory.includes('/work/e2e-confirm-ux-'))
@@ -41,12 +42,7 @@ try{
       receipts.set(key,{taskId,status:'queued',maxFrames:last-body.startFrame+1});taskStates.set(taskId,{last,start:body.startFrame})
       // Simulated inference publishes complete source-numbered rows so real
       // result reloads and subsequent seeds exercise the full client pipeline.
-      if(!modelFailure){
-        const file=fixture.directory+'/tracker_results.json'
-        const prior=fs.readFileSync(file,'utf8').trim().split('\n').filter(Boolean).map(JSON.parse).filter(r=>r.frame_index<body.startFrame)
-        for(let fi=body.startFrame;fi<=last;fi++)prior.push({frame_index:fi,source_frame_index:fi,objects:body.annotations.map(a=>({object_id:a.object_id,name:a.name,bbox:a.bbox,source:'manual_sam3_tracker'}))})
-        fs.writeFileSync(file+'.tmp',prior.map(JSON.stringify).join('\n')+'\n');fs.renameSync(file+'.tmp',file)
-      }
+      if(!modelFailure)publishTrackingFixture(fixture,{operation:'model',body,lastFrame:last})
     }
     if(loseStart){loseStart=false;await route.abort('failed');return}
     await route.fulfill({status:202,json:receipts.get(key)})
@@ -112,6 +108,12 @@ try{
   check(await page.evaluate(()=>!window.ws.editingBlocked.value&&window.ws.currentFrame.value===1),'server reload recovers usable editor and authoritative frame position')
   modelFailure=true;await button('AI Tracking').click();await page.getByTestId('tracking-error').waitFor();await finish()
   check((await page.getByTestId('tracking-error').innerText()).includes('模型追踪')&&await button('重试追踪').isVisible(),'terminal model failure stays visible and permits a new explicit retry')
+  // All branch mutations remain real; the helper installs its own model-only
+  // simulation after the recovery suite's fault routes have been removed.
+  await page.unroute('**/api/track'); await page.unroute('**/api/track/status/recovery-*')
+  await page.unroute('**/api/track/rewind'); await page.unroute('**/api/track/result/'+fixture.mid+'*')
+  await page.unroute('**/api/track/workspace/'+fixture.mid)
+  await trackingRestartChecks(page,fixture,origin)
   check(errors.length===0,'no uncaught browser errors across recovery flows')
   fs.writeFileSync('output/playwright/tracking-recovery-results.json',JSON.stringify({checks,errors},null,2))
   console.log(`Completed ${checks.length} tracking recovery checks.`)

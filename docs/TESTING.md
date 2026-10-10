@@ -16,6 +16,8 @@ python3 scripts/run_browser_regression.py --python work/review-venv/bin/python -
 
 固定套件：`critical-workflows`、`workflow-transitions`、`annotation-ux`、`tracking-recovery`、`review-failure`、`confirmation-failure`、`confirmation`、`training-export`、`workbench-consistency`、`independent-integrity`。每组前按依赖重建夹具；不得并行消费或重置共享夹具。执行记录、版本/未提交文件清单、各组退出状态、耗时与日志保存在该次隔离目录；失败会非零退出并记录尚未执行的范围，不能把旧报告当成本次结果。CI 保留服务/套件日志及截图子目录；夹具 JSON 可能包含 token，禁止上传。
 
+容器模式按宿主 UID/GID 生成夹具，避免 Linux CI 中 root 文件阻止后续翻译或清理。`tracking-recovery` 的模拟结果与暂停夹具通过 `TEST_PYTHON` 在后端相同运行环境原子发布；不要从宿主机替换 Docker 共享目录文件后假定容器立即可读，也不要用固定等待放宽故障断言。刷新断言须等待目标原帧、图像及结果加载完成，单看初始 idle 不等于恢复完成。运行记录注明后端模式、解释器/镜像及浏览器；结束时将实际后端 `data/logs/review.log*` 脱敏复制到回归目录的 `review*.log`，与现有 CI 日志一并保留。
+
 `independent-integrity` 保留独立审查中的行为断言：坏结构的成功响应、完整结果撤销后的 SPA 重读、跨素材迟到失败/成功、真实编码 4K 与 50,000 合成对象的读入/保存/刷新。另验证匿名/无效凭据不能读视频，HTTP 下真实 H.264 原生播放和 Range 正常，退出后不能读；真实保存已提交但响应丢失，再遇 `/auth/me` 500/网络失败/401，检查原请求保留、同账号重放与恢复后再次保存。首次新上传还从真实 Tracking/异常检测进入两个对象暂停，逐个正常确认后继续发布结果；只有模型预测被模拟。
 
 该合成负载设置宽松 CI 停滞门槛：全量结果读取 <8 s、首次恢复 <15 s、同步人工缓存 <64 KiB、最长主线程任务 <1.5 s，并保留实测耗时。这是隔离回归预算，不是医院 GPU、GB 视频或内网延迟的 SLA。慢盘测试以可释放的哈希阻塞注入证明同事件循环的健康请求与其他媒体保存仍在 2 s 内完成；不能将它称为真实医院慢盘实测。
@@ -23,6 +25,10 @@ python3 scripts/run_browser_regression.py --python work/review-venv/bin/python -
 后端 `test_independent_integrity_audit.py` 保留独立审查用例；`test_integrity_recovery.py` 补 seed 临时写/替换失败、坏历史来源、合法点与像素边界、同事件循环慢盘上传时读取/另一视频写入、查重途中删除的竞态、长期反馈回执体积及重置后的准确重放。前端 `tracking-result.test.mjs` 通过 `npm run test:annotation` 校验结构故障组合，不能只靠静态源码断言。规范 ID 校验后，路径探针直接构造不安全目标；原子 seed 修复后，磁盘故障注入同时覆盖目标和临时文件，保留所有旧数据与错误断言。
 
 `critical-workflows-browser.mjs` 不导入前端 store，也不预先生成工作区、AI 结果或 A/B/C 任务：真实登录 → 上传原视频 → 画框保存/刷新 → 保存成功但响应丢失 → 刷新沿用原键/原正文重放 → 再次画框保存/刷新 → 删除重传 → 取消/覆盖重标 → 追踪 → 送审 → B 改框、逐帧提交、显式完成 → C 选择、显式完成 → 下载真实 ZIP → 重新确认关闭导出。夹具只产生输入视频。CI 还在实际生产前端镜像上运行同一用例的 CPU 模式，并启用旧浏览器 API 兼容检查，避免只验证 Vite 开发页面。
+
+`training-export` 固定套件同时执行 `statistics-export-checks.mjs`：从真实 A/B/C/F 数据生成全量统计 ZIP，核验文件校验和、空帧和历史/当前 F、密码与原视频排除；验证匿名/跨账号下载拒绝、创建提交后响应丢失及刷新原键重放、查询失败恢复、下载原包重试、过期重新生成，并检查 1366×768 / 1180×760 浅深主题、弹窗焦点和共用使用说明。它使用 Chrome 93 API 兼容配置，不执行模型推理。统计 ZIP 后端专项用例见 `test_statistics_export.py`；仍须运行全部十组，不能用此新增场景代替固定门禁。
+
+`tracking-recovery` 同时执行 `tracking-restart-checks.mjs`，在隔离 4K 原视频的较早帧修正，验证取消保留分支、暂停帧不能绕过、回退失败原键重试、成功后 seed 使用早帧原像素、未来人工框经保存/刷新保留、旧暂停不复活，以及发布成功但响应丢失后刷新重放不重复截新模型结果。恢复期间的送审状态查询失败保留原起点，后来已送审的合法回执重放不得发 seed 或模型请求。模型输出模拟，分支/工作区/收据走真实后端。`test_tracking_restart.py` 验证逐文件发布和提交故障、重启及读取恢复、已送审/轮次/版本边界、回执准确重放与持久暂停保护；包括首次工作区尚不存在的暂停写入失败、持续故障与读取恢复、legacy 人工 seed 保留、文件和目录同步失败的成对恢复。原反馈与删除/撤销用例继续运行，不能只验证新入口能点。
 
 完整回归中的模型输出由仅存在于 `backend/tests/browser_server.py` 的测试引擎模拟；视频解码、追踪编排、任务状态、结果发布与其余 API/数据库均走真实代码。测试入口拒绝业务数据路径，生产服务不导入它。CPU 镜像用例验证“AI 未启用后仍可人工完成流程”。两者都不代表真实 GPU 或模型准确率验收。医院 GPU 验收须另列，不能混入这些通过数量。
 
