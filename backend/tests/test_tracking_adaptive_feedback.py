@@ -173,7 +173,8 @@ def _confirmed_shape_workspace(tmp_path, monkeypatch):
     manual = [100, 100, 140, 120]
     accepted = [100, 100, 144.4, 111.8]
     other = [100, 200, 140, 220]
-    first = _geometry_segment(tmp_path, monkeypatch, 0, manual, {1: {7: accepted, 12: other}})
+    first = _geometry_segment(tmp_path, monkeypatch, 0, manual,
+                              {frame: {7: accepted, 12: other} for frame in (1, 2, 3)})
     assert first["anomaly_paused"]["frame_index"] == 1
     reasons = first["anomaly_paused"]["reasons"]
     assert reasons[0]["type"] == "size_shrink"
@@ -220,8 +221,9 @@ def test_shape_confirmation_does_not_hide_further_shrink_or_other_objects(tmp_pa
     assert pause["geometryReferenceSource"] == "confirmed-normal"
     assert pause["geometryReferenceFrame"] == 1
     result = _geometry_segment(tmp_path, monkeypatch, 1, accepted,
-                               {2: {7: accepted, 12: [100, 200, 120, 210]}})
+                               {frame: {7: accepted, 12: [100, 200, 120, 210]} for frame in (2, 3, 4)})
     assert [item["object_id"] for item in result["anomaly_paused"]["reasons"]] == [12]
+    assert result["anomaly_paused"]["reasons"][0]["details"]["decision_frame_index"] == 4
 
 
 def test_new_manual_reference_supersedes_accepted_shape(tmp_path, monkeypatch):
@@ -230,7 +232,8 @@ def test_new_manual_reference_supersedes_accepted_shape(tmp_path, monkeypatch):
     workspace = json.loads(state_path.read_text())
     workspace["manualBaselines"] = [{"objectId": 7, "frameIndex": 1, "bbox": manual, "source": "manual"}]
     state_path.write_text(json.dumps(workspace))
-    result = _geometry_segment(tmp_path, monkeypatch, 1, accepted, {2: {7: accepted, 12: other}})
+    result = _geometry_segment(tmp_path, monkeypatch, 1, accepted,
+                               {frame: {7: accepted, 12: other} for frame in (2, 3, 4)})
     pause = result["anomaly_paused"]["reasons"][0]
     assert pause["manualBaselineFrame"] == 1
     assert pause["geometryReferenceSource"] == "manual"
@@ -245,7 +248,7 @@ def test_geometry_restore_respects_frame_reset_correction_and_deletion():
     workspace = {"trackingFeedbackEvents": [event]}
     manual = {7: ManualBaseline([100, 100, 140, 120], 0)}
     assert not _load_confirmed_geometry_references(workspace, 1, manual)
-    assert _load_confirmed_geometry_references(workspace, 2, manual)[7].frame_index == 2
+    assert _load_confirmed_geometry_references(workspace, 2, manual)[7][-1].frame_index == 2
     for tombstone in ({"deletedObjectIds": [7]}, {"deletedFrameObjects": [{"objectId": 7, "frameIndex": 2}]}):
         assert not _load_confirmed_geometry_references({**workspace, **tombstone}, 3, manual)
     for decision in ("reset", "corrected"):

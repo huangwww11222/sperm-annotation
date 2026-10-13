@@ -20,6 +20,8 @@ python3 scripts/run_browser_regression.py --python work/review-venv/bin/python -
 
 `independent-integrity` 保留独立审查中的行为断言：坏结构的成功响应、完整结果撤销后的 SPA 重读、跨素材迟到失败/成功、真实编码 4K 与 50,000 合成对象的读入/保存/刷新。另验证匿名/无效凭据不能读视频，HTTP 下真实 H.264 原生播放和 Range 正常，退出后不能读；真实保存已提交但响应丢失，再遇 `/auth/me` 500/网络失败/401，检查原请求保留、同账号重放与恢复后再次保存。首次新上传还从真实 Tracking/异常检测进入两个对象暂停，逐个正常确认后继续发布结果；只有模型预测被模拟。
 
+同组调用 `tracking-policy-checks.mjs`，新上传 8 帧视频并在真实画布画框，不导入 store 或预置工作区：普通高度约 0.64 倍持续观察后返回首次风险帧，显示确切指标/界限/参照与决定帧，数值按保存的诊断核验而非假设画框像素舍入后仍恰为 0.64；确认正常后轻微变化续追至末帧、刷新仍保留参考；人工 seed 已有稳定重叠不中断；三个对象新增重叠保留全部 partner，逐对象确认后续追；纯重叠确认有重置入口，重置关联对象对但保留其他独立组合和历史；极端缩框仍立即暂停。刷新前等待真实帧导航和自动保存游标完成，不能把旧游标恢复当成确认失败。检查两种窗口、浅深主题和专注模式的确认按钮及逐帧导航首屏可见性。仅模型框输出使用显式 `policy-*` 测试名称驱动，原视频读取、异常检测、反馈与结果发布均走真实后端；不是实际 GPU 精度验收。
+
 该合成负载设置宽松 CI 停滞门槛：全量结果读取 <8 s、首次恢复 <15 s、同步人工缓存 <64 KiB、最长主线程任务 <1.5 s，并保留实测耗时。这是隔离回归预算，不是医院 GPU、GB 视频或内网延迟的 SLA。慢盘测试以可释放的哈希阻塞注入证明同事件循环的健康请求与其他媒体保存仍在 2 s 内完成；不能将它称为真实医院慢盘实测。
 
 后端 `test_independent_integrity_audit.py` 保留独立审查用例；`test_integrity_recovery.py` 补 seed 临时写/替换失败、坏历史来源、合法点与像素边界、同事件循环慢盘上传时读取/另一视频写入、查重途中删除的竞态、长期反馈回执体积及重置后的准确重放。前端 `tracking-result.test.mjs` 通过 `npm run test:annotation` 校验结构故障组合，不能只靠静态源码断言。规范 ID 校验后，路径探针直接构造不安全目标；原子 seed 修复后，磁盘故障注入同时覆盖目标和临时文件，保留所有旧数据与错误断言。
@@ -163,7 +165,7 @@ work/review-venv/bin/python backend/tests/real_video_benchmark.py --source-dir "
 
 真实素材浏览器用例先生成 C/UX/B 基础夹具，再在同一 `/work/e2e-confirm-ux-*` 环境运行 `backend/tests/real_4k_browser_fixture.py --source-dir "/实际视频目录"`；生成的测试标注不代表该视频真实目标。随后运行 `CONFIRMATION_ORIGIN=http://127.0.0.1:5373 node frontend/tests/performance-browser.mjs`，会消费本批 C 决定；重新运行先生成新任务。截图/指标在 `output/playwright/performance-results.json` 和 `real-4k-performance.png`。
 - `annotation-delete-feedback-browser` 前在同一隔离环境运行 `backend/tests/annotation_controls_fixture.py`，只重置六个 `controls-*` 媒体，凭证留在 `work/annotation-controls-browser-fixture.json`。环境路径支持 `/work/e2e-confirm-ux*` 或单独 `/work/e2e-annotation-controls*`；前端地址用 `ANNOTATION_ORIGIN`。覆盖当前帧/全视频删除、统计取消/确认、跨帧撤销、刷新、正常/仅本次/实际修框、尺寸误报无须重画的人工参照保存与恢复、校准重置、两类写入成功但响应丢失的原键重放、帮助下载一致及小窗口首屏。其后续 GPU job 响应模拟，保存/反馈/seed/rewind与原视频帧走真实后端；不能称真实模型验收。
-- `test_tracking_adaptive_feedback.py` 使用模拟推理输出与真实反馈持久化，复现高度 0.59 倍的逐帧暂停，验证正常确认后不重画也可继续、原形状往返、重启读取、回退帧界限，以及新尺寸异常/丢失/重叠仍暂停；这些结果不代表真实 GPU 推理。
+- `test_tracking_adaptive_feedback.py`、`test_tracking_pause_policy.py`、`test_tracking_confirmation_policy.py`、`test_tracking_pause_publication.py` 使用真实检测与反馈持久化、合成框或模拟推理输出，验证普通风险的持续观察与方向切换、30 对象在 44.2 FPS 下的轻微变化、原形状往返、已确认正常形态、重启读取、跨轮首次风险发布、回退帧界限、活动参照损坏与重置恢复、逐渐丢尾、新对象对风险和极端缩框的成对路径。它们随后端全量入口执行，不代表真实 GPU 推理。前端 `pause-diagnostics.test.mjs` 与 `tracking-calibration.test.mjs` 随 `test:annotation` 验证服务端明确指标/界限的解释、软提示与触发指标的区分、多个 partner、重置显示与历史证据缺字段，不用它们替代实际浏览器确认流程。
 - `review-browser` 和 `review-failure-browser` 每组前重新生成 B 夹具。
 - C 正常用 main/zero，C 故障用 failure，二者可依次运行；整组重跑需新 C 夹具。
 - `training-export-browser` 前重新生成 C 夹具，因为它消费 main/zero。
@@ -265,7 +267,7 @@ python3 scripts/check_repository.py
 | `annotation.tracking_read_failed/tracking_results_missing/completion_results_missing`、`tracking.expected_result_missing` | 区分损坏、已有结果丢失、送审被阻止及任务报告完成却无结果；正常尚未追踪不记录为故障 |
 | `media.deleted/delete_failed/delete_rejected`、`annotation.media_deleted/media_delete_failed/media_list_failed` | 删除结果、媒体 ID、操作者、文件系统异常；前端网络失败不得当删除成功 |
 | `annotation.local_save_failed/selection_save_failed`、`ui.preference_save_failed` | 本机存储不可用 |
-| `annotation.feedback_saved`、`tracking.anomaly_pause/completed` | 正常确认原因、尺寸参照帧/来源、运动样本及实际续追起止帧；区分清除当前暂停与后续检测是否读取确认参照 |
+| `annotation.feedback_saved`、`tracking.anomaly_pause/completed` | 正常确认原因、尺寸参照帧/来源/完整框、全部已认可对象对、实际载入参照与持续次数、首次风险帧及决定帧、运动样本及续追起止帧；区分清除当前暂停与后续检测是否读取确认参照 |
 | `tracking.rewind/decoded/task_started/task_finished/task_failed/start_replay` | JSONL 回退耗时、本轮原始尺寸/帧数/RGB 字节、模型任务与耗时、启动重放及失败堆栈；与前端 `annotation.tracking_failed` 的阶段/帧号/taskId 对齐 |
 | `tracking.preview_started/preview_completed/preview_failed` | 按需整段预览编码及耗时，区分预览失败与追踪或保存失败 |
 | `source.lock_slow` | 来源锁等待 ≥500ms 或占用 ≥1s 时记录操作名与 wait_ms/work_ms；用来识别其他上传/保存是否仍在阻塞，不能只看客户端 timeout 猜模型耗时 |

@@ -60,6 +60,16 @@
 
 反馈响应包含 `{ok,mediaId,revision,normalMotionSamples,trackingFeedbackEvents,pausedAnomalies,lastPausedContext}`。正常/已修正请求必须匹配当前持久化暂停帧及未解决对象，并核验真实追踪行；新键不能再次确认已解决的历史异常。每次只移除选定对象及已被删除的暂停项；仍有待处理对象时保留暂停上下文。运动样本按媒体、对象和位移原因隔离；尺寸参照单独按确认事件恢复，不豁免重叠或丢失检测。普通工作区 PUT 不能注入校准样本。Tracking 状态另返回 `warningSummary`，用于合并轻提示，不把每次轻微抖动升级为阻塞弹窗。
 
+### 正常参照与短时风险观察
+
+尺寸/形状的 `normal` 可在 `geometryReference` 追加正值 `maskArea`（取自服务端模型结果；未知不填），恢复时最多使用每对象最近 3 个完整人工认可框，不拼接不同框的宽高范围。原人工框与来源不改变。续追校验最新适用的正常参考确实已载入；删除、人工修正、重置或分支时序使参照不适用时按各自规则处理，不把缺失参考静默当正常。
+
+对重叠原因的 `normal`，事件可追加 `overlapReferences:[{objectIds:[a,b],frameIndex,bboxes:[boxA,boxB],source:"confirmed-normal"}]`，仅从同帧实际对象及全部明确的重叠组合生成；不接受客户端提供组合或坐标。认可只限于这对对象的相近状态，不豁免新的伙伴、明显恶化、分离后的新风险或独立异常。成功反馈可返回兼容扩展 `confirmedReference:{eventId,geometryReference|null,overlapReferences:[]}`，原键重放保留原摘要。
+
+普通尺寸越界与新增疑似合并按原始帧观察连续 3 帧，同对象/对象对独立计数；严重几何突变、极端跳跃与异常消失仍及时暂停。初始稳定重叠及低 IoU 的大小框包含仅提示。JSONL 的 `anomaly_details` 提供 `geometry_thresholds`、`geometry_observation_count/required`、`overlap_pairs`（全部组合）、`pause_started_frame` 和 `decision_frame_index`。持续异常暂停定位首次风险帧，观察窗口中的后续帧不发布为正常结果；`lastProcessedFrame`/`processedFrames` 对应实际发布结果，不能用模型分析到的第三帧冒充已保存进度。短时观察跨追踪轮次恢复，确认或新的人工工作结束对应旧观察。
+
+暂停工作区可带服务端 `diagnostic` 以刷新恢复完整解释。客户端展示字段不参与后端判定；原始帧号、稳定对象 ID、幂等/版本、删除及送审边界保持原协议。
+
 ### 异常暂停后从较早帧重新追踪
 
 `POST /api/track/restart-branch/{mediaId}` 使用 Bearer 和 `Idempotency-Key`，正文为 `{expectedRevision,expectedPausedFrame,startFrame,confirmDiscardFuture:true,generationId?}`，帧号全部为原始 0 起编号。首次执行必须 `startFrame < expectedPausedFrame`、服务器暂停仍未解决、起点有有效框、原视频存在、轮次/工作区版本一致，且未送审、无运行中的 Tracking。暂停帧及之后只能使用逐项异常确认；普通 rewind/track 不得绕过未解决暂停。

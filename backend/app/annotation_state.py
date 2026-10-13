@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import os
+import re
 import uuid
 from pathlib import Path
 from typing import Any, Callable
@@ -256,6 +257,13 @@ def write_state(directory: Path, media_id: str, uid: int, key: str,
                         trackingFeedbackEvents=clean.get("trackingFeedbackEvents", []),
                         pausedAnomalies=clean.get("pausedAnomalies", []),
                         lastPausedContext=clean.get("lastPausedContext"))
+        event = clean["trackingFeedbackEvents"][-1]
+        if event.get("geometryReference") or event.get("overlapReferences"):
+            response["confirmedReference"] = {
+                "eventId": event["id"],
+                "geometryReference": event.get("geometryReference"),
+                "overlapReferences": event.get("overlapReferences", []),
+            }
     receipts[receipt_key] = {"digest": digest, "response": response}
     # Events are immutable append-only history. Reference each committed prefix
     # instead of embedding it again in every feedback receipt; replay still
@@ -281,7 +289,7 @@ def write_state(directory: Path, media_id: str, uid: int, key: str,
         log.info("annotation.deletion_changed media=%s user=%s revision=%s global_ids=%s frame_rules=%s key=%s", media_id, uid, revision + 1, clean.get("deletedObjectIds", []), len(clean.get("deletedFrameObjects", [])), key)
     if operation == "feedback":
         event = clean["trackingFeedbackEvents"][-1]
-        log.info("annotation.feedback_saved media=%s user=%s object=%s frame=%s decision=%s calibrated=%s geometry_reference_frame=%s reasons=%s revision=%s key=%s", media_id, uid, event["objectId"], event.get("frameIndex"), event["decision"], "sample" in event, event.get("geometryReference", {}).get("frameIndex"), event.get("reasons", []), revision + 1, key)
+        log.info("annotation.feedback_saved media=%s user=%s object=%s frame=%s decision=%s calibrated=%s geometry_reference_frame=%s mask_area=%s overlap_pairs=%s event=%s reasons=%s revision=%s key=%s", media_id, uid, event["objectId"], event.get("frameIndex"), event["decision"], "sample" in event, event.get("geometryReference", {}).get("frameIndex"), event.get("geometryReference", {}).get("maskArea"), [reference["objectIds"] for reference in event.get("overlapReferences", [])], event["id"], event.get("reasons", []), revision + 1, key)
     return response
 
 
@@ -375,6 +383,55 @@ def deletion_preview(directory: Path, object_id: int) -> dict[str, Any]:
             "lastFrame": max(occurrences) if occurrences else None}
 
 
+def _confirmed_box(obj: dict[str, Any] | None) -> list[float]:
+    """A server snapshot must contain an entire valid bbox, never per-axis limits."""
+    try:
+        raw_box = (obj or {}).get("bbox")
+        if not isinstance(raw_box, list) or len(raw_box) != 4 or any(type(value) not in (int, float) for value in raw_box):
+            raise ValueError("missing confirmed bbox")
+        box = [float(value) for value in raw_box]
+        if not all(math.isfinite(value) for value in box) or box[2] <= box[0] or box[3] <= box[1]:
+            raise ValueError("invalid confirmed bbox")
+        return box
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise HTTPException(422, "追踪框无效，不能保存正常判断参照；请重新读取或修正该对象") from exc
+
+
+def _confirmed_overlap_references(row: dict[str, Any], object_id: int, frame: int,
+                                  reasons: list[Any], details: dict[str, Any],
+                                  workspace: dict[str, Any]) -> list[dict[str, Any]]:
+    """Capture only explicit pairs from actual output, never the last merged peer.
+
+    A crowded object may carry several overlap reasons. `other_object_id` is
+    intentionally ignored because old detectors overwrote it for each pair.
+    The client cannot supply normal states or exempt unrelated object pairs.
+    """
+    pairs: set[tuple[int, int]] = set()
+    for reason in reasons:
+        match = re.match(r"^bbox_overlap_with=(\d+)(?:\s|$)", str(reason))
+        if match:
+            other_id = int(match.group(1))
+            if other_id > 0 and other_id != object_id:
+                pairs.add(tuple(sorted((object_id, other_id))))
+    for item in details.get("overlap_pairs", []) if isinstance(details.get("overlap_pairs"), list) else []:
+        identities = item.get("object_ids") if isinstance(item, dict) else None
+        if (isinstance(identities, list) and len(identities) == 2
+                and all(type(oid) is int and oid > 0 for oid in identities)
+                and identities[0] != identities[1] and object_id in identities):
+            pairs.add(tuple(sorted(identities)))
+    objects = {item["object_id"]: item for item in row["objects"]}
+    references = []
+    for pair in sorted(pairs):
+        if any(is_deleted(workspace, frame, oid) for oid in pair):
+            continue
+        if any(oid not in objects for oid in pair):
+            raise HTTPException(422, "重叠对象的追踪框缺失，不能保存正常重叠参照；请重新读取或修正")
+        references.append({"objectIds": list(pair), "frameIndex": frame,
+                           "bboxes": [_confirmed_box(objects[oid]) for oid in pair],
+                           "source": "confirmed-normal"})
+    return references
+
+
 def feedback_state(previous: dict[str, Any], directory: Path, body: dict[str, Any], uid: int) -> dict[str, Any]:
     object_id, frame = body.get("objectId"), body.get("frameIndex")
     decision = body.get("decision")
@@ -427,18 +484,16 @@ def feedback_state(previous: dict[str, Any], directory: Path, body: dict[str, An
             # Accepting a size/shape warning is an explicit human geometry
             # judgement, even without redrawing. Keep its server-side snapshot
             # separate from manual annotations and optional movement learning.
-            geometry_reason = any(str(reason).startswith(("manual_area_ratio=", "manual_width_ratio=", "manual_height_ratio=", "manual_aspect_change=")) for reason in reasons)
+            geometry_reason = any(str(reason).startswith(("manual_area_ratio=", "manual_width_ratio=", "manual_height_ratio=", "manual_aspect_change=", "confirmed_mask_area_ratio=")) for reason in reasons)
             if geometry_reason:
-                try:
-                    raw_box = (obj or {}).get("bbox")
-                    if not isinstance(raw_box, list) or len(raw_box) != 4:
-                        raise ValueError("missing confirmed bbox")
-                    box = [float(value) for value in raw_box]
-                    if not all(math.isfinite(value) for value in box) or box[2] <= box[0] or box[3] <= box[1]:
-                        raise ValueError("invalid confirmed bbox")
-                except (TypeError, ValueError, OverflowError) as exc:
-                    raise HTTPException(422, "追踪框无效，不能保存正常尺寸参照；请重新读取或修正该对象") from exc
-                event["geometryReference"] = {"objectId": object_id, "frameIndex": frame, "bbox": box, "source": "confirmed-normal"}
+                event["geometryReference"] = {"objectId": object_id, "frameIndex": frame,
+                                              "bbox": _confirmed_box(obj), "source": "confirmed-normal"}
+                mask_area = (obj or {}).get("mask_area")
+                if type(mask_area) in (int, float) and math.isfinite(mask_area) and mask_area > 0:
+                    event["geometryReference"]["maskArea"] = mask_area
+            overlap_references = _confirmed_overlap_references(row, object_id, frame, reasons, details, previous)
+            if overlap_references:
+                event["overlapReferences"] = overlap_references
             # A motion sample never exempts shape, identity, overlap or loss.
             value = details.get("motion_normalized")
             motion_reason = any(str(reason).startswith(("adjacent_center_shift", "center_displacement", "motion_", "normalized_motion", "tracking_motion")) for reason in reasons)
@@ -503,8 +558,8 @@ def publish_tracking_pause(directory: Path, media_id: str, pause: dict[str, Any]
                 if type(oid) is not int or oid <= 0:
                     raise HTTPException(500, "追踪暂停对象身份无效")
                 reasons = item.get("reasons", [])
-                geometry = item.get("type") in {"size_shrink", "size_growth", "shape_change"} or any(str(r).startswith(("manual_area_ratio=", "manual_width_ratio=", "manual_height_ratio=", "manual_aspect_change=")) for r in reasons)
-                notices.append(dict(objectId=oid, displayName=item.get("display_name") or item.get("name") or f"精子 {oid}", title=titles.get(item.get("type"), "追踪异常"), summary="请检查当前目标及暂停前的框是否正确。", metrics=[], suggestion="修正后确认，或回到更早的错误帧重建追踪分支。", acceptsGeometry=geometry, canLearn=any(str(r).startswith("adjacent_center_shift=") for r in reasons), rawReasons=reasons))
+                geometry = item.get("type") in {"size_shrink", "size_growth", "shape_change"} or any(str(r).startswith(("manual_area_ratio=", "manual_width_ratio=", "manual_height_ratio=", "manual_aspect_change=", "confirmed_mask_area_ratio=")) for r in reasons)
+                notices.append(dict(objectId=oid, displayName=item.get("display_name") or item.get("name") or f"精子 {oid}", title=titles.get(item.get("type"), "追踪异常"), summary="请检查当前目标及暂停前的框是否正确。", metrics=[], suggestion="修正后确认，或回到更早的错误帧重建追踪分支。", acceptsGeometry=geometry, canLearn=any(str(r).startswith("adjacent_center_shift=") for r in reasons), rawReasons=reasons, diagnostic=item))
         context = {"mediaId": media_id, "frameIndex": pause["frame_index"]} if pause and notices else None
         state.update(_pauseCandidates=notices, _pauseContext=context, pausedAnomalies=notices, lastPausedContext=context)
         if publication_id is not None:

@@ -150,6 +150,7 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
 def _clean_history_before_seed(
     output_json: Path,
     seed_source_frame: int,
+    rows: list[dict[str, Any]] | None = None,
 ) -> list[tuple[int, dict[int, list[float]]]]:
     """Return prior clean boxes for the long-term anomaly baseline.
 
@@ -159,7 +160,7 @@ def _clean_history_before_seed(
     detector must not learn as a normal object size.
     """
     frames: list[tuple[int, dict[int, list[float]]]] = []
-    for row in _read_jsonl(output_json):
+    for row in rows if rows is not None else _read_jsonl(output_json):
         try:
             source_frame = int(row.get("source_frame_index", row.get("frame_index", -1)))
         except (TypeError, ValueError):
@@ -268,14 +269,14 @@ def _load_confirmed_geometry_references(
     workspace: dict[str, Any],
     seed_source_frame: int,
     manual_baselines: dict[int, ManualBaseline],
-) -> dict[int, ConfirmedGeometryReference]:
+) -> dict[int, list[ConfirmedGeometryReference]]:
     """Restore explicit shape acceptance without changing manual provenance.
 
     Events are append-only server records. Reset/correction ends the previous
     acceptance, and neither future feedback nor a newer manual box may supply
     the geometry reference for this tracking branch.
     """
-    latest: dict[int, ConfirmedGeometryReference] = {}
+    latest: dict[int, list[ConfirmedGeometryReference]] = {}
     for event in workspace.get("trackingFeedbackEvents", []):
         if not isinstance(event, dict):
             continue
@@ -298,21 +299,94 @@ def _load_confirmed_geometry_references(
             continue
         if is_deleted(workspace, frame, oid) or is_deleted(workspace, seed_source_frame, oid):
             continue
-        raw_bbox = reference.get("bbox")
-        if not isinstance(raw_bbox, list) or len(raw_bbox) != 4:
-            continue
-        try:
-            bbox = [float(value) for value in raw_bbox]
-        except (TypeError, ValueError, OverflowError):
-            continue
-        if not all(math.isfinite(value) for value in bbox) or bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+        bbox = _valid_reference_bbox(reference.get("bbox"))
+        if bbox is None:
             continue
         manual = manual_baselines.get(oid)
         if manual and manual.frame_index >= frame:
             continue
-        if oid not in latest or frame >= latest[oid].frame_index:
-            latest[oid] = ConfirmedGeometryReference(bbox, frame)
+        mask_area = reference.get("maskArea")
+        if type(mask_area) not in (int, float) or not math.isfinite(mask_area) or mask_area <= 0:
+            mask_area = None
+        accepted = latest.setdefault(oid, [])
+        # The complete latest 3 explicit shapes are candidates. We never form
+        # an oversized range by mixing width from one reference with height
+        # from another, nor let ordinary AI rows silently teach normality.
+        accepted.append(ConfirmedGeometryReference(bbox, frame, mask_area=mask_area, event_id=event.get("id")))
+        accepted.sort(key=lambda item: item.frame_index)
+        latest[oid] = accepted[-3:]
     return latest
+
+
+def _valid_reference_bbox(raw_bbox: Any) -> list[float] | None:
+    if (not isinstance(raw_bbox, list) or len(raw_bbox) != 4
+            or any(type(value) not in (int, float) for value in raw_bbox)):
+        return None
+    try:
+        bbox = [float(value) for value in raw_bbox]
+    except (ValueError, OverflowError):
+        return None
+    if not all(math.isfinite(value) for value in bbox) or bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+        return None
+    return bbox
+
+
+def _load_confirmed_overlap_references(
+    workspace: dict[str, Any], seed_source_frame: int,
+    manual_baselines: dict[int, ManualBaseline],
+) -> dict[tuple[int, int], Any]:
+    """Restore explicit pair approvals only for the current media/branch.
+
+    The reference can make an unchanged overlap a warning; it is never an
+    object-wide exemption. New manual provenance/reset/correction invalidates
+    that object's pairs, while future approvals cannot affect earlier frames.
+    """
+    from .services.anomaly_detector import OverlapReference
+
+    references: dict[tuple[int, int], OverlapReference] = {}
+    for event in workspace.get("trackingFeedbackEvents", []):
+        if not isinstance(event, dict):
+            continue
+        oid = event.get("objectId")
+        if type(oid) is not int or oid <= 0:
+            continue
+        decision = event.get("decision")
+        frame = event.get("frameIndex")
+        if decision == "reset":
+            references = {pair: ref for pair, ref in references.items() if oid not in pair}
+            continue
+        if type(frame) is not int or not 0 <= frame <= seed_source_frame:
+            continue
+        if decision == "corrected":
+            references = {pair: ref for pair, ref in references.items() if oid not in pair}
+            continue
+        entries = event.get("overlapReferences")
+        if decision != "normal" or not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("source") != "confirmed-normal" or entry.get("frameIndex") != frame:
+                continue
+            ids = entry.get("objectIds")
+            if (not isinstance(ids, list) or len(ids) != 2
+                    or any(type(value) is not int or value <= 0 for value in ids)
+                    or ids[0] == ids[1] or oid not in ids):
+                continue
+            if any(is_deleted(workspace, fi, identity) for identity in ids for fi in (frame, seed_source_frame)):
+                continue
+            if any(identity in manual_baselines and manual_baselines[identity].frame_index >= frame for identity in ids):
+                continue
+            boxes = entry.get("bboxes")
+            if not isinstance(boxes, list) or len(boxes) != 2:
+                continue
+            valid_boxes = [_valid_reference_bbox(box) for box in boxes]
+            if any(box is None for box in valid_boxes):
+                continue
+            pair = tuple(sorted(ids))
+            prior = references.get(pair)
+            if prior is None or frame >= prior.frame_index:
+                references[pair] = OverlapReference(pair=pair, boxes=dict(zip(ids, valid_boxes)),
+                                                    frame_index=frame, event_id=event.get("id"))
+    return references
 
 
 def rewind_tracking_results(
@@ -446,6 +520,8 @@ def track_video(
         for object_id, baseline in _load_latest_manual_baselines(Path(annotation_json), seed_source_frame).items()
         if object_id in active_object_ids
     }
+    history_rows = [row for row in _read_jsonl(Path(output_json))
+                    if max(0, seed_source_frame - 8) <= int(row.get("source_frame_index", row.get("frame_index", -1))) <= seed_source_frame]
     detector = AnomalyDetector(
         config=AnomalyConfig(),
         fps=source_fps,
@@ -455,13 +531,22 @@ def track_video(
         manual_baselines=manual_baselines,
         normal_feedback=normal_feedback if normal_feedback is not None else workspace.get("normalMotionSamples", []),
         geometry_references=_load_confirmed_geometry_references(workspace, seed_source_frame, manual_baselines),
+        overlap_references=_load_confirmed_overlap_references(workspace, seed_source_frame, manual_baselines),
     )
+    from .tracking_pause_policy import require_confirmed_geometry
+    try:
+        require_confirmed_geometry(workspace, seed_source_frame, active_object_ids, manual_baselines,
+                                   detector.geometry_references)
+    except ValueError:
+        logging.getLogger("review.tracking").exception("tracking.confirmed_reference_invalid media=%s seed=%s",
+                                                      video_file.parent.name, seed_source_frame)
+        raise
     # Old JSONL deliberately retains deleted boxes for undo. Only identities
     # in this run's seed may contribute history or disappearance expectations.
     detector.prime_history(
         (fi, {oid: box for oid, box in history.items()
               if oid in active_object_ids and not is_deleted(workspace, fi, oid)})
-        for fi, history in _clean_history_before_seed(Path(output_json), seed_source_frame)
+        for fi, history in _clean_history_before_seed(Path(output_json), seed_source_frame, history_rows)
     )
     logging.getLogger("review.tracking").info("tracking.active_objects seed_frame=%s active_ids=%s deleted_ids=%s",
              seed_source_frame, sorted(active_object_ids), workspace.get("deletedObjectIds", []))
@@ -492,10 +577,24 @@ def track_video(
         seed_source_idx,
         {int(obj["object_id"]): list(obj["bbox"]) for obj in objects},
     )
+    observation_rows = [{**row, "objects": [obj for obj in row.get("objects", [])
+                         if int(obj.get("object_id", 0)) in active_object_ids
+                         and not is_deleted(workspace, int(row.get("source_frame_index", row.get("frame_index", -1))), int(obj.get("object_id", 0)))]}
+                        for row in history_rows]
+    detector.prime_observations(observation_rows, seed_source_idx,
+                               {int(obj["object_id"]): list(obj["bbox"]) for obj in objects})
+    logging.getLogger("review.tracking").info(
+        "tracking.confirmed_references_loaded media=%s seed=%s geometry=%s overlap=%s",
+        video_file.parent.name, seed_source_frame,
+        {oid: [{"frame": ref.frame_index, "bbox": ref.bbox, "maskArea": ref.mask_area}
+               for ref in refs] for oid, refs in detector.geometry_references.items()},
+        {str(pair): {"frame": ref.frame_index, "boxes": ref.boxes} for pair, ref in detector.overlap_references.items()},
+    )
 
     result_anomaly_paused = None
     warning_summary: dict[tuple[int, str], dict[str, Any]] = {}
     last_processed_frame = seed_source_idx
+    analyzed_through_frame = seed_source_idx
     end_frame_exclusive = seed_frame + requested
     if progress: progress(stage='tracking', message='正在追踪', processedFrames=1, lastProcessedFrame=seed_source_idx)
     for output in engine.propagate_manual(
@@ -541,7 +640,8 @@ def track_video(
             oid = int(obj_row["object_id"])
             frame_objs_for_detector[oid] = list(obj_row["bbox"])
         hidden_ids = {oid for oid in active_object_ids if is_deleted(workspace, source_idx, oid)}
-        anomaly_report = detector.push(source_idx, frame_objs_for_detector, ignored_object_ids=hidden_ids)
+        anomaly_report = detector.push(source_idx, frame_objs_for_detector, ignored_object_ids=hidden_ids,
+                                       mask_areas={int(obj["object_id"]): obj["mask_area"] for obj in object_rows if obj.get("mask_area") is not None})
 
         # A single-frame omission must not end this object's model history.
         # Retain raw predictions for deletion undo. API/workflow readers apply
@@ -588,6 +688,7 @@ def track_video(
         }
         new_rows.append(row)
         last_processed_frame = source_idx
+        analyzed_through_frame = source_idx
         if progress: progress(stage='tracking', message='正在追踪', processedFrames=len(new_rows), lastProcessedFrame=source_idx)
         print(
             f"[sam3] frame={frame_idx} source={source_idx} "
@@ -596,6 +697,21 @@ def track_video(
 
         # HARD 异常 → 在当前异常帧保存结果后立即暂停。
         if should_pause:
+            from .tracking_pause_policy import select_pause_evidence, summarize_warnings
+            earlier = [row for row in history_rows if int(row.get("source_frame_index", row.get("frame_index", -1))) <= seed_source_idx]
+            source_idx, visible_anomalies, retained_rows = select_pause_evidence(anomaly_report, earlier + new_rows, source_idx)
+            # Own the first risk and all later rows, even when observation
+            # began in the preceding chunk. Existing human data is separate.
+            publication_start = min(seed_source_idx, source_idx)
+            new_rows = [row for row in retained_rows if int(row["source_frame_index"]) >= publication_start]
+            last_processed_frame = source_idx
+            warning_summary = summarize_warnings(new_rows)
+            logging.getLogger("review.tracking").info(
+                "tracking.pause_window media=%s first=%s decision=%s published_through=%s objects=%s",
+                video_file.parent.name, source_idx, analyzed_through_frame, last_processed_frame,
+                [{"objectId": af.object_id, "reasons": af.reasons, "referenceFrame": af.details.get("geometry_reference_frame"),
+                  "referenceBox": af.details.get("geometry_reference_bbox"), "currentBox": af.details.get("current_bbox")} for af in visible_anomalies],
+            )
             pause_objects = []
             for af in visible_anomalies:
                 if af.level in (AnomalyLevel.ANOMALY, AnomalyLevel.DISAPPEARED):
@@ -603,17 +719,17 @@ def track_video(
                     area_ratio = details.get("area_ratio")
                     width_ratio = details.get("width_ratio")
                     height_ratio = details.get("height_ratio")
-                    size_hard = any(r.startswith(("manual_area_ratio=", "manual_width_ratio=", "manual_height_ratio=")) and r.endswith(" HARD") for r in af.reasons)
+                    size_hard = any(r.startswith(("manual_area_ratio=", "manual_width_ratio=", "manual_height_ratio=", "confirmed_mask_area_ratio=")) and r.endswith(" HARD") for r in af.reasons)
                     is_shrink = size_hard and ((
                         isinstance(area_ratio, (int, float)) and area_ratio < detector.config.MANUAL_AREA_RATIO_MIN_HARD
                     ) or (
                         isinstance(width_ratio, (int, float)) and width_ratio < detector.config.MANUAL_WIDTH_RATIO_MIN_HARD
                     ) or (
                         isinstance(height_ratio, (int, float)) and height_ratio < detector.config.MANUAL_HEIGHT_RATIO_MIN_HARD
-                    ))
+                    )) or any(r.startswith("confirmed_mask_area_ratio=") and float(details.get("mask_area_ratio", 1)) < 1 for r in af.reasons)
                     pause_type = (
                         "disappearance" if af.level == AnomalyLevel.DISAPPEARED
-                        else "overlap" if any("bbox_overlap_with=" in r for r in af.reasons)
+                        else "overlap" if any(r.startswith("bbox_overlap_with=") and r.endswith(" HARD") for r in af.reasons)
                         else "size_shrink" if is_shrink
                         else "size_growth" if size_hard
                         else "shape_change" if any(r.startswith("manual_aspect_change=") and r.endswith(" HARD") for r in af.reasons)
@@ -659,12 +775,12 @@ def track_video(
             result_anomaly_paused = {
                 "frame_index": source_idx,
                 "reasons": pause_objects,
-                "levels": {str(k): v.value for k, v in anomaly_report.object_levels.items()},
+                "levels": {str(af.object_id): af.level.value for af in visible_anomalies},
             }
             break
 
     if progress: progress(stage='saving_results', message='正在保存追踪结果')
-    merged_rows = _merge_rows(Path(output_json), new_rows, keep_before_source_frame=seed_source_idx, pause=result_anomaly_paused)
+    merged_rows = _merge_rows(Path(output_json), new_rows, keep_before_source_frame=min(seed_source_idx, last_processed_frame), pause=result_anomaly_paused)
 
     result = {
         "frames": [{**row, "objects": [obj for obj in row.get("objects", []) if not is_deleted(workspace, int(row["source_frame_index"]), int(obj["object_id"]))]} for row in merged_rows],
@@ -675,6 +791,7 @@ def track_video(
         "requestedFrames": requested,
         "processedFrames": len(new_rows),
         "lastProcessedFrame": last_processed_frame,
+        "analyzedThroughFrame": analyzed_through_frame,
         "reachedVideoEnd": last_processed_frame >= source_frame_count - 1,
         "sourceFps": source_fps,
         "processFps": source_fps,
@@ -697,7 +814,7 @@ def track_video(
         "tracking.completed media=%s start=%s last=%s paused=%s feedback_objects=%s geometry_references=%s warnings=%s",
         video_file.parent.name, seed_source_frame, last_processed_frame, result_anomaly_paused is not None,
         sorted(detector.normal_motion_samples),
-        {oid: ref.frame_index for oid, ref in detector.geometry_references.items()}, list(warning_summary.values()),
+        {oid: refs[-1].frame_index for oid, refs in detector.geometry_references.items() if refs}, list(warning_summary.values()),
     )
     print(f"[sam3] result jsonl: {output_json}")
     print('[sam3] full-video preview is generated only when requested')

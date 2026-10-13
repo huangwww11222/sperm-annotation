@@ -1,6 +1,8 @@
 import { createRequestId } from '../utils/browserCompat'
 import { computed, nextTick, reactive, ref, shallowRef, watch } from 'vue'
 import { FrameCache } from '../annotation/frameCache'
+import { pauseDiagnostics, type OverlapPairNotice } from '../annotation/pauseDiagnostics'
+import { savedTrackingCalibration } from '../annotation/trackingCalibration'
 import { hitHandle, moveBox, resizeBox, type Box } from '../annotation/geometry'
 import type { AnnotationObject, AnnotationTool, EffectResult, MediaAsset, SavedAnnotationFile } from '../types/annotation'
 // 登录、人工标注、视频目录、SAM3 Tracking 均走真实后端
@@ -248,20 +250,11 @@ const createWorkspace = () => {
   const trackingFeedbackPending = computed(() => !!pendingFeedback.value)
   const canUndoVideoDeletion = computed(() => !!videoDeletionHistory.value[currentMediaId.value] && !videoDeletionHistory.value[currentMediaId.value].undone)
   const lastVideoObjectDeletion = computed(() => canUndoVideoDeletion.value ? videoDeletionHistory.value[currentMediaId.value] : null)
-  const trackingCalibrationSummary = computed(() => {
-    const counts = new Map<number, number>()
-    for (const sample of normalMotionSamples.value[currentMediaId.value] ?? []) counts.set(sample.objectId, (counts.get(sample.objectId) || 0) + 1)
-    const shapes = new Map<number, number>()
-    for (const event of trackingFeedbackEvents.value[currentMediaId.value] ?? []) {
-      if (event.decision === 'reset' || event.decision === 'corrected') shapes.delete(event.objectId)
-      else if (event.geometryReference) shapes.set(event.objectId, event.geometryReference.frameIndex)
-    }
-    // These are stored human confirmations; a newer manual frame can supersede
-    // their use during tracking. Keep the reset control available either way.
-    return [...new Set([...counts.keys(), ...shapes.keys()])]
-      .filter(objectId => !deletedObjectIds.value[currentMediaId.value]?.includes(objectId))
-      .map(objectId => ({ objectId, sampleCount: counts.get(objectId) ?? 0, geometryFrame: shapes.get(objectId) }))
-  })
+  const trackingCalibrationSummary = computed(() => savedTrackingCalibration(
+    normalMotionSamples.value[currentMediaId.value] ?? [],
+    trackingFeedbackEvents.value[currentMediaId.value] ?? [],
+    deletedObjectIds.value[currentMediaId.value] ?? [],
+  ))
   const isObjectDeleted = (mediaId: string, objectId: number | undefined, frameIndex: number) => objectId != null && (
     deletedObjectIds.value[mediaId]?.includes(objectId) || deletedFrameObjects.value[mediaId]?.some(d => d.objectId === objectId && d.frameIndex === frameIndex)
   )
@@ -280,6 +273,13 @@ const createWorkspace = () => {
     baselineFrame?: number
     geometryReferenceFrame?: number
     geometryReferenceSource?: 'manual' | 'confirmed-normal'
+    triggerSummary?: string
+    maskTrigger?: boolean
+    overlapPairs?: OverlapPairNotice[]
+    acceptsOverlap?: boolean
+    pauseStartFrame?: number
+    decisionFrame?: number
+    diagnostic?: NonNullable<TrackStatusResponse['pausedObjects']>[number]
     acceptsGeometry: boolean
     reviewRange?: string
     reviewNotice?: string
@@ -1847,21 +1847,25 @@ const createWorkspace = () => {
     return local?.name?.trim() || `object-${objectId}`
   }
 
-  const isGeometryReason = (reason: string) => /^(?:manual|geometry)_(?:area_ratio|width_ratio|height_ratio|aspect_change)=/.test(reason)
+  const isGeometryReason = (reason: string) => /^(?:manual|geometry)_(?:area_ratio|width_ratio|height_ratio|aspect_change)=|^confirmed_mask_area_ratio=/.test(reason)
   const canLearnNormalMotion = (reasons: string[]) => reasons.some(reason => reason.startsWith('adjacent_center_shift='))
     && reasons.every(reason => reason.startsWith('adjacent_center_shift=') || reason.startsWith('motion_') || isGeometryReason(reason))
 
   const normalizePauseNotice = (item: typeof pausedAnomalies.value[number]) => {
     // Older saved pauses have only the displayed title and canLearn flag.
     // This restores their explanation; the server validates the real evidence.
+    const diagnostic: Partial<typeof pausedAnomalies.value[number]> = item.diagnostic ? explainPausedObject(item.diagnostic) : {}
     const acceptsGeometry = !!item.acceptsGeometry || (item.rawReasons ?? []).some(isGeometryReason)
       || ['框相对最近人工标注明显缩小', '框相对最近人工标注明显扩大或变形'].includes(item.title)
     return {
       ...item,
+      ...diagnostic,
+      displayName: item.displayName || diagnostic.displayName || `object-${item.objectId}`,
       canLearn: item.rawReasons?.length ? canLearnNormalMotion(item.rawReasons) : !!item.canLearn,
       acceptsGeometry,
-      geometryReferenceFrame: item.geometryReferenceFrame ?? (acceptsGeometry ? item.baselineFrame : undefined),
-      geometryReferenceSource: item.geometryReferenceSource ?? (acceptsGeometry ? 'manual' as const : undefined),
+      acceptsOverlap: item.acceptsOverlap || (item.rawReasons ?? []).some(reason => reason.startsWith('bbox_overlap_with=')),
+      geometryReferenceFrame: diagnostic.geometryReferenceFrame ?? item.geometryReferenceFrame ?? (acceptsGeometry ? item.baselineFrame : undefined),
+      geometryReferenceSource: diagnostic.geometryReferenceSource ?? item.geometryReferenceSource ?? (acceptsGeometry ? 'manual' as const : undefined),
       rawReasons: item.rawReasons ?? [],
     }
   }
@@ -1871,6 +1875,7 @@ const createWorkspace = () => {
     const reasons = item.reasons ?? []
     const type = item.type
     const displayName = objectDisplayName(item.object_id, item.display_name || item.name)
+    const evidence = pauseDiagnostics(item.object_id, reasons, details, id => objectDisplayName(id))
     const baselineFrame = Number(item.manualBaselineFrame ?? details.manual_baseline_frame ?? NaN)
     const geometryReferenceFrame = Number(details.geometry_reference_frame ?? item.manualBaselineFrame ?? details.manual_baseline_frame ?? NaN)
     const geometryReferenceSource = details.geometry_reference_source === 'confirmed-normal' ? 'confirmed-normal' as const : 'manual' as const
@@ -1895,18 +1900,22 @@ const createWorkspace = () => {
       formatMetric('重叠覆盖率', item.metrics?.overlapCoverage ?? details.overlap_coverage),
     ].filter(Boolean)
 
-    if (type === 'overlap' || reasons.some((reason) => reason.includes('bbox_overlap_with='))) {
+    if (type === 'overlap' || reasons.some((reason) => reason.startsWith('bbox_overlap_with=') && reason.endsWith(' HARD'))) {
       const otherId = Number(item.other_object_id ?? details.other_object_id)
       const otherName = Number.isFinite(otherId) ? objectDisplayName(otherId, item.other_display_name) : '另一个对象'
       return {
         objectId: item.object_id,
         displayName,
         title: '对象重叠异常',
-        summary: `${displayName} 与 ${otherName} 的框高度重叠，可能发生 ID 合并。`,
+        summary: evidence.overlapPairs.length
+          ? `${displayName} 与 ${evidence.overlapPairs.map(pair => `#${pair.otherObjectId} ${objectDisplayName(pair.otherObjectId)}`).join('、')} 出现持续或恶化的重叠，请检查对象边界和身份。`
+          : `${displayName} 与 ${otherName} 的框高度重叠，请检查对象边界和身份。`,
+        ...evidence,
+        acceptsOverlap: true,
         metrics,
         baselineFrame: Number.isFinite(baselineFrame) ? baselineFrame : undefined,
         reviewRange,
-        suggestion: '检查两个对象的边界和 object ID；分别修正框后，从当前帧重新执行 AI Tracking。',
+        suggestion: '核对这里列出的所有对象组合；框准确可确认无异常，有误先修正。所有待处理对象确认后才续追。',
       }
     }
     if (type === 'size_shrink') {
@@ -1915,6 +1924,7 @@ const createWorkspace = () => {
         displayName,
         title: `框相对${referenceName}明显缩小`,
         ...geometryReference,
+        ...evidence,
         summary: `${displayName} 的框相对${referenceName}明显缩小，可能已经丢失精子尾部。`,
         metrics,
         baselineFrame: Number.isFinite(baselineFrame) ? baselineFrame : undefined,
@@ -1929,6 +1939,7 @@ const createWorkspace = () => {
         displayName,
         title: `框相对${referenceName}明显扩大或变形`,
         ...geometryReference,
+        ...evidence,
         summary: `${displayName} 的框相对${referenceName}明显扩大或变形，可能框入了杂质或其他精子。`,
         metrics,
         baselineFrame: Number.isFinite(baselineFrame) ? baselineFrame : undefined,
@@ -1942,6 +1953,7 @@ const createWorkspace = () => {
         objectId: item.object_id,
         displayName,
         title: '对象在画面内消失',
+        ...evidence,
         summary: `${displayName} 未在边界附近被检测到，无法确认其是否正常离场。`,
         metrics,
         baselineFrame: Number.isFinite(baselineFrame) ? baselineFrame : undefined,
@@ -1953,6 +1965,7 @@ const createWorkspace = () => {
       objectId: item.object_id,
       displayName,
       title: '追踪运动异常',
+      ...evidence,
       summary: `${displayName} 相对上一帧发生异常位置跳变。`,
       metrics,
       baselineFrame: Number.isFinite(baselineFrame) ? baselineFrame : undefined,

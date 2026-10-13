@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
+import { trackingPolicyChecks } from './tracking-policy-checks.mjs'
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright')
 const root = path.resolve(process.env.INDEPENDENT_AUDIT_ROOT || '')
 assert(root.startsWith(path.resolve('work') + path.sep) && /e2e-confirm-ux-(independent|regression)-/.test(path.basename(root)))
@@ -230,6 +231,10 @@ try {
     assert.equal(observations.recoveredManualCount,2,'after recovery, real drawing saves and reloads')
     assert.equal(blocked,false,'a previous asset reply must not lock a healthy active asset')
     assert.equal(hasError,false,'a previous asset reply must not publish an error on the active asset')
+  })
+
+  await caseRun('tracking-pause-policy',async()=>{
+    observations=await trackingPolicyChecks(page,{root,origin,api,poll,ready,out})
   })
 
   await caseRun('4k-50000-objects',async()=>{

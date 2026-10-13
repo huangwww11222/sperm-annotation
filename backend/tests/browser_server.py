@@ -42,8 +42,24 @@ class SimulatedModel:
 
     def decode_tracker_output(self, session, output):
         boxes=[]
+        overlap_boxes = [list(o['bbox']) for o in session.objects if o.get('name', '').startswith('policy-overlap')]
         for o in session.objects:
             box=list(o['bbox'])
+            name = o.get('name', '')
+            if name.startswith('policy-geometry'):
+                if session.source_start == 0 and 1 <= output.frame_idx <= 3:
+                    cy = (box[1]+box[3])/2
+                    height = (box[3]-box[1])*.64
+                    box[1],box[3] = cy-height/2,cy+height/2
+                elif session.source_start > 0:
+                    cy = (box[1]+box[3])/2
+                    height = (box[3]-box[1])*(1.02 if output.frame_idx%2 else .98)
+                    box[1],box[3] = cy-height/2,cy+height/2
+            elif name.startswith('policy-overlap') and session.source_start == 0 and output.frame_idx >= 1:
+                box = list(overlap_boxes[0])
+            elif name.startswith('policy-extreme') and session.source_start == 0 and output.frame_idx == 1:
+                box[2] = box[0]+(box[2]-box[0])*.1
+                box[3] = box[1]+(box[3]-box[1])*.1
             if session.source_start == 0 and output.frame_idx == 1 and o.get('name','').startswith('audit-pause'):
                 box[2]=box[0]+(box[2]-box[0])*.2
             boxes.append(SimpleNamespace(object_id=o['object_id'],bbox=box,score=.99,mask_area=None,sam3_object_id=o['object_id']))

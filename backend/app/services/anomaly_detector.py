@@ -1,6 +1,6 @@
 """Stateful anomaly detection for SAM3 object tracking.
 
-Size and shape use the latest manual annotation and, when present, one shape
+Size and shape use the latest manual annotation and a bounded set of shapes
 explicitly confirmed as normal by the user. Predictions cannot add references
 or change the manual annotation, so gradual AI drift does not teach itself.
 """
@@ -42,6 +42,15 @@ class AnomalyConfig:
     MANUAL_DIMENSION_RATIO_MAX_WARN: float = 1.35
     MANUAL_ASPECT_CHANGE_WARN: float = 1.50
 
+    GEOMETRY_PERSISTENCE_FRAMES: int = 3
+    GEOMETRY_REFERENCE_LIMIT: int = 3
+    GEOMETRY_EXTREME_AREA_MIN: float = 0.25
+    GEOMETRY_EXTREME_AREA_MAX: float = 4.00
+    GEOMETRY_EXTREME_DIMENSION_MIN: float = 0.35
+    GEOMETRY_EXTREME_DIMENSION_MAX: float = 2.50
+    GEOMETRY_EXTREME_ASPECT_CHANGE: float = 4.00
+    GEOMETRY_EXTREME_MASK_LOSS: float = 0.25
+
     # Motion is expressed in manual-box diagonals per 1/30 second. These are
     # initial decision thresholds, not pixel limits. Only explicit human
     # samples may expand them; recent AI boxes describe motion, not normality.
@@ -62,6 +71,14 @@ class AnomalyConfig:
     SIDE_EXIT_MARGIN_PX: float = float(os.getenv("ANOMALY_SIDE_EXIT_MARGIN_PX", "10"))
     OVERLAP_WARN: float = 0.85
     OVERLAP_HARD: float = 0.95
+    OVERLAP_PERSISTENCE_FRAMES: int = 3
+    OVERLAP_MERGE_IOU: float = 0.85
+    OVERLAP_REFERENCE_COVERAGE_MARGIN: float = 0.03
+    OVERLAP_REFERENCE_IOU_MARGIN: float = 0.10
+    OVERLAP_REFERENCE_DIMENSION_MIN: float = 0.65
+    OVERLAP_REFERENCE_DIMENSION_MAX: float = 1.50
+    OVERLAP_REFERENCE_AREA_MIN: float = 0.55
+    OVERLAP_REFERENCE_AREA_MAX: float = 1.80
     REVIEW_LOOKBACK_FRAMES: int = int(os.getenv("ANOMALY_REVIEW_LOOKBACK_FRAMES", "5"))
 
 
@@ -112,6 +129,24 @@ class ManualBaseline:
 class ConfirmedGeometryReference:
     bbox: list[float]
     frame_index: int
+    mask_area: int | None = None
+    event_id: str | None = None
+
+
+@dataclass(frozen=True)
+class OverlapReference:
+    pair: tuple[int, int]
+    boxes: dict[int, list[float]]
+    frame_index: int
+    event_id: str | None = None
+    source: str = "confirmed-normal"
+
+
+@dataclass
+class _OverlapState:
+    count: int = 0
+    started_frame: int | None = None
+    last_frame: int | None = None
 
 
 @dataclass
@@ -126,6 +161,10 @@ class _ObjectState:
     seed_motion_scale: float | None = None
     manual_baseline: ManualBaseline | None = None
     has_paused: bool = False
+    geometry_count: int = 0
+    geometry_started_frame: int | None = None
+    geometry_last_frame: int | None = None
+    geometry_category: str | None = None
 
     @property
     def history(self) -> list[list[float]]:
@@ -148,6 +187,7 @@ class AnomalyReport:
     object_levels: dict[int, AnomalyLevel]
     frames: list[AnomalyFrame]
     should_pause: bool
+    pause_frame_index: int | None = None
 
 
 class AnomalyDetector:
@@ -160,7 +200,8 @@ class AnomalyDetector:
         all_object_ids: Iterable[int] | None = None,
         manual_baselines: dict[int, ManualBaseline | dict[str, Any]] | None = None,
         normal_feedback: Iterable[dict[str, Any]] | None = None,
-        geometry_references: dict[int, ConfirmedGeometryReference] | None = None,
+        geometry_references: dict[int, ConfirmedGeometryReference | list[ConfirmedGeometryReference]] | None = None,
+        overlap_references: dict[tuple[int, int], OverlapReference] | None = None,
     ) -> None:
         self.config = config or AnomalyConfig()
         self.frame_width = int(frame_width)
@@ -172,6 +213,10 @@ class AnomalyDetector:
         self.current_frame_index = -1
         self.normal_motion_samples: dict[int, list[float]] = {}
         self.geometry_references = dict(geometry_references or {})
+        self.overlap_references = dict(overlap_references or {})
+        self._seed_overlap_references: dict[tuple[int, int], OverlapReference] = {}
+        self._overlap_states: dict[tuple[int, int], _OverlapState] = {}
+        self._separated_pairs: dict[tuple[int, int], int] = {}
         self.prime_normal_feedback(normal_feedback or [])
         if manual_baselines:
             self.prime_manual_baselines(manual_baselines)
@@ -220,7 +265,11 @@ class AnomalyDetector:
             raise ValueError("manual baseline bbox must contain four valid coordinates")
         oid = int(object_id)
         self.all_object_ids.add(oid)
-        self._state(oid).manual_baseline = ManualBaseline(clean, int(frame_index), name)
+        state = self._state(oid)
+        state.manual_baseline = ManualBaseline(clean, int(frame_index), name)
+        state.geometry_count = 0
+        state.geometry_started_frame = state.geometry_last_frame = None
+        state.geometry_category = None
 
     def prime_manual_baselines(self, baselines: dict[int, ManualBaseline | dict[str, Any]]) -> None:
         for raw_oid, value in baselines.items():
@@ -247,6 +296,9 @@ class AnomalyDetector:
     def initialize_seed(self, frame_index: int, frame_objects: dict[int, list[float]]) -> None:
         """Prime motion at the seed without changing manual baselines."""
         self.current_frame_index = int(frame_index)
+        self._seed_overlap_references.clear()
+        self._overlap_states.clear()
+        self._separated_pairs.clear()
         levels: dict[int, AnomalyLevel] = {}
         for raw_oid, bbox in frame_objects.items():
             clean = [float(value) for value in bbox]
@@ -262,7 +314,20 @@ class AnomalyDetector:
             state.is_dead = False
             state.has_paused = False
             state.motion_streak = 0
+            state.geometry_count = 0
+            state.geometry_started_frame = state.geometry_last_frame = None
+            state.geometry_category = None
             levels[oid] = AnomalyLevel.NORMAL
+        items = sorted((int(oid), list(bbox)) for oid, bbox in frame_objects.items() if int(oid) in levels)
+        for index, (oid_a, bbox_a) in enumerate(items):
+            for oid_b, bbox_b in items[index+1:]:
+                pair = (oid_a, oid_b)
+                if _overlap_coverage(bbox_a, bbox_b) >= self.config.OVERLAP_WARN:
+                    self._seed_overlap_references[pair] = OverlapReference(
+                        pair, {oid_a: bbox_a, oid_b: bbox_b}, int(frame_index), source="manual-seed",
+                    )
+                else:
+                    self._separated_pairs[pair] = int(frame_index)
         self.reports.append(AnomalyReport(int(frame_index), levels, [], False))
 
     def _is_near_boundary(self, bbox) -> bool:
@@ -395,6 +460,23 @@ class AnomalyDetector:
             "aspect_ratio_change": aspect_change,
             "near_side_edge": near_side_edge,
             "side_exit_shrink_ignored": side_exit_shrink,
+            "geometry_extreme": (
+                (area_ratio < cfg.GEOMETRY_EXTREME_AREA_MIN and not side_exit_shrink)
+                or area_ratio > cfg.GEOMETRY_EXTREME_AREA_MAX
+                or (min(width_ratio, height_ratio) < cfg.GEOMETRY_EXTREME_DIMENSION_MIN and not side_exit_shrink)
+                or max(width_ratio, height_ratio) > cfg.GEOMETRY_EXTREME_DIMENSION_MAX
+                or (aspect_change >= cfg.GEOMETRY_EXTREME_ASPECT_CHANGE and not side_exit_shrink)
+            ),
+            "geometry_thresholds": {
+                "manual_area_ratio": {"min": cfg.MANUAL_AREA_RATIO_MIN_HARD, "max": cfg.MANUAL_AREA_RATIO_MAX_HARD,
+                                      "extreme_min": cfg.GEOMETRY_EXTREME_AREA_MIN, "extreme_max": cfg.GEOMETRY_EXTREME_AREA_MAX},
+                "manual_width_ratio": {"min": cfg.MANUAL_WIDTH_RATIO_MIN_HARD, "max": cfg.MANUAL_WIDTH_RATIO_MAX_HARD,
+                                       "extreme_min": cfg.GEOMETRY_EXTREME_DIMENSION_MIN, "extreme_max": cfg.GEOMETRY_EXTREME_DIMENSION_MAX},
+                "manual_height_ratio": {"min": cfg.MANUAL_HEIGHT_RATIO_MIN_HARD, "max": cfg.MANUAL_HEIGHT_RATIO_MAX_HARD,
+                                        "extreme_min": cfg.GEOMETRY_EXTREME_DIMENSION_MIN, "extreme_max": cfg.GEOMETRY_EXTREME_DIMENSION_MAX},
+                "manual_aspect_change": {"min": None, "max": cfg.MANUAL_ASPECT_CHANGE_HARD,
+                                         "extreme_min": None, "extreme_max": cfg.GEOMETRY_EXTREME_ASPECT_CHANGE},
+            },
         })
         ratios = (
             ("manual_area_ratio", area_ratio, cfg.MANUAL_AREA_RATIO_MIN_HARD, cfg.MANUAL_AREA_RATIO_MAX_HARD, cfg.MANUAL_AREA_RATIO_MIN_WARN, cfg.MANUAL_AREA_RATIO_MAX_WARN),
@@ -425,7 +507,282 @@ class AnomalyDetector:
 
         return hard, warning, reasons, details
 
-    def push(self, frame_index: int, frame_objects: dict[int, list[float]], *, ignored_object_ids: Iterable[int] | None = None) -> AnomalyReport:
+    def _eligible_geometry_references(self, oid: int, frame_index: int) -> list[ConfirmedGeometryReference]:
+        raw = self.geometry_references.get(oid, [])
+        candidates = raw if isinstance(raw, (list, tuple)) else [raw]
+        baseline = self._state(oid).manual_baseline
+        return sorted(
+            (reference for reference in candidates if isinstance(reference, ConfirmedGeometryReference)
+             and reference.frame_index <= frame_index
+             and (baseline is None or reference.frame_index > baseline.frame_index)),
+            key=lambda reference: reference.frame_index,
+        )[-max(1, int(self.config.GEOMETRY_REFERENCE_LIMIT)):]
+
+    def _geometry_observation(self, oid: int, frame_index: int, bbox: list[float], mask_area: int | None = None
+                              ) -> tuple[bool, bool, list[str], dict[str, Any]]:
+        state, cfg = self._state(oid), self.config
+        references: list[tuple[ManualBaseline | ConfirmedGeometryReference, str]] = []
+        if state.manual_baseline is not None:
+            references.append((state.manual_baseline, "manual"))
+        confirmed = self._eligible_geometry_references(oid, frame_index)
+        references.extend((reference, "confirmed-normal") for reference in confirmed)
+        if not references:
+            state.geometry_count = 0
+            state.geometry_started_frame = state.geometry_last_frame = None
+            state.geometry_category = None
+            return False, False, [], {}
+        checks = [self._geometry_check(bbox, reference, source) for reference, source in references]
+        hard, warning, reasons, details = min(
+            reversed(checks),
+            key=lambda check: 3 if check[3].get("geometry_extreme") else 2 if check[0] else 1 if check[1] else 0,
+        )
+        details["confirmed_geometry_frame"] = max((reference.frame_index for reference in confirmed), default=None)
+        details["geometry_reference_count"] = len(references)
+        confirmed_areas = [float(reference.mask_area) for reference in confirmed
+                           if isinstance(reference.mask_area, (int, float)) and math.isfinite(reference.mask_area)
+                           and reference.mask_area > 0]
+        if confirmed_areas and isinstance(mask_area, (int, float)) and math.isfinite(mask_area) and mask_area >= 0:
+            # Loss is extreme only relative to every explicitly accepted mask.
+            # Neither the initial rectangular prompt nor AI history supplies it.
+            mask_reference = min(confirmed_areas)
+            ratio = mask_area / mask_reference
+            details.update(current_mask_area=mask_area, mask_reference_area=mask_reference, mask_area_ratio=ratio)
+            if ratio < cfg.GEOMETRY_EXTREME_MASK_LOSS and not details.get("side_exit_shrink_ignored"):
+                hard = True
+                details["geometry_extreme"] = True
+                reasons.append(f"confirmed_mask_area_ratio={ratio:.3f} HARD")
+        extreme = bool(details.get("geometry_extreme"))
+        details["geometry_risk_reasons"] = [reason for reason in reasons if reason.endswith(" HARD")]
+        shrinking = any(details[label] < minimum for label, minimum in (
+            ("area_ratio", cfg.MANUAL_AREA_RATIO_MIN_HARD),
+            ("width_ratio", cfg.MANUAL_WIDTH_RATIO_MIN_HARD),
+            ("height_ratio", cfg.MANUAL_HEIGHT_RATIO_MIN_HARD),
+        ))
+        growing = any(details[label] > maximum for label, maximum in (
+            ("area_ratio", cfg.MANUAL_AREA_RATIO_MAX_HARD),
+            ("width_ratio", cfg.MANUAL_WIDTH_RATIO_MAX_HARD),
+            ("height_ratio", cfg.MANUAL_HEIGHT_RATIO_MAX_HARD),
+        ))
+        # Width/height may exchange which metric detects the same direction.
+        # Opposite directions cannot accumulate one alleged sustained shrink.
+        category = ("shrink" if shrinking and not growing else "growth" if growing and not shrinking else "shape") if hard else None
+        if hard and not extreme:
+            if state.geometry_last_frame == frame_index and state.geometry_category == category:
+                pass  # Re-reading a frame must not count as another observation.
+            elif state.geometry_last_frame == frame_index-1 and state.geometry_count and state.geometry_category == category:
+                state.geometry_count += 1
+            else:
+                state.geometry_count = 1
+                state.geometry_started_frame = frame_index
+            state.geometry_last_frame = frame_index
+            state.geometry_category = category
+        else:
+            state.geometry_count = 0
+            state.geometry_started_frame = state.geometry_last_frame = None
+            state.geometry_category = None
+        required = max(1, int(cfg.GEOMETRY_PERSISTENCE_FRAMES))
+        sustained = bool(hard and not extreme and state.geometry_count >= required)
+        details.update(geometry_risk=bool(hard), geometry_observation_count=state.geometry_count,
+                       geometry_observation_required=required, geometry_observation_started_frame=state.geometry_started_frame,
+                       geometry_observation_category=category,
+                       geometry_pending=bool(hard and not extreme and not sustained))
+        if hard:
+            details["risk_type"] = "geometry"
+        elif not warning:
+            # Fixed limits belong in actionable diagnostics, not every normal
+            # object row of a long or crowded tracking result.
+            details.pop("geometry_thresholds", None)
+        if extreme or sustained:
+            details["pause_started_frame"] = frame_index if extreme else state.geometry_started_frame
+        elif hard:
+            warning = True
+            reasons = [reason.replace(" HARD", " SOFT") for reason in reasons]
+        return extreme or sustained, warning, reasons, details
+
+    def _pair_reference_matches(self, reference: OverlapReference, boxes: dict[int, list[float]],
+                                coverage: float, iou: float) -> bool:
+        cfg = self.config
+        pair = reference.pair
+        if any(oid not in reference.boxes for oid in pair):
+            return False
+        old_a, old_b = (reference.boxes[oid] for oid in pair)
+        if coverage > _overlap_coverage(old_a, old_b)+cfg.OVERLAP_REFERENCE_COVERAGE_MARGIN:
+            return False
+        if iou > _iou(old_a, old_b)+cfg.OVERLAP_REFERENCE_IOU_MARGIN:
+            return False
+        for oid in pair:
+            old_width, old_height = _bbox_wh(reference.boxes[oid])
+            width, height = _bbox_wh(boxes[oid])
+            if min(old_width, old_height) <= 0:
+                return False
+            if not all(cfg.OVERLAP_REFERENCE_DIMENSION_MIN <= ratio <= cfg.OVERLAP_REFERENCE_DIMENSION_MAX
+                       for ratio in (width/old_width, height/old_height)):
+                return False
+            ratio = width*height/(old_width*old_height)
+            if not cfg.OVERLAP_REFERENCE_AREA_MIN <= ratio <= cfg.OVERLAP_REFERENCE_AREA_MAX:
+                return False
+        return True
+
+    def _pair_observation(self, pair: tuple[int, int], boxes: dict[int, list[float]], frame_index: int
+                          ) -> dict[str, Any] | None:
+        cfg = self.config
+        bbox_a, bbox_b = (boxes[oid] for oid in pair)
+        coverage, iou = _overlap_coverage(bbox_a, bbox_b), _iou(bbox_a, bbox_b)
+        state = self._overlap_states.setdefault(pair, _OverlapState())
+        if coverage < cfg.OVERLAP_WARN:
+            self._overlap_states.pop(pair, None)
+            self._separated_pairs[pair] = frame_index
+            return None
+        references = []
+        reference = self.overlap_references.get(pair)
+        if (isinstance(reference, OverlapReference) and reference.frame_index <= frame_index
+                and reference.frame_index > self._separated_pairs.get(pair, -1) and all(
+                    self._state(oid).manual_baseline is None
+                    or self._state(oid).manual_baseline.frame_index <= reference.frame_index for oid in pair
+                )):
+            references.append(reference)
+        if pair not in self._separated_pairs:
+            seed = self._seed_overlap_references.get(pair)
+            if seed is not None:
+                references.append(seed)
+        matched = next((reference for reference in references
+                        if self._pair_reference_matches(reference, boxes, coverage, iou)), None)
+        suspect = coverage >= cfg.OVERLAP_HARD and iou >= cfg.OVERLAP_MERGE_IOU and matched is None
+        if suspect:
+            if state.last_frame == frame_index:
+                pass
+            elif state.last_frame == frame_index-1 and state.count:
+                state.count += 1
+            else:
+                state.count = 1
+                state.started_frame = frame_index
+            state.last_frame = frame_index
+        else:
+            state.count = 0
+            state.started_frame = state.last_frame = None
+        required = max(1, int(cfg.OVERLAP_PERSISTENCE_FRAMES))
+        hard = bool(suspect and state.count >= required)
+        return {"object_ids": list(pair), "coverage": coverage, "iou": iou,
+                "level": AnomalyLevel.ANOMALY.value if hard else AnomalyLevel.WARNING.value,
+                "risk_streak": state.count, "persistence_frames": required,
+                "threshold": cfg.OVERLAP_HARD, "merge_iou_threshold": cfg.OVERLAP_MERGE_IOU,
+                "suspected_merge": suspect, "pause_started_frame": state.started_frame if hard else None,
+                "observation_started_frame": state.started_frame,
+                "reference_frame": matched.frame_index if matched else None,
+                "reference_source": matched.source if matched else None,
+                "reference_boxes": matched.boxes if matched else None,
+                "normal_reference_matched": matched is not None}
+
+    def prime_observations(self, frames: Iterable[dict[str, Any]], seed_frame: int,
+                           seed_boxes: dict[int, list[float]], *, reset_frames: dict[int, int] | None = None) -> None:
+        """Restore short risk observation across rounds without trusting AI seeds.
+
+        Call after ``initialize_seed``. Only geometry/pair counters change: no
+        report, motion history, accepted shape or manual baseline is added.
+        ``reset_frames`` ends observations at an explicit human reset/correction.
+        """
+        reset_frames = {int(oid): int(frame) for oid, frame in (reset_frames or {}).items()}
+        for oid, state in self.states.items():
+            if state.manual_baseline is not None:
+                reset_frames[oid] = max(reset_frames.get(oid, -1), state.manual_baseline.frame_index)
+        seed_frame = int(seed_frame)
+        active = set(seed_boxes)
+        count = max(int(self.config.GEOMETRY_PERSISTENCE_FRAMES), int(self.config.OVERLAP_PERSISTENCE_FRAMES), 1)
+        rows: dict[int, dict[str, Any]] = {}
+        for row in frames:
+            if not isinstance(row, dict):
+                continue
+            try:
+                frame = int(row.get("source_frame_index", row.get("frame_index", -1)))
+            except (TypeError, ValueError):
+                continue
+            if 0 <= frame <= seed_frame and isinstance(row.get("objects"), list):
+                rows[frame] = row
+        chosen = sorted(rows)[-count:]
+        if not chosen:
+            # An initial human seed is an anchor, never the first predicted
+            # observation of a three-frame risk window.
+            return
+        parsed: list[tuple[int, dict[int, list[float]], dict[int, int | None]]] = []
+        previous_details: dict[tuple[int, int], list[dict[str, Any]]] = {}
+        for frame in chosen:
+            boxes, masks = {}, {}
+            for obj in rows[frame]["objects"]:
+                if not isinstance(obj, dict):
+                    continue
+                try:
+                    oid = int(obj.get("object_id", obj.get("objectId")))
+                    bbox = [float(value) for value in obj["bbox"]]
+                except (TypeError, ValueError, KeyError):
+                    continue
+                if oid not in active or len(bbox) != 4 or not all(math.isfinite(value) for value in bbox) or _bbox_area(bbox) <= 0:
+                    continue
+                boxes[oid], masks[oid] = bbox, obj.get("mask_area")
+                details = obj.get("anomaly_details", {})
+                if isinstance(details, dict):
+                    for evidence in details.get("overlap_pairs", []):
+                        if isinstance(evidence, dict) and isinstance(evidence.get("object_ids"), list) and len(evidence["object_ids"]) == 2:
+                            pair = tuple(sorted(evidence["object_ids"]))
+                            previous_details.setdefault(pair, []).append({**evidence, "observed_frame": frame})
+            if frame == seed_frame:
+                boxes = {oid: list(bbox) for oid, bbox in seed_boxes.items()}
+            parsed.append((frame, boxes, masks))
+        if not parsed or parsed[-1][0] != seed_frame:
+            parsed.append((seed_frame, {oid: list(bbox) for oid, bbox in seed_boxes.items()}, {}))
+
+        # A pending pair cannot become trusted solely because its AI output was
+        # reused as this round's seed. Retain only the earlier trusted reference
+        # recorded by the server; separation or a recorded risk invalidates it.
+        for pair in list(self._seed_overlap_references):
+            boundary = max(reset_frames.get(oid, -1) for oid in pair)
+            evidence = [item for item in previous_details.get(pair, []) if item["observed_frame"] > boundary]
+            suspicious = any(item.get("suspected_merge") or item.get("risk_streak", 0) for item in evidence)
+            separated = any(set(pair).issubset(boxes) and _overlap_coverage(*(boxes[oid] for oid in pair)) < self.config.OVERLAP_WARN
+                            for frame, boxes, _ in parsed if boundary < frame < seed_frame)
+            old_reference = next((item for item in reversed(evidence)
+                                  if item.get("normal_reference_matched") and item.get("reference_source") == "manual-seed"
+                                  and isinstance(item.get("reference_boxes"), dict)), None)
+            if suspicious or separated:
+                self._seed_overlap_references.pop(pair, None)
+            elif old_reference is not None:
+                try:
+                    boxes = {oid: list(old_reference["reference_boxes"].get(oid, old_reference["reference_boxes"].get(str(oid)))) for oid in pair}
+                    frame = int(old_reference["reference_frame"])
+                    if frame <= seed_frame and all(len(box) == 4 and _bbox_area(box) > 0 for box in boxes.values()):
+                        self._seed_overlap_references[pair] = OverlapReference(pair, boxes, frame, source="manual-seed")
+                except (TypeError, ValueError, KeyError):
+                    self._seed_overlap_references.pop(pair, None)
+        self._overlap_states.clear()
+        # initialize_seed may have seen a current separation. Replaying the
+        # prior frames must not prematurely treat a future separation as past.
+        self._separated_pairs.clear()
+        for state in self.states.values():
+            state.geometry_count = 0
+            state.geometry_started_frame = state.geometry_last_frame = None
+            state.geometry_category = None
+        for frame, boxes, masks in parsed:
+            for oid in active:
+                state = self._state(oid)
+                if oid not in boxes or frame <= reset_frames.get(oid, -1) or (state.manual_baseline and frame < state.manual_baseline.frame_index):
+                    state.geometry_count = 0
+                    state.geometry_started_frame = state.geometry_last_frame = None
+                    state.geometry_category = None
+                    continue
+                self._geometry_observation(oid, frame, boxes[oid], masks.get(oid))
+            for pair in list(self._overlap_states):
+                if not set(pair).issubset(boxes):
+                    self._overlap_states.pop(pair, None)
+            ids = sorted(boxes)
+            for index, oid in enumerate(ids):
+                for other in ids[index+1:]:
+                    pair = (oid, other)
+                    if frame <= max(reset_frames.get(oid, -1), reset_frames.get(other, -1)):
+                        self._overlap_states.pop(pair, None)
+                        continue
+                    self._pair_observation(pair, boxes, frame)
+
+    def push(self, frame_index: int, frame_objects: dict[int, list[float]], *, ignored_object_ids: Iterable[int] | None = None,
+             mask_areas: dict[int, int] | None = None) -> AnomalyReport:
         cfg = self.config
         frame_index = int(frame_index)
         self.current_frame_index = frame_index
@@ -442,6 +799,9 @@ class AnomalyDetector:
             state.motion_streak = 0
             state.has_paused = False
             state.is_dead = False
+            state.geometry_count = 0
+            state.geometry_started_frame = state.geometry_last_frame = None
+            state.geometry_category = None
             if oid in frame_objects:
                 self._remember_motion(state, frame_index, frame_objects[oid])
 
@@ -450,6 +810,9 @@ class AnomalyDetector:
             if state.is_dead:
                 continue
             state.missing_count += 1
+            state.geometry_count = 0
+            state.geometry_started_frame = state.geometry_last_frame = None
+            state.geometry_category = None
             last_bbox = state.motion_history[-1] if state.motion_history else None
             if self._is_near_boundary(last_bbox):
                 state.level = AnomalyLevel.NORMAL
@@ -489,32 +852,19 @@ class AnomalyDetector:
                 "manual_baseline_frame": baseline.frame_index if baseline else None,
                 "manual_baseline_name": baseline.name if baseline else None,
             })
-            references: list[tuple[ManualBaseline | ConfirmedGeometryReference, str]] = []
-            if baseline is not None:
-                references.append((baseline, "manual"))
-            confirmed = self.geometry_references.get(oid)
-            # A newer manual correction supersedes prior accepted shapes. The
-            # frame check also protects direct detector/scan callers from
-            # applying a future confirmation to earlier predictions.
-            if confirmed and confirmed.frame_index <= frame_index and (baseline is None or confirmed.frame_index > baseline.frame_index):
-                references.append((confirmed, "confirmed-normal"))
-            if references:
-                checks = [self._geometry_check(bbox, reference, source) for reference, source in references]
-                # Accept a coherent match to either known shape. Prefer the
-                # latest confirmation on ties, including a genuinely new
-                # anomaly, so its diagnostics describe the current reference.
-                hard, warning, geometry_reasons, geometry_details = min(
-                    reversed(checks), key=lambda check: 2 if check[0] else 1 if check[1] else 0,
-                )
-                reasons.extend(geometry_reasons)
-                details.update(geometry_details)
-                details["confirmed_geometry_frame"] = confirmed.frame_index if any(source == "confirmed-normal" for _, source in references) else None
+            hard, warning, geometry_reasons, geometry_details = self._geometry_observation(
+                oid, frame_index, bbox, (mask_areas or {}).get(oid),
+            )
+            reasons.extend(geometry_reasons)
+            details.update(geometry_details)
 
             motion_hard, motion_warning, motion_reasons, motion_details = self._motion_check(oid, state, frame_index, bbox)
             hard = hard or motion_hard
             warning = warning or motion_warning
             reasons.extend(motion_reasons)
             details.update(motion_details)
+            if motion_hard:
+                details["pause_started_frame"] = min(details.get("pause_started_frame", frame_index), frame_index)
 
             state.level = AnomalyLevel.ANOMALY if hard else AnomalyLevel.WARNING if warning else AnomalyLevel.NORMAL
             if not hard:
@@ -522,18 +872,33 @@ class AnomalyDetector:
             report.frames.append(AnomalyFrame(frame_index, oid, state.level, reasons, details))
             report.object_levels[oid] = state.level
 
-        if not first_report and len(current_ids) >= 2:
-            items = [(int(oid), bbox) for oid, bbox in frame_objects.items() if int(oid) not in ignored_ids]
+        visible_ids = current_ids - ignored_ids
+        for pair in list(self._overlap_states):
+            if not set(pair).issubset(visible_ids):
+                self._overlap_states.pop(pair, None)
+        if not first_report and len(visible_ids) >= 2:
+            items = sorted((int(oid), bbox) for oid, bbox in frame_objects.items() if int(oid) not in ignored_ids)
+            boxes = {oid: bbox for oid, bbox in items}
             for index, (oid_a, bbox_a) in enumerate(items):
                 for oid_b, bbox_b in items[index + 1:]:
-                    coverage = _overlap_coverage(bbox_a, bbox_b)
-                    if coverage < cfg.OVERLAP_WARN:
+                    evidence = self._pair_observation((oid_a, oid_b), boxes, frame_index)
+                    if evidence is None:
                         continue
-                    level = AnomalyLevel.ANOMALY if coverage >= cfg.OVERLAP_HARD else AnomalyLevel.WARNING
+                    level = AnomalyLevel(evidence["level"])
                     suffix = "HARD" if level == AnomalyLevel.ANOMALY else "SOFT"
-                    common = {"overlap_coverage": coverage, "iou": _iou(bbox_a, bbox_b), **self._review_details(frame_index)}
-                    self._append_reason(report, oid_a, f"bbox_overlap_with={oid_b} coverage={coverage:.3f} {suffix}", {**common, "other_object_id": oid_b}, level)
-                    self._append_reason(report, oid_b, f"bbox_overlap_with={oid_a} coverage={coverage:.3f} {suffix}", {**common, "other_object_id": oid_a}, level)
+                    for oid, other in ((oid_a, oid_b), (oid_b, oid_a)):
+                        existing = next((item for item in report.frames if item.object_id == oid), None)
+                        pairs = [*(existing.details.get("overlap_pairs", []) if existing else []), evidence]
+                        strongest = max(pairs, key=lambda item: (item["level"] == "anomaly", item["coverage"], item["iou"]))
+                        common = {"overlap_pairs": pairs, "overlap_coverage": strongest["coverage"],
+                                  "iou": strongest["iou"], "other_object_id": next(value for value in strongest["object_ids"] if value != oid),
+                                  **self._review_details(frame_index)}
+                        if level == AnomalyLevel.ANOMALY:
+                            starts = [evidence["pause_started_frame"]]
+                            if existing and isinstance(existing.details.get("pause_started_frame"), int):
+                                starts.append(existing.details["pause_started_frame"])
+                            common["pause_started_frame"] = min(starts)
+                        self._append_reason(report, oid, f"bbox_overlap_with={other} coverage={evidence['coverage']:.3f} {suffix}", common, level)
                     self._state(oid_a).level = report.object_levels[oid_a]
                     self._state(oid_b).level = report.object_levels[oid_b]
 
@@ -546,9 +911,23 @@ class AnomalyDetector:
 
         self.reports.append(report)
         if report.should_pause:
+            report.pause_frame_index = min(
+                item.details.get("pause_started_frame", frame_index) for item in report.frames
+                if item.level in (AnomalyLevel.ANOMALY, AnomalyLevel.DISAPPEARED)
+            )
             logging.getLogger("review.tracking").info(
-                "tracking.anomaly_pause frame=%s objects=%s", frame_index,
-                [{"objectId": item.object_id, "reasons": item.reasons, "motion": item.details.get("motion_normalized"), "threshold": item.details.get("motion_pause_threshold"), "samples": item.details.get("feedback_sample_count", 0), "geometry_reference_source": item.details.get("geometry_reference_source"), "geometry_reference_frame": item.details.get("geometry_reference_frame"), "confirmed_geometry_frame": item.details.get("confirmed_geometry_frame")} for item in report.frames if item.level in (AnomalyLevel.ANOMALY, AnomalyLevel.DISAPPEARED)],
+                "tracking.anomaly_pause frame=%s pause_frame=%s objects=%s", frame_index, report.pause_frame_index,
+                [{"objectId": item.object_id, "reasons": item.reasons,
+                  "motion": item.details.get("motion_normalized"), "threshold": item.details.get("motion_pause_threshold"),
+                  "samples": item.details.get("feedback_sample_count", 0),
+                  "geometry_reference_source": item.details.get("geometry_reference_source"),
+                  "geometry_reference_frame": item.details.get("geometry_reference_frame"),
+                  "confirmed_geometry_frame": item.details.get("confirmed_geometry_frame"),
+                  "geometry_category": item.details.get("geometry_observation_category"),
+                  "geometry_observations": item.details.get("geometry_observation_count"),
+                  "geometry_ratios": {key: item.details.get(key) for key in ("area_ratio", "width_ratio", "height_ratio", "aspect_ratio_change")},
+                  "pause_started_frame": item.details.get("pause_started_frame")}
+                 for item in report.frames if item.level in (AnomalyLevel.ANOMALY, AnomalyLevel.DISAPPEARED)],
             )
         return report
 

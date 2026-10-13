@@ -66,7 +66,7 @@
 .tracking-calibration .quiet-button{font-size:9px;padding:3px;color:var(--accent)}
 
 /* Feedback controls stay visible; supporting diagnostics scroll on expansion. */
-.tracking-anomaly{padding:9px 12px;max-height:220px;flex-shrink:0;border-top:1px solid var(--line);border-bottom:1px solid var(--line);font-size:10px}
+.tracking-anomaly{padding:9px 12px;max-height:220px;overflow:auto;flex-shrink:0;border-top:1px solid var(--line);border-bottom:1px solid var(--line);font-size:10px}
 .tracking-anomaly>div{display:block}
 .tracking-anomaly .tracking-feedback-title{display:flex;align-items:center;gap:9px;justify-content:flex-start;flex-wrap:wrap;font-size:10px}
 .tracking-feedback-title strong{font-size:11px}
@@ -79,7 +79,10 @@
 .tracking-target{display:flex;flex-direction:column;gap:3px;margin:6px 0;line-height:1.5}
 .tracking-target strong{font-size:10px}
 .tracking-target>span{font-size:9px;color:var(--muted)}
-.tracking-anomaly .tracking-feedback-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.tracking-anomaly .tracking-feedback-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;position:sticky;top:0;z-index:1;background:var(--surface);padding:4px 0}
+.tracking-overlap-targets{max-height:32px;overflow:auto}
+.annotation-page.tracking-paused .annotation-canvas{min-height:80px}
+.annotation-page.tracking-paused .annotation-timeline,.annotation-page.tracking-paused .annotation-status{flex-shrink:0}
 .tracking-learn{display:flex;align-items:flex-start;gap:5px;font-size:10px;color:var(--text);line-height:1.5;flex:1;min-width:200px}
 .tracking-learn input{margin-top:2px;accent-color:var(--accent);flex-shrink:0}
 .tracking-learn small{display:block;font-size:9px;color:var(--muted)}

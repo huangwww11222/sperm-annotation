@@ -85,7 +85,7 @@ export interface TrackStatusResponse {
     display_name?: string
     type: string
     reasons?: string[]
-    details?: Record<string, number | string | boolean | number[] | null | undefined>
+    details?: Record<string, unknown>
     currentBox?: number[] | null
     manualBaselineBox?: number[] | null
     manualBaselineFrame?: number | null
@@ -147,6 +147,12 @@ export interface TrackingFeedbackEvent {
   objectId: number
   frameIndex: number
   decision: 'normal' | 'corrected' | 'reset'
+  overlapReferences?: Array<{
+    objectIds: [number, number]
+    frameIndex: number
+    bboxes: [[number, number, number, number], [number, number, number, number]]
+    source: 'confirmed-normal'
+  }>
   geometryReference?: {
     objectId: number
     frameIndex: number

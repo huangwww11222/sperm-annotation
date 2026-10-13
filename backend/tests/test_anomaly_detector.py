@@ -21,14 +21,15 @@ def _detector(bbox: list[float] | None = None, frame: int = 0) -> AnomalyDetecto
 def test_slow_shrink_eventually_pauses_against_fixed_manual_baseline() -> None:
     detector = _detector()
     reports = []
-    for frame, width in enumerate([38, 35, 31, 28, 25], start=1):
+    for frame, width in enumerate([38, 35, 31, 28, 25, 24, 23], start=1):
         reports.append(detector.push(frame, {1: _box(width=width)}))
     assert not any(report.should_pause for report in reports[:-1])
     assert reports[-1].should_pause is True
     anomaly = next(frame for frame in reports[-1].frames if frame.object_id == 1)
     assert anomaly.details["manual_baseline_bbox"] == _box()
     assert anomaly.details["manual_baseline_frame"] == 0
-    assert anomaly.details["width_ratio"] == 0.625
+    assert anomaly.details["width_ratio"] == 0.575
+    assert reports[-1].pause_frame_index == 5
 
 
 def test_ai_boxes_never_pollute_manual_baseline() -> None:
@@ -42,11 +43,15 @@ def test_ai_boxes_never_pollute_manual_baseline() -> None:
 
 
 def test_growth_pauses() -> None:
-    report = _detector().push(1, {1: _box(width=64, height=16)})
+    detector = _detector()
+    reports = [detector.push(frame, {1: _box(width=64, height=16)}) for frame in (1, 2, 3)]
+    assert [item.should_pause for item in reports] == [False, False, True]
+    report = reports[-1]
     assert report.should_pause is True
     assert report.object_levels[1] == AnomalyLevel.ANOMALY
     anomaly = next(frame for frame in report.frames if frame.object_id == 1)
     assert anomaly.details["area_ratio"] > 1.8
+    assert report.pause_frame_index == 1
 
 
 def test_manual_correction_replaces_old_baseline() -> None:
@@ -76,9 +81,12 @@ def test_confirmed_geometry_requires_one_complete_shape_match() -> None:
     detector.initialize_seed(1, {1: confirmed})
     # Width matches manual and height matches confirmation, but neither
     # complete human-approved shape is 40x40. Do not merge dimension ranges.
-    report = detector.push(2, {1: _box(width=40, height=40)})
+    reports = [detector.push(frame, {1: _box(width=40, height=40)}) for frame in (2, 3, 4)]
+    assert [item.should_pause for item in reports] == [False, False, True]
+    report = reports[-1]
     assert report.should_pause
     assert report.frames[0].details["geometry_reference_source"] == "confirmed-normal"
+    assert report.pause_frame_index == 2
 
 
 @pytest.mark.parametrize("scenario", ["motion", "overlap", "loss"])
@@ -102,7 +110,13 @@ def test_geometry_confirmation_preserves_independent_checks(scenario) -> None:
     else:
         current = {}
         reason = "unexpected_disappearance"
-    report = detector.push(2, current)
+    if scenario == "overlap":
+        reports = [detector.push(frame, current) for frame in (2, 3, 4)]
+        assert [item.should_pause for item in reports] == [False, False, True]
+        report = reports[-1]
+        assert report.pause_frame_index == 2
+    else:
+        report = detector.push(2, current)
     assert report.should_pause
     assert any(item.object_id == 1 and any(value.startswith(reason) for value in item.reasons) for item in report.frames)
     assert detector.states[1].manual_baseline.bbox == manual
@@ -114,7 +128,9 @@ def test_future_confirmation_is_not_applied_to_earlier_predictions() -> None:
     detector = _detector(_box(width=40, height=20))
     confirmed = _box(width=44.4, height=11.8)
     detector.geometry_references = {1: ConfirmedGeometryReference(confirmed, 8)}
-    assert detector.push(1, {1: confirmed}).should_pause
+    reports = [detector.push(frame, {1: confirmed}) for frame in (1, 2, 3)]
+    assert [item.should_pause for item in reports] == [False, False, True]
+    assert reports[-1].pause_frame_index == 1
 
 
 def test_normal_motion_is_not_compared_with_manual_center() -> None:
@@ -156,26 +172,36 @@ def test_shrink_at_right_side_is_treated_as_normal_exit() -> None:
 
 
 def test_same_shrink_away_from_side_still_pauses() -> None:
-    report = _detector().push(1, {1: _box(width=20, x=110)})
+    detector = _detector()
+    reports = [detector.push(index, {1: _box(width=20, x=110)}) for index in (1, 2, 3)]
+    assert [item.should_pause for item in reports] == [False, False, True]
+    report = reports[-1]
     assert report.should_pause is True
     frame = next(item for item in report.frames if item.object_id == 1)
     assert frame.details["side_exit_shrink_ignored"] is False
+    assert report.pause_frame_index == 1
 
 
 def test_shrink_at_top_edge_is_not_exempted_as_side_exit() -> None:
     detector = _detector(_box(y=5))
-    report = detector.push(1, {1: _box(width=20, x=110, y=5)})
+    reports = [detector.push(index, {1: _box(width=20, x=110, y=5)}) for index in (1, 2, 3)]
+    assert [item.should_pause for item in reports] == [False, False, True]
+    report = reports[-1]
     assert report.should_pause is True
     frame = next(item for item in report.frames if item.object_id == 1)
     assert frame.details["near_side_edge"] is False
+    assert report.pause_frame_index == 1
 
 
 def test_growth_at_side_still_pauses() -> None:
     detector = _detector(_box(x=590))
-    report = detector.push(1, {1: _box(width=70, x=570)})
+    reports = [detector.push(index, {1: _box(width=70, x=570)}) for index in (1, 2, 3)]
+    assert [item.should_pause for item in reports] == [False, False, True]
+    report = reports[-1]
     assert report.should_pause is True
     frame = next(item for item in report.frames if item.object_id == 1)
     assert any("manual_width_ratio" in reason and "HARD" in reason for reason in frame.reasons)
+    assert report.pause_frame_index == 1
 
 
 def test_overlap_pauses_both_real_objects() -> None:
@@ -183,10 +209,13 @@ def test_overlap_pauses_both_real_objects() -> None:
     detector.set_manual_baseline(1, _box(x=100), 0, "sperm1")
     detector.set_manual_baseline(2, _box(x=200), 0, "sperm2")
     detector.initialize_seed(0, {1: _box(x=100), 2: _box(x=200)})
-    report = detector.push(1, {1: _box(x=120), 2: _box(x=121)})
+    reports = [detector.push(index, {1: _box(x=120), 2: _box(x=121)}) for index in (1, 2, 3)]
+    assert [item.should_pause for item in reports] == [False, False, True]
+    report = reports[-1]
     assert report.should_pause is True
     assert report.object_levels[1] == AnomalyLevel.ANOMALY
     assert report.object_levels[2] == AnomalyLevel.ANOMALY
+    assert report.pause_frame_index == 1
 
 
 def test_review_range_uses_configured_lookback() -> None:
@@ -287,7 +316,9 @@ def test_unrelated_invalid_or_once_only_feedback_never_relaxes_motion(sample) ->
 def test_normal_sample_does_not_disable_size_or_missing_checks() -> None:
     detector = _detector()
     detector.prime_normal_feedback([_sample(3)])
-    assert detector.push(1, {1: _box(width=70)}).should_pause
+    reports = [detector.push(index, {1: _box(width=70)}) for index in (1, 2, 3)]
+    assert [item.should_pause for item in reports] == [False, False, True]
+    assert reports[-1].pause_frame_index == 1
     other = _detector()
     other.prime_normal_feedback([_sample(3)])
     assert other.push(1, {}).should_pause
@@ -298,9 +329,12 @@ def test_normal_sample_does_not_disable_identity_overlap_check() -> None:
     detector.set_manual_baseline(2, _box(x=200), 0)
     detector.initialize_seed(0, {1: _box(), 2: _box(x=200)})
     detector.prime_normal_feedback([_sample(3), _sample(3, object_id=2)])
-    report = detector.push(1, {1: _box(x=150), 2: _box(x=151)})
+    reports = [detector.push(index, {1: _box(x=150), 2: _box(x=151)}) for index in (1, 2, 3)]
+    assert [item.should_pause for item in reports] == [False, False, True]
+    report = reports[-1]
     assert report.should_pause
     assert all(level == AnomalyLevel.ANOMALY for level in report.object_levels.values())
+    assert report.pause_frame_index == 1
 
 
 def test_reset_feedback_restores_initial_range_and_ai_history_cannot_expand_it() -> None:
@@ -343,10 +377,13 @@ def test_soft_overlap_cannot_downgrade_independent_hard_size_anomaly() -> None:
     second = _box(width=60, height=16, x=200)
     detector.set_manual_baseline(2, second, 0)
     detector.initialize_seed(0, {1: _box(), 2: second})
-    report = detector.push(1, {1: _box(width=64, height=16), 2: _box(width=60, height=16, x=110)})
+    # Width expands to 2.75x: genuinely extreme geometry stops immediately,
+    # while the other box has only 90% coverage and remains a warning.
+    report = detector.push(1, {1: _box(width=110, height=16), 2: _box(width=60, height=16, x=156)})
     assert report.should_pause
     assert report.object_levels[1] == AnomalyLevel.ANOMALY
     assert detector.states[1].level == AnomalyLevel.ANOMALY
+    assert report.frames[0].details["overlap_pairs"][0]["level"] == "warning"
 
 
 def test_missing_manual_baseline_still_uses_fixed_seed_motion_scale() -> None:
