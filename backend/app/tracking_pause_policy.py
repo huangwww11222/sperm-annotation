@@ -89,14 +89,25 @@ def select_pause_evidence(report: AnomalyReport, rows: list[dict[str, Any]],
                 raise ValueError('First risk frame has no diagnostic evidence')
             details['decision_bbox'] = deepcopy(current.details.get('current_bbox'))
             details['decision_reasons'] = list(current.reasons)
-            for key in ('geometry_observation_count', 'geometry_observation_required', 'overlap_streak', 'overlap_persistence_frames'):
+            for key in ('geometry_observation_count', 'geometry_observation_required', 'overlap_streak', 'overlap_persistence_frames',
+                        'image_observation_count', 'image_observation_required'):
                 if key in current.details:
                     details[key] = current.details[key]
             hard_geometry = set(details.get('geometry_risk_reasons', []))
-            if current.details.get('risk_type') == 'geometry' or hard_geometry:
+            geometry_confirmed_here = (current.details.get('geometry_observation_started_frame') == pause_frame
+                                       and current.details.get('geometry_pending') is False
+                                       and current.details.get('geometry_observation_count', 0)
+                                       >= current.details.get('geometry_observation_required', 1))
+            if hard_geometry and geometry_confirmed_here:
                 reasons = [reason.replace(' SOFT', ' HARD') if reason.replace(' SOFT', ' HARD') in hard_geometry else reason
                            for reason in reasons]
-                details['geometry_pending'] = False
+                details.update(geometry_pending=False, risk_type='geometry')
+            if (current.details.get('image_observation_started_frame') == pause_frame
+                    and current.details.get('image_pending') is False):
+                hard_image = {reason.replace(' SOFT', ' HARD') for reason in details.get('image_risk_reasons', [])}
+                reasons = [reason.replace(' SOFT', ' HARD') if reason.startswith('image_') and (
+                    not hard_image or reason.replace(' SOFT', ' HARD') in hard_image) else reason for reason in reasons]
+                details.update(risk_type='image', image_pending=False, image_risk_reasons=sorted(hard_image))
             current_pairs = {tuple(pair.get('object_ids', [])): pair for pair in current.details.get('overlap_pairs', [])}
             for pair in details.get('overlap_pairs', []):
                 decision = current_pairs.get(tuple(pair.get('object_ids', [])), {})
@@ -136,7 +147,8 @@ def summarize_warnings(rows: list[dict[str, Any]]) -> dict[tuple[int, str], dict
                 continue
             oid = int(obj['object_id'])
             groups = {('motion' if reason.startswith('adjacent_center_shift=') else
-                       'overlap' if reason.startswith('bbox_overlap_with=') else 'size')
+                       'overlap' if reason.startswith('bbox_overlap_with=') else
+                       'image' if reason.startswith('image_') else 'size')
                       for reason in obj.get('anomaly_reasons', [])}
             for reason in groups:
                 item = summary.setdefault((oid, reason), {'objectId': oid, 'name': obj.get('name'), 'reason': reason,

@@ -1896,10 +1896,24 @@ const createWorkspace = () => {
       formatMetric('宽度倍率', item.metrics?.widthRatio ?? details.width_ratio),
       formatMetric('高度倍率', item.metrics?.heightRatio ?? details.height_ratio),
       formatMetric('长宽比倍率', item.metrics?.aspectRatio ?? details.aspect_ratio_ratio),
-      formatMetric('中心偏移(px)', details.center_shift),
+      formatMetric(details.motion_reference_kind === 'head' ? '主体位移(px)' : '中心偏移(px)', details.center_shift),
       formatMetric('重叠覆盖率', item.metrics?.overlapCoverage ?? details.overlap_coverage),
     ].filter(Boolean)
 
+    if (type === 'coverage_loss' || type === 'identity_loss' || reasons.some(reason => reason.startsWith('image_') && reason.endsWith(' HARD'))) {
+      return {
+        objectId: item.object_id,
+        displayName,
+        title: type === 'coverage_loss' ? '目标覆盖可能不完整' : '目标主体或身份存在风险',
+        ...geometryReference,
+        ...evidence,
+        summary: `${displayName} 在原图与模型掩膜的核验中出现持续风险，请检查主体是否跟对、是否漏掉尾部或混入其他对象。`,
+        metrics,
+        baselineFrame: Number.isFinite(baselineFrame) ? baselineFrame : undefined,
+        reviewRange,
+        suggestion: '这些是追踪检查线索；请结合原图核验。全部对象正确可确认无异常，有误先修框，再确认。',
+      }
+    }
     if (type === 'overlap' || reasons.some((reason) => reason.startsWith('bbox_overlap_with=') && reason.endsWith(' HARD'))) {
       const otherId = Number(item.other_object_id ?? details.other_object_id)
       const otherName = Number.isFinite(otherId) ? objectDisplayName(otherId, item.other_display_name) : '另一个对象'

@@ -61,6 +61,8 @@ Tracking JSONL 同样先写临时文件再原子替换，发布失败保留旧�
 
 正常运动样本取自真实追踪行的位移测量，按视频、对象、原因保存。尺寸/形状经正常确认的事件另带可选 `geometryReference`（实际像素框、帧、对象、confirmed-normal 来源）；检测恢复参照时校验帧界限、删除及新人工修正，不改写 manualBaselines。旧事件无该字段时仍按原人工基准判断，不推断用户曾认可未知几何。原有 AI 预测不会自行成为正常样本或尺寸参照。重置清活动运动样本并使旧尺寸参照失效，但保留反馈事件，已修正决定独立记录。旧客户端遗漏新字段时，服务端保留删除规则与反馈，避免旧缓存覆盖新控制状态。
 
+主体运动校准使用可选 `features.referenceKind:"head"`，旧省略字段仍为 bbox；二者不混用。图像风险正常确认也保留实际像素参考。原图光学引用每轮从这些显式人类来源重建，当前 Mask 仅瞬时占用 ROI，不写新长期 Mask 文件。Tracking JSONL 可追加版本化 `anomaly_details.identity_evidence` 与图像观察计数/首次帧，保留有限光学点、度量、来源与状态，未知不得当正常。都是兼容诊断扩展，无 DB 迁移、模型更新或离线存储契约变更。
+
 旧媒体没有工作区文件时，只从 seed 的 `source=manual` 恢复人工记录/基准；AI、warning、anomaly 不当人工基准。首次编辑/追踪可写回恢复状态。文件原子替换与 SQLite 事务不是同一跨资源事务；不要假设一个能回滚另一个。
 
 整帧人工检查点保存在同一 `workspace_state.json` 的服务端 `trackingFeedbackEvents`，每对象一条 `scope:frame` normal 事件，共用 checkpointId 和检查时间/操作者，geometryReference 标记 checkpoint:true。它是独立人工确认来源，不伪造 manualAnnotations/manualBaselines，不重复写 seed 或 AI 文件。一个工作区原子替换同时发布全部框和暂停解除及幂等回执；重试不重复生成事件。续追/重启按原始帧号恢复不晚于起点的最近检查点，取代旧尺寸基准；同帧或更新人工修框、删除与 reset 仍优先。属于现有反馈事件的兼容字段扩展，无新增 DB 表，存储契约仍为 1。

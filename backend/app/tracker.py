@@ -640,188 +640,236 @@ def track_video(
     last_processed_frame = seed_source_idx
     analyzed_through_frame = seed_source_idx
     end_frame_exclusive = seed_frame + requested
+    # Only the actual engine exposes native mask ROIs. Legacy/test engines
+    # retain the existing BBox fallback without claiming image verification.
+    decode_regions = getattr(engine, 'decode_tracker_output_regions', None)
+    from contextlib import nullcontext
+    evidence_context = nullcontext(None)
+    if callable(decode_regions):
+        from .services.tracking_image_evidence import NativeImageEvidence
+        image_baselines = dict(manual_baselines)
+        for oid, refs in detector.geometry_references.items():
+            for ref in refs:
+                prior = image_baselines.get(oid)
+                if ref.frame_index <= seed_source_idx and (prior is None or ref.frame_index > prior.frame_index):
+                    image_baselines[oid] = ManualBaseline(ref.bbox, ref.frame_index, source='confirmed-normal')
+        evidence_context = NativeImageEvidence(video_file, fps=source_fps, width=width, height=height,
+                                              manual_baselines=image_baselines, seed_frame=seed_source_idx)
     if progress: progress(stage='tracking', message='正在追踪', processedFrames=1, lastProcessedFrame=seed_source_idx)
-    for output in engine.propagate_manual(
+    outputs = engine.propagate_manual(
         session,
         max_frames=requested,
         start_frame_idx=seed_frame,
-    ):
-        frame_idx = int(output.frame_idx)
-        if frame_idx >= end_frame_exclusive:
-            break
-        if frame_idx <= seed_frame or frame_idx >= len(source_indices):
-            continue
+    )
+    with evidence_context as image_evidence:
+        try:
+            for output in outputs:
+                frame_idx = int(output.frame_idx)
+                if frame_idx >= end_frame_exclusive:
+                    break
+                if frame_idx < seed_frame or frame_idx >= len(source_indices):
+                    continue
+                source_idx = source_indices[frame_idx]
+                identity_evidence = None
+                if image_evidence is not None:
+                    detections, mask_regions = decode_regions(session, output)
+                    visible_boxes = {int(d.object_id): _json_bbox(d.bbox) for d in detections
+                                     if int(d.object_id) in active_object_ids
+                                     and not is_deleted(workspace, source_idx, int(d.object_id))}
+                    identity_evidence = image_evidence.observe(source_idx, visible_boxes, mask_regions)
+                    detection_areas = {int(d.object_id): d.mask_area for d in detections}
+                    for oid, item in identity_evidence.items():
+                        if item.get('status') == 'unknown' and item.get('maskArea') is None:
+                            # The real detector still has an area when a Mask
+                            # ROI is deliberately omitted by the evidence
+                            # memory budget. This binds provenance only; it
+                            # grants no support or geometry exemption.
+                            item['maskArea'] = detection_areas.get(oid)
+                    counts = {status: sum(item.get('status') == status for item in identity_evidence.values())
+                              for status in ('supported', 'risk', 'unknown')}
+                    logging.getLogger('review.tracking').info(
+                        'tracking.image_evidence media=%s frame=%s counts=%s risks=%s', video_file.parent.name, source_idx,
+                        counts, {oid: item.get('reasons') for oid, item in identity_evidence.items() if item.get('status') == 'risk'})
+                elif frame_idx > seed_frame:
+                    detections, _ = engine.decode_tracker_output(session, output)
+                if frame_idx <= seed_frame:
+                    continue
 
-        detections, _ = engine.decode_tracker_output(session, output)
-        source_idx = source_indices[frame_idx]
+                object_rows: list[dict[str, Any]] = []
+                for detection in detections:
+                    bbox = _json_bbox(detection.bbox)
+                    oid = int(detection.object_id)
+                    if oid not in active_object_ids:
+                        continue
+                    obj_row = {
+                        "object_id": oid,
+                        "name": object_names.get(oid, f"object-{oid}"),
+                        "bbox": bbox,
+                        "score": round(float(detection.score), 15)
+                        if detection.score is not None
+                        else None,
+                        "source": "manual_sam3_tracker",
+                        "mask_area": int(detection.mask_area)
+                        if detection.mask_area is not None
+                        else None,
+                        "sam3_object_id": int(detection.sam3_object_id)
+                        if detection.sam3_object_id is not None
+                        else oid,
+                    }
+                    object_rows.append(obj_row)
 
-        object_rows: list[dict[str, Any]] = []
-        for detection in detections:
-            bbox = _json_bbox(detection.bbox)
-            oid = int(detection.object_id)
-            if oid not in active_object_ids:
-                continue
-            obj_row = {
-                "object_id": oid,
-                "name": object_names.get(oid, f"object-{oid}"),
-                "bbox": bbox,
-                "score": round(float(detection.score), 15)
-                if detection.score is not None
-                else None,
-                "source": "manual_sam3_tracker",
-                "mask_area": int(detection.mask_area)
-                if detection.mask_area is not None
-                else None,
-                "sam3_object_id": int(detection.sam3_object_id)
-                if detection.sam3_object_id is not None
-                else oid,
-            }
-            object_rows.append(obj_row)
+                # ── 异常检测 ──
+                frame_objs_for_detector: dict[int, list[float]] = {}
+                for obj_row in object_rows:
+                    oid = int(obj_row["object_id"])
+                    frame_objs_for_detector[oid] = list(obj_row["bbox"])
+                hidden_ids = {oid for oid in active_object_ids if is_deleted(workspace, source_idx, oid)}
+                anomaly_report = detector.push(source_idx, frame_objs_for_detector, ignored_object_ids=hidden_ids,
+                                               mask_areas={int(obj["object_id"]): obj["mask_area"] for obj in object_rows if obj.get("mask_area") is not None},
+                                               identity_evidence=identity_evidence)
 
-        # ── 异常检测 ──
-        frame_objs_for_detector: dict[int, list[float]] = {}
-        for obj_row in object_rows:
-            oid = int(obj_row["object_id"])
-            frame_objs_for_detector[oid] = list(obj_row["bbox"])
-        hidden_ids = {oid for oid in active_object_ids if is_deleted(workspace, source_idx, oid)}
-        anomaly_report = detector.push(source_idx, frame_objs_for_detector, ignored_object_ids=hidden_ids,
-                                       mask_areas={int(obj["object_id"]): obj["mask_area"] for obj in object_rows if obj.get("mask_area") is not None})
+                # A single-frame omission must not end this object's model history.
+                # Retain raw predictions for deletion undo. API/workflow readers apply
+                # the durable tombstones; only decisions are omitted here. Subsequent
+                # frames retain the model identity and independent anomaly checks.
+                visible_anomalies = [af for af in anomaly_report.frames if af.object_id not in hidden_ids]
+                should_pause = anomaly_report.should_pause and any(af.level in (AnomalyLevel.ANOMALY, AnomalyLevel.DISAPPEARED) for af in visible_anomalies)
+                for af in visible_anomalies:
+                    if af.level != AnomalyLevel.WARNING:
+                        continue
+                    groups = set()
+                    for reason in af.reasons:
+                        groups.add("motion" if reason.startswith("adjacent_center_shift=") else "overlap" if reason.startswith("bbox_overlap_with=") else "image" if reason.startswith("image_") else "size")
+                    for reason in groups:
+                        key = (af.object_id, reason)
+                        summary = warning_summary.setdefault(key, {"objectId": af.object_id, "name": object_names.get(af.object_id), "reason": reason, "count": 0, "firstFrame": source_idx, "lastFrame": source_idx, "calibrated": False})
+                        summary["count"] += 1
+                        summary["lastFrame"] = source_idx
+                        summary["calibrated"] = summary["calibrated"] or (reason == "motion" and bool(af.details.get("normal_sample_matched")))
 
-        # A single-frame omission must not end this object's model history.
-        # Retain raw predictions for deletion undo. API/workflow readers apply
-        # the durable tombstones; only decisions are omitted here. Subsequent
-        # frames retain the model identity and independent anomaly checks.
-        visible_anomalies = [af for af in anomaly_report.frames if af.object_id not in hidden_ids]
-        should_pause = anomaly_report.should_pause and any(af.level in (AnomalyLevel.ANOMALY, AnomalyLevel.DISAPPEARED) for af in visible_anomalies)
-        for af in visible_anomalies:
-            if af.level != AnomalyLevel.WARNING:
-                continue
-            groups = set()
-            for reason in af.reasons:
-                groups.add("motion" if reason.startswith("adjacent_center_shift=") else "overlap" if reason.startswith("bbox_overlap_with=") else "size")
-            for reason in groups:
-                key = (af.object_id, reason)
-                summary = warning_summary.setdefault(key, {"objectId": af.object_id, "name": object_names.get(af.object_id), "reason": reason, "count": 0, "firstFrame": source_idx, "lastFrame": source_idx, "calibrated": False})
-                summary["count"] += 1
-                summary["lastFrame"] = source_idx
-                summary["calibrated"] = summary["calibrated"] or (reason == "motion" and bool(af.details.get("normal_sample_matched")))
+                # ── 把 anomaly level + reasons 写入每个 object row ──
+                for af in anomaly_report.frames:
+                    for obj_row in object_rows:
+                        if int(obj_row["object_id"]) == af.object_id:
+                            obj_row["anomaly_level"] = af.level.value
+                            obj_row["anomaly_reasons"] = af.reasons
+                            obj_row["anomaly_details"] = af.details
+                            break
 
-        # ── 把 anomaly level + reasons 写入每个 object row ──
-        for af in anomaly_report.frames:
-            for obj_row in object_rows:
-                if int(obj_row["object_id"]) == af.object_id:
-                    obj_row["anomaly_level"] = af.level.value
-                    obj_row["anomaly_reasons"] = af.reasons
-                    obj_row["anomaly_details"] = af.details
+                row = {
+                    "frame_index": source_idx,
+                    "source_frame_index": source_idx,
+                    "objects": object_rows,
+                    "anomalies": [
+                        {
+                            "object_id": int(af.object_id),
+                            "level": af.level.value,
+                            "reasons": af.reasons,
+                            "details": af.details,
+                        }
+                        for af in visible_anomalies
+                        if af.level in (AnomalyLevel.ANOMALY, AnomalyLevel.DISAPPEARED)
+                    ],
+                }
+                new_rows.append(row)
+                last_processed_frame = source_idx
+                analyzed_through_frame = source_idx
+                if progress: progress(stage='tracking', message='正在追踪', processedFrames=len(new_rows), lastProcessedFrame=source_idx)
+                print(
+                    f"[sam3] frame={frame_idx} source={source_idx} "
+                    f"tracked_objects={len(object_rows)}"
+                )
+
+                # HARD 异常 → 在当前异常帧保存结果后立即暂停。
+                if should_pause:
+                    from .tracking_pause_policy import select_pause_evidence, summarize_warnings
+                    earlier = [row for row in history_rows if int(row.get("source_frame_index", row.get("frame_index", -1))) <= seed_source_idx]
+                    source_idx, visible_anomalies, retained_rows = select_pause_evidence(anomaly_report, earlier + new_rows, source_idx)
+                    # Own the first risk and all later rows, even when observation
+                    # began in the preceding chunk. Existing human data is separate.
+                    publication_start = min(seed_source_idx, source_idx)
+                    new_rows = [row for row in retained_rows if int(row["source_frame_index"]) >= publication_start]
+                    last_processed_frame = source_idx
+                    warning_summary = summarize_warnings(new_rows)
+                    logging.getLogger("review.tracking").info(
+                        "tracking.pause_window media=%s first=%s decision=%s published_through=%s objects=%s",
+                        video_file.parent.name, source_idx, analyzed_through_frame, last_processed_frame,
+                        [{"objectId": af.object_id, "reasons": af.reasons, "referenceFrame": af.details.get("geometry_reference_frame"),
+                          "referenceBox": af.details.get("geometry_reference_bbox"), "currentBox": af.details.get("current_bbox")} for af in visible_anomalies],
+                    )
+                    pause_objects = []
+                    for af in visible_anomalies:
+                        if af.level in (AnomalyLevel.ANOMALY, AnomalyLevel.DISAPPEARED):
+                            details = af.details or {}
+                            area_ratio = details.get("area_ratio")
+                            width_ratio = details.get("width_ratio")
+                            height_ratio = details.get("height_ratio")
+                            size_hard = any(r.startswith(("manual_area_ratio=", "manual_width_ratio=", "manual_height_ratio=", "confirmed_mask_area_ratio=")) and r.endswith(" HARD") for r in af.reasons)
+                            is_shrink = size_hard and ((
+                                isinstance(area_ratio, (int, float)) and area_ratio < detector.config.MANUAL_AREA_RATIO_MIN_HARD
+                            ) or (
+                                isinstance(width_ratio, (int, float)) and width_ratio < detector.config.MANUAL_WIDTH_RATIO_MIN_HARD
+                            ) or (
+                                isinstance(height_ratio, (int, float)) and height_ratio < detector.config.MANUAL_HEIGHT_RATIO_MIN_HARD
+                            )) or any(r.startswith("confirmed_mask_area_ratio=") and float(details.get("mask_area_ratio", 1)) < 1 for r in af.reasons)
+                            pause_type = (
+                                "disappearance" if af.level == AnomalyLevel.DISAPPEARED
+                                else "coverage_loss" if any(r.startswith("image_tail") and r.endswith(" HARD") for r in af.reasons)
+                                else "identity_loss" if any(r.startswith("image_") and r.endswith(" HARD") for r in af.reasons)
+                                else "overlap" if any(r.startswith("bbox_overlap_with=") and r.endswith(" HARD") for r in af.reasons)
+                                else "size_shrink" if is_shrink
+                                else "size_growth" if size_hard
+                                else "shape_change" if any(r.startswith("manual_aspect_change=") and r.endswith(" HARD") for r in af.reasons)
+                                else "tracking_motion"
+                            )
+                            other_id = details.get("other_object_id")
+                            display_name = object_names.get(int(af.object_id), f"object-{af.object_id}")
+                            pause_objects.append({
+                                "object_id": int(af.object_id),
+                                "name": display_name,
+                                "display_name": display_name,
+                                "type": pause_type,
+                                "reasons": list(af.reasons),
+                                "details": details,
+                                "currentBox": details.get("current_bbox"),
+                                "manualBaselineBox": details.get("manual_baseline_bbox"),
+                                "manualBaselineFrame": details.get("manual_baseline_frame"),
+                                "geometryReferenceBox": details.get("geometry_reference_bbox"),
+                                "geometryReferenceFrame": details.get("geometry_reference_frame"),
+                                "geometryReferenceSource": details.get("geometry_reference_source"),
+                                "metrics": {
+                                    "areaRatio": area_ratio,
+                                    "widthRatio": width_ratio,
+                                    "heightRatio": height_ratio,
+                                    "aspectRatio": details.get("aspect_ratio_ratio"),
+                                    "overlapCoverage": details.get("overlap_coverage"),
+                                    "centerShift": details.get("center_shift"),
+                                    "motionNormalized": details.get("motion_normalized"),
+                                    "motionPauseThreshold": details.get("motion_pause_threshold"),
+                                    "motionStreak": details.get("motion_streak"),
+                                    "feedbackSampleCount": details.get("feedback_sample_count", 0),
+                                },
+                                "reviewStartFrame": details.get("review_start_frame"),
+                                "reviewEndFrame": details.get("review_end_frame"),
+                                "reviewLookbackFrames": details.get("review_lookback_frames"),
+                                "other_object_id": other_id,
+                                "other_display_name": object_names.get(int(other_id), f"object-{other_id}") if other_id is not None else None,
+                                "ratio": area_ratio,
+                                "prevArea": details.get("baseline_area"),
+                                "currArea": details.get("current_area"),
+                            })
+                    print(f"[anomaly] HARD detected → pause source_frame={source_idx}: {pause_objects}")
+                    result_anomaly_paused = {
+                        "frame_index": source_idx,
+                        "reasons": pause_objects,
+                        "levels": {str(af.object_id): af.level.value for af in visible_anomalies},
+                    }
                     break
 
-        row = {
-            "frame_index": source_idx,
-            "source_frame_index": source_idx,
-            "objects": object_rows,
-            "anomalies": [
-                {
-                    "object_id": int(af.object_id),
-                    "level": af.level.value,
-                    "reasons": af.reasons,
-                    "details": af.details,
-                }
-                for af in visible_anomalies
-                if af.level in (AnomalyLevel.ANOMALY, AnomalyLevel.DISAPPEARED)
-            ],
-        }
-        new_rows.append(row)
-        last_processed_frame = source_idx
-        analyzed_through_frame = source_idx
-        if progress: progress(stage='tracking', message='正在追踪', processedFrames=len(new_rows), lastProcessedFrame=source_idx)
-        print(
-            f"[sam3] frame={frame_idx} source={source_idx} "
-            f"tracked_objects={len(object_rows)}"
-        )
-
-        # HARD 异常 → 在当前异常帧保存结果后立即暂停。
-        if should_pause:
-            from .tracking_pause_policy import select_pause_evidence, summarize_warnings
-            earlier = [row for row in history_rows if int(row.get("source_frame_index", row.get("frame_index", -1))) <= seed_source_idx]
-            source_idx, visible_anomalies, retained_rows = select_pause_evidence(anomaly_report, earlier + new_rows, source_idx)
-            # Own the first risk and all later rows, even when observation
-            # began in the preceding chunk. Existing human data is separate.
-            publication_start = min(seed_source_idx, source_idx)
-            new_rows = [row for row in retained_rows if int(row["source_frame_index"]) >= publication_start]
-            last_processed_frame = source_idx
-            warning_summary = summarize_warnings(new_rows)
-            logging.getLogger("review.tracking").info(
-                "tracking.pause_window media=%s first=%s decision=%s published_through=%s objects=%s",
-                video_file.parent.name, source_idx, analyzed_through_frame, last_processed_frame,
-                [{"objectId": af.object_id, "reasons": af.reasons, "referenceFrame": af.details.get("geometry_reference_frame"),
-                  "referenceBox": af.details.get("geometry_reference_bbox"), "currentBox": af.details.get("current_bbox")} for af in visible_anomalies],
-            )
-            pause_objects = []
-            for af in visible_anomalies:
-                if af.level in (AnomalyLevel.ANOMALY, AnomalyLevel.DISAPPEARED):
-                    details = af.details or {}
-                    area_ratio = details.get("area_ratio")
-                    width_ratio = details.get("width_ratio")
-                    height_ratio = details.get("height_ratio")
-                    size_hard = any(r.startswith(("manual_area_ratio=", "manual_width_ratio=", "manual_height_ratio=", "confirmed_mask_area_ratio=")) and r.endswith(" HARD") for r in af.reasons)
-                    is_shrink = size_hard and ((
-                        isinstance(area_ratio, (int, float)) and area_ratio < detector.config.MANUAL_AREA_RATIO_MIN_HARD
-                    ) or (
-                        isinstance(width_ratio, (int, float)) and width_ratio < detector.config.MANUAL_WIDTH_RATIO_MIN_HARD
-                    ) or (
-                        isinstance(height_ratio, (int, float)) and height_ratio < detector.config.MANUAL_HEIGHT_RATIO_MIN_HARD
-                    )) or any(r.startswith("confirmed_mask_area_ratio=") and float(details.get("mask_area_ratio", 1)) < 1 for r in af.reasons)
-                    pause_type = (
-                        "disappearance" if af.level == AnomalyLevel.DISAPPEARED
-                        else "overlap" if any(r.startswith("bbox_overlap_with=") and r.endswith(" HARD") for r in af.reasons)
-                        else "size_shrink" if is_shrink
-                        else "size_growth" if size_hard
-                        else "shape_change" if any(r.startswith("manual_aspect_change=") and r.endswith(" HARD") for r in af.reasons)
-                        else "tracking_motion"
-                    )
-                    other_id = details.get("other_object_id")
-                    display_name = object_names.get(int(af.object_id), f"object-{af.object_id}")
-                    pause_objects.append({
-                        "object_id": int(af.object_id),
-                        "name": display_name,
-                        "display_name": display_name,
-                        "type": pause_type,
-                        "reasons": list(af.reasons),
-                        "details": details,
-                        "currentBox": details.get("current_bbox"),
-                        "manualBaselineBox": details.get("manual_baseline_bbox"),
-                        "manualBaselineFrame": details.get("manual_baseline_frame"),
-                        "geometryReferenceBox": details.get("geometry_reference_bbox"),
-                        "geometryReferenceFrame": details.get("geometry_reference_frame"),
-                        "geometryReferenceSource": details.get("geometry_reference_source"),
-                        "metrics": {
-                            "areaRatio": area_ratio,
-                            "widthRatio": width_ratio,
-                            "heightRatio": height_ratio,
-                            "aspectRatio": details.get("aspect_ratio_ratio"),
-                            "overlapCoverage": details.get("overlap_coverage"),
-                            "centerShift": details.get("center_shift"),
-                            "motionNormalized": details.get("motion_normalized"),
-                            "motionPauseThreshold": details.get("motion_pause_threshold"),
-                            "motionStreak": details.get("motion_streak"),
-                            "feedbackSampleCount": details.get("feedback_sample_count", 0),
-                        },
-                        "reviewStartFrame": details.get("review_start_frame"),
-                        "reviewEndFrame": details.get("review_end_frame"),
-                        "reviewLookbackFrames": details.get("review_lookback_frames"),
-                        "other_object_id": other_id,
-                        "other_display_name": object_names.get(int(other_id), f"object-{other_id}") if other_id is not None else None,
-                        "ratio": area_ratio,
-                        "prevArea": details.get("baseline_area"),
-                        "currArea": details.get("current_area"),
-                    })
-            print(f"[anomaly] HARD detected → pause source_frame={source_idx}: {pause_objects}")
-            result_anomaly_paused = {
-                "frame_index": source_idx,
-                "reasons": pause_objects,
-                "levels": {str(af.object_id): af.level.value for af in visible_anomalies},
-            }
-            break
+        finally:
+            close_outputs = getattr(outputs, "close", None)
+            if callable(close_outputs):
+                close_outputs()
 
     if progress: progress(stage='saving_results', message='正在保存追踪结果')
     merged_rows = _merge_rows(Path(output_json), new_rows, keep_before_source_frame=min(seed_source_idx, last_processed_frame), pause=result_anomaly_paused)

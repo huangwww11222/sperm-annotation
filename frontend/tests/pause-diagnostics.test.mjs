@@ -42,3 +42,13 @@ test('confirmed mask collapse explains its scalar evidence without inventing a m
     assert(!value.triggerSummary.includes('下限') && !value.triggerSummary.includes('上限'))
   }
 })
+test('independent image risk explains its cause without promoting advisory shape changes',()=>{
+  const value=describe(['image_foreign_core observations=1/3 HARD','manual_height_ratio=0.521 SOFT'],{
+    height_ratio:.521,geometry_thresholds:{manual_height_ratio:{min:.65}},
+    image_observation_count:3,image_observation_required:3,pause_started_frame:15,decision_frame_index:17,
+  })
+  assert.match(value.triggerSummary,/疑似混入了另一个光学主体/)
+  assert.match(value.triggerSummary,/同一对象图像风险持续 3 帧/)
+  assert(!value.triggerSummary.includes('高度'))
+  assert.equal(value.pauseStartFrame,15);assert.equal(value.decisionFrame,17)
+})

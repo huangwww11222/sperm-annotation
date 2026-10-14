@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { trackingPolicyChecks } from './tracking-policy-checks.mjs'
+import { trackingFocusChecks } from './tracking-focus-checks.mjs'
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright')
 const root = path.resolve(process.env.INDEPENDENT_AUDIT_ROOT || '')
 assert(root.startsWith(path.resolve('work') + path.sep) && /e2e-confirm-ux-(independent|regression)-/.test(path.basename(root)))
@@ -235,6 +236,10 @@ try {
 
   await caseRun('tracking-pause-policy',async()=>{
     observations=await trackingPolicyChecks(page,{root,origin,api,poll,ready,out})
+  })
+
+  await caseRun('tracking-focus-selection',async()=>{
+    observations=await trackingFocusChecks(page,{root,origin,api,poll,ready,out})
   })
 
   await caseRun('4k-50000-objects',async()=>{

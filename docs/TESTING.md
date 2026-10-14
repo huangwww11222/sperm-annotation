@@ -75,6 +75,10 @@ npm run build --prefix frontend
 
 整帧人工检查点专项：`test_tracking_frame_checkpoint.py` 验证一次确认含未报异常对象、已保存人工修框/新框优先、删除排除、固定基准替换与恢复、缺失/坏框/错误帧/版本冲突不部分提交、原子发布失败及原键恢复。固定 `independent-integrity` 的 tracking-policy 场景验证真实页面一次确认全部对象、刷新及续追；只有模型预测模拟。Windows 可使用 `backend/.venv/Scripts/python.exe scripts/run_browser_regression.py --python backend/.venv/Scripts/python.exe --channel chrome`，建议设置 `PYTHONUTF8=1`；运行器使用本机解释器、Vite 和自己启动的进程树，不终止已有开发服务。
 
+原图/Mask 辅助政策专项：`test_tracking_evidence.py` 以独立合成图验证旋转与裁尾、背景厚块/多核、未知证据及对象共用主体；`test_tracking_identity_evidence_policy.py` 验证 25/30 对象轮流变形、真实主体跳跃与高 FPS 下稳定主体/变化框中心、独立图像风险、严重面积/Mask 损失、错误证据绑定与旧 BBox 回退；`test_tracking_image_evidence.py` 验证原始帧身份、显式引用、失败/恢复与读取释放；`test_tracking_native_evidence_integration.py` 验证真实编排/结果发表使用首次图像风险且释放 reader，模型/图像结果模拟；`test_tracking_evidence_feedback.py` 验证人工确认参考及主体/bbox 运动样本分离与准确重放；`test_tracking_image_pause_causes.py` 成对验证持续图像/几何风险不错误提升已恢复或未持续的另一原因。`test_video_frames.py` 比较标准全尺寸 Mask 与 ROI 框/面积/逐像素完全一致，并确认 ROI 不保留整帧 backing array；25 个整幅 4K 异常 Mask 保留几何但不分配不可用的大 ROI。真实视频须单列同 prompt 原图与真实 SAM3 结果重放；不能将合成支持证据当识别准确率。
+
+固定 `independent-integrity` 还调用 `tracking-focus-checks.mjs`：真实上传/画框/追踪进入暂停，验证初始单项、两项处理到最后一项、选择与选择工具联动、移动/缩放保存、主动检查其他框不抢选择、读帧失败/原位恢复、成功响应丢失的原键恢复、消失对象不能确认正常及同 ID 补框续追。两窗口浅深主题、专注/返回帧均验证。模拟只在专用 `audit-disappear` 模型输出中移除对象；不从测试 UI 导入 store，不绕过反馈/版本保护。旧源码编译成独立内存实例可作修复前失败证据，不覆写正在测试的当前文件。
+
 | 修改面 | 后端/单元 | 浏览器 |
 | --- | --- | --- |
 | 标注手势、性能、续标、快捷键 | `test:annotation`；必要时 `test_frontend_tracking_contract.py`、`test_manual_baseline_restore.py` | `annotation-ux-browser.mjs`（48）；`annotation-ui-consistency.mjs`（14） |

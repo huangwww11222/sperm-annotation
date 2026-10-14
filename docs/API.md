@@ -58,6 +58,8 @@
 
 反馈请求为 `{expectedRevision,objectId,frameIndex,decision:'normal'|'corrected'|'reset',calibrate:boolean}`，使用 `Idempotency-Key`，与工作区共享版本。`reset` 不要求帧号，清该对象活动运动样本并使已确认尺寸参照失效，保留审计。`normal` 只在明确勾选校准且持久化追踪结果包含位移依据时生成 `normalMotionSamples`；每条为 `{objectId,frameIndex,reason:'motion',decision:'normal',calibrate:true,features:{motionNormalized}}`。数值取自服务端追踪数据，不接受客户提供阈值。`corrected` 要求当前帧已保存的人工框实际不同于异常原框，且不生成正常样本。 对尺寸/形状原因的 `normal`，服务端从实际追踪行取有效像素框，在该条 `trackingFeedbackEvents` 中保存 `geometryReference:{objectId,frameIndex,bbox,source:"confirmed-normal"}`；无须重画，且不依赖运动校准勾选。不接受客户端提供参照，不能将该框改写为人工标注。该字段为兼容旧事件的可选扩展。
 
+图像风险的逐对象 normal 同样保存上述实际参考；它可用于后续原图光学建档，不能把正常确认改成在线模型训练。主体位移样本在 features 追加 `referenceKind:"head"`，旧样本省略即 bbox；两类独立使用，避免旧框中心阈值放宽主体跳跃。
+
 反馈响应包含 `{ok,mediaId,revision,normalMotionSamples,trackingFeedbackEvents,pausedAnomalies,lastPausedContext}`。正常/已修正请求必须匹配当前持久化暂停帧及未解决对象，并核验真实追踪行；新键不能再次确认已解决的历史异常。每次只移除选定对象及已被删除的暂停项；仍有待处理对象时保留暂停上下文。运动样本按媒体、对象和位移原因隔离；尺寸参照单独按确认事件恢复，不豁免重叠或丢失检测。普通工作区 PUT 不能注入校准样本。Tracking 状态另返回 `warningSummary`，用于合并轻提示，不把每次轻微抖动升级为阻塞弹窗。
 
 ### 正常参照与短时风险观察
@@ -71,6 +73,8 @@
 对重叠原因的 `normal`，事件可追加 `overlapReferences:[{objectIds:[a,b],frameIndex,bboxes:[boxA,boxB],source:"confirmed-normal"}]`，仅从同帧实际对象及全部明确的重叠组合生成；不接受客户端提供组合或坐标。认可只限于这对对象的相近状态，不豁免新的伙伴、明显恶化、分离后的新风险或独立异常。成功反馈可返回兼容扩展 `confirmedReference:{eventId,geometryReference|null,overlapReferences:[]}`，原键重放保留原摘要。
 
 普通尺寸越界与新增疑似合并按原始帧观察连续 3 帧，同对象/对象对独立计数；严重几何突变、极端跳跃与异常消失仍及时暂停。初始稳定重叠及低 IoU 的大小框包含仅提示。JSONL 的 `anomaly_details` 提供 `geometry_thresholds`、`geometry_observation_count/required`、`overlap_pairs`（全部组合）、`pause_started_frame` 和 `decision_frame_index`。持续异常暂停定位首次风险帧，观察窗口中的后续帧不发布为正常结果；`lastProcessedFrame`/`processedFrames` 对应实际发布结果，不能用模型分析到的第三帧冒充已保存进度。短时观察跨追踪轮次恢复，确认或新的人工工作结束对应旧观察。
+
+真实原图/Mask 辅助核验的兼容诊断为 `identity_evidence:{version:1,source:"native-frame-mask-v1",objectId,frameIndex,bbox,maskArea,status,head,coverage,reasons,thresholds}`，绑定当前对象/源帧/框/Mask 面积。status 为 supported/risk/unknown，head 包含光学匹配点、参考/前帧、半径与度量；coverage 包含细线遗漏、光核/合并线索与实际 Mask overlap。它不是精子分类概率，也不证明完整尾部。缺字段、坏绑定或弱证据回退旧保护。可靠原图主体+无明确遗漏才将普通 BBox 几何降提示，并用独立主体运动历史；面积/已确认 Mask 灾难性变化仍保护。独立图像持续风险提供 `image_observation_count/required`、`image_pending` 与首次风险帧；pausedObjects.type 兼容新增 `coverage_loss` / `identity_loss`。前端只解释实际证据，不推断或决定风险。Mask ROI 和原图不进入该 JSON，仍按真实原始像素坐标保存。
 
 暂停工作区可带服务端 `diagnostic` 以刷新恢复完整解释。客户端展示字段不参与后端判定；原始帧号、稳定对象 ID、幂等/版本、删除及送审边界保持原协议。
 

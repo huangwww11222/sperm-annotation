@@ -131,6 +131,16 @@ def test_per_object_mask_geometry_matches_full_batch_without_retaining_masks():
         assert detection.mask_area==int(reference[index].sum())
     _,retained=engine.decode_tracker_output(session,output,keep_masks=True)
     assert all(np.array_equal(retained[oid],reference[i,0]) for oid,i in [(7,0),(50,2)])
+    region_detections, regions = engine.decode_tracker_output_regions(session, output)
+    assert region_detections == detections
+    for detection, index in zip(region_detections, [0, 2]):
+        region = regions[detection.object_id]
+        x1, y1, x2, y2 = map(int, detection.bbox)
+        assert region.offset == (x1, y1)
+        assert region.data.shape == (y2-y1, x2-x1)
+        assert region.data.base is None  # no full-frame backing allocation
+        assert np.array_equal(region.data, reference[index, 0, y1:y2, x1:x2] > .5)
+        assert int(region.data.sum()) == detection.mask_area
 
 
 def test_model_load_uses_inference_dtype_from_start_and_is_cached(monkeypatch):
@@ -148,3 +158,21 @@ def test_model_load_uses_inference_dtype_from_start_and_is_cached(monkeypatch):
     monkeypatch.setattr(transformers,'Sam3TrackerVideoProcessor',SimpleNamespace(from_pretrained=lambda *a,**kw:object()))
     engine=Sam3Engine('fake','cpu','bfloat16');engine.load_tracker();engine.load_tracker()
     assert calls==[('load',torch.bfloat16),('to',torch.bfloat16)]
+
+
+def test_large_failed_masks_keep_geometry_without_retaining_unusable_native_rois():
+    from types import SimpleNamespace
+    from app.services.sam3_engine import Sam3Engine
+    import torch
+    # A deterministic processor represents 25 failed full-image segmentations.
+    # The API must keep their native geometry while retaining zero ROI arrays.
+    class Processor:
+        def post_process_masks(self, masks, original_sizes, binarize):
+            return [np.ones((1, 1, *original_sizes[0]), dtype=bool)]
+    engine = Sam3Engine('fake', 'cpu', 'float32')
+    engine.tracker_processor, engine.tracker_model = Processor(), object()
+    session = SimpleNamespace(video_height=2160, video_width=3840, obj_ids=list(range(1, 26)))
+    output = SimpleNamespace(pred_masks=torch.ones((25, 1, 16, 16)))
+    detections, regions = engine.decode_tracker_output_regions(session, output)
+    assert len(detections) == 25 and regions == {}
+    assert all(d.bbox == [0., 0., 3840., 2160.] and d.mask_area == 3840*2160 for d in detections)

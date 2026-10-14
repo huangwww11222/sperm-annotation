@@ -121,7 +121,7 @@ export interface NormalMotionSample {
   reason: 'motion'
   decision: 'normal'
   calibrate: boolean
-  features: { motionNormalized: number }
+  features: { motionNormalized: number; referenceKind?: 'head' | 'bbox' }
 }
 
 export interface ObjectDeletionSummary {

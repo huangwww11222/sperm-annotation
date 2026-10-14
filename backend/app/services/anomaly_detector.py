@@ -9,6 +9,7 @@ teach itself.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import copy
 from enum import Enum
 import logging
 import math
@@ -51,6 +52,8 @@ class AnomalyConfig:
     GEOMETRY_EXTREME_DIMENSION_MAX: float = 2.50
     GEOMETRY_EXTREME_ASPECT_CHANGE: float = 4.00
     GEOMETRY_EXTREME_MASK_LOSS: float = 0.25
+    IMAGE_PERSISTENCE_FRAMES: int = 3
+    INDEPENDENT_MASK_IOU_MAX: float = 0.20
 
     # Motion is expressed in manual-box diagonals per 1/30 second. These are
     # initial decision thresholds, not pixel limits. Only explicit human
@@ -168,6 +171,13 @@ class _ObjectState:
     geometry_started_frame: int | None = None
     geometry_last_frame: int | None = None
     geometry_category: str | None = None
+    image_count: int = 0
+    image_started_frame: int | None = None
+    image_last_frame: int | None = None
+    image_category: str | None = None
+    head_motion_history: list[list[float]] = field(default_factory=list)
+    head_motion_frame_indices: list[int] = field(default_factory=list)
+    motion_reference_kind: str = "bbox"
 
     @property
     def history(self) -> list[list[float]]:
@@ -215,6 +225,7 @@ class AnomalyDetector:
         self.reports: list[AnomalyReport] = []
         self.current_frame_index = -1
         self.normal_motion_samples: dict[int, list[float]] = {}
+        self.normal_head_motion_samples: dict[int, list[float]] = {}
         self.geometry_references = dict(geometry_references or {})
         self.overlap_references = dict(overlap_references or {})
         self._seed_overlap_references: dict[tuple[int, int], OverlapReference] = {}
@@ -237,6 +248,7 @@ class AnomalyDetector:
         Other reason types cannot weaken the motion or independent checks.
         """
         self.normal_motion_samples = {}
+        self.normal_head_motion_samples = {}
         for sample in samples:
             if not isinstance(sample, dict) or sample.get("reason") != "motion":
                 continue
@@ -249,7 +261,11 @@ class AnomalyDetector:
                 continue
             if oid <= 0 or not math.isfinite(normalized) or normalized <= 0:
                 continue
-            self.normal_motion_samples.setdefault(oid, []).append(normalized)
+            kind = sample.get("features", {}).get("referenceKind", "bbox")
+            if kind not in {"bbox", "head"}:
+                continue
+            destination = self.normal_head_motion_samples if kind == "head" else self.normal_motion_samples
+            destination.setdefault(oid, []).append(normalized)
 
     def _remember_motion(self, state: _ObjectState, frame_index: int, bbox: list[float]) -> None:
         if state.motion_frame_indices and state.motion_frame_indices[-1] == frame_index:
@@ -260,6 +276,22 @@ class AnomalyDetector:
         limit = max(3, int(self.config.MOTION_HISTORY_FRAMES))
         del state.motion_history[:-limit]
         del state.motion_frame_indices[:-limit]
+
+    def _remember_head_motion(self, state: _ObjectState, frame_index: int, point: list[float]) -> None:
+        if state.head_motion_frame_indices and state.head_motion_frame_indices[-1] == frame_index:
+            state.head_motion_history[-1] = list(point)
+            return
+        state.head_motion_history.append(list(point))
+        state.head_motion_frame_indices.append(frame_index)
+        limit = max(3, int(self.config.MOTION_HISTORY_FRAMES))
+        del state.head_motion_history[:-limit]
+        del state.head_motion_frame_indices[:-limit]
+
+    @staticmethod
+    def _reset_image_observation(state: _ObjectState) -> None:
+        state.image_count = 0
+        state.image_started_frame = state.image_last_frame = None
+        state.image_category = None
 
     def set_manual_baseline(self, object_id: int, bbox, frame_index: int, name: str | None = None) -> None:
         """Replace the baseline; callers must pass only ``source=manual``."""
@@ -273,6 +305,9 @@ class AnomalyDetector:
         state.geometry_count = 0
         state.geometry_started_frame = state.geometry_last_frame = None
         state.geometry_category = None
+        self._reset_image_observation(state)
+        state.head_motion_history.clear()
+        state.head_motion_frame_indices.clear()
 
     def prime_manual_baselines(self, baselines: dict[int, ManualBaseline | dict[str, Any]]) -> None:
         for raw_oid, value in baselines.items():
@@ -321,6 +356,10 @@ class AnomalyDetector:
             state.geometry_count = 0
             state.geometry_started_frame = state.geometry_last_frame = None
             state.geometry_category = None
+            self._reset_image_observation(state)
+            state.head_motion_history.clear()
+            state.head_motion_frame_indices.clear()
+            state.motion_reference_kind = "bbox"
             levels[oid] = AnomalyLevel.NORMAL
         items = sorted((int(oid), list(bbox)) for oid, bbox in frame_objects.items() if int(oid) in levels)
         for index, (oid_a, bbox_a) in enumerate(items):
@@ -357,15 +396,187 @@ class AnomalyDetector:
             "review_end_frame": max(0, int(frame_index) - 1),
         }
 
-    def _motion_check(self, oid: int, state: _ObjectState, frame_index: int, bbox: list[float]) -> tuple[bool, bool, list[str], dict[str, Any]]:
-        """Use time/size normalization plus short history without auto-training."""
-        if not state.motion_history:
+    def _identity_evidence(self, oid: int, frame_index: int, bbox: list[float], mask_area,
+                           payload) -> tuple[dict[str, Any] | None, str | None]:
+        """Validate current native geometry before using optional image cues.
+
+        A source label is provenance, not authentication. The internal producer
+        must have checked the native image and real mask; this consumer rejects
+        stale, mismatched, nonfinite or inconsistent summaries. Invalid/unknown
+        evidence cannot become a geometry or overlap exemption.
+        """
+        if payload is None:
+            return None, None
+
+        def number(value):
+            return type(value) in (int, float) and math.isfinite(value)
+
+        def finite_json(value, depth=0):
+            if depth > 16:
+                return False
+            if value is None or isinstance(value, (str, bool)):
+                return True
+            if type(value) in (int, float):
+                return math.isfinite(value)
+            if isinstance(value, dict):
+                return all(isinstance(key, str) and finite_json(item, depth + 1) for key, item in value.items())
+            if isinstance(value, (list, tuple)):
+                return all(finite_json(item, depth + 1) for item in value)
+            return False
+
+        def point(value):
+            return (isinstance(value, (list, tuple)) and len(value) == 2
+                    and all(number(v) for v in value)
+                    and 0 <= value[0] < self.frame_width and 0 <= value[1] < self.frame_height)
+
+        if not isinstance(payload, dict) or not finite_json(payload):
+            return None, "invalid_or_nonfinite_summary"
+        if (type(payload.get("version")) is not int or payload.get("version") != 1
+                or payload.get("source") != "native-frame-mask-v1"
+                or type(payload.get("objectId")) is not int or payload.get("objectId") != oid
+                or type(payload.get("frameIndex")) is not int or payload.get("frameIndex") != frame_index):
+            return None, "object_frame_or_version_mismatch"
+        bound_box = payload.get("bbox")
+        if (not isinstance(bound_box, (list, tuple)) or len(bound_box) != 4
+                or not all(number(v) for v in bound_box)
+                or any(abs(float(a) - float(b)) > 1e-6 for a, b in zip(bound_box, bbox))):
+            return None, "bbox_mismatch"
+        bound_area = payload.get("maskArea")
+        if mask_area is None:
+            if bound_area is not None:
+                return None, "mask_area_mismatch"
+        elif (not number(mask_area) or not number(bound_area) or bound_area < 0
+              or abs(float(mask_area) - float(bound_area)) > 1e-6):
+            return None, "mask_area_mismatch"
+        status, head, coverage = payload.get("status"), payload.get("head"), payload.get("coverage")
+        if (status not in {"supported", "risk", "unknown"} or not isinstance(head, dict)
+                or not isinstance(coverage, dict)
+                or head.get("status") not in {"matched", "lost", "ambiguous", "unknown"}
+                or coverage.get("status") not in {"no_clear_loss", "tail_loss", "foreign_core", "merge", "unknown"}
+                or not isinstance(payload.get("reasons"), list)
+                or any(not isinstance(reason, str) for reason in payload["reasons"])):
+            return None, "invalid_evidence_status"
+        for label in ("point", "previousPoint", "referencePoint"):
+            if head.get(label) is not None and not point(head[label]):
+                return None, "invalid_head_point"
+        previous_point, previous_frame = head.get("previousPoint"), head.get("previousFrameIndex")
+        if previous_point is not None or previous_frame is not None:
+            if (not point(previous_point) or type(previous_frame) is not int
+                    or not 0 <= previous_frame < frame_index):
+                return None, "invalid_previous_head_binding"
+        reference_frame = head.get("referenceFrameIndex")
+        if reference_frame is not None and (type(reference_frame) is not int or not 0 <= reference_frame <= frame_index):
+            return None, "invalid_reference_head_frame"
+        if status in {"supported", "risk"}:
+            # Reusing a current AI bbox must not revive an optical anchor from
+            # before a human edit/checkpoint. The referenced core must be bound
+            # to the latest applicable human geometry, not just an earlier frame.
+            references = list(self._eligible_geometry_references(oid, frame_index))
+            baseline = self._state(oid).manual_baseline
+            if baseline is not None and baseline.frame_index <= frame_index:
+                references.append(baseline)
+            newest = max((ref.frame_index for ref in references), default=None)
+            reference_point = head.get("referencePoint")
+            matching = [ref for ref in references if ref.frame_index == reference_frame]
+            if (type(reference_frame) is not int or newest is None or reference_frame != newest
+                    or not point(reference_point)
+                    or not any(ref.bbox[0] <= reference_point[0] <= ref.bbox[2]
+                               and ref.bbox[1] <= reference_point[1] <= ref.bbox[3] for ref in matching)
+                    or (previous_frame is not None and previous_frame < reference_frame)):
+                return None, "stale_or_unbound_human_optical_reference"
+        if head.get("confidence") is not None and (not number(head["confidence"]) or not 0 <= head["confidence"] <= 1):
+            return None, "invalid_head_confidence"
+        if head.get("radius") is not None and (not number(head["radius"]) or head["radius"] <= 0):
+            return None, "invalid_head_radius"
+        if head["status"] == "matched":
+            location = head.get("point")
+            if (not point(location) or not number(head.get("radius")) or head["radius"] <= 0
+                    or not number(head.get("confidence")) or head["confidence"] <= 0
+                    or not bbox[0] <= location[0] <= bbox[2] or not bbox[1] <= location[1] <= bbox[3]):
+                return None, "matched_subject_outside_current_box_or_unverified"
+        if status == "supported" and (head["status"] != "matched" or coverage["status"] != "no_clear_loss"
+                                      or not number(bound_area) or bound_area <= 0):
+            return None, "unsupported_normal_exemption"
+        if status == "risk" and (not number(bound_area)
+                or not (head["status"] in {"lost", "ambiguous"}
+                        or coverage["status"] in {"tail_loss", "foreign_core", "merge"})):
+            return None, "unsubstantiated_image_risk"
+        return copy.deepcopy(payload), None
+
+    @staticmethod
+    def _supported_identity(evidence) -> bool:
+        return bool(evidence and evidence.get("status") == "supported"
+                    and evidence["head"]["status"] == "matched"
+                    and evidence["coverage"]["status"] == "no_clear_loss")
+
+    def _image_observation(self, oid: int, frame_index: int, evidence
+                           ) -> tuple[bool, bool, list[str], dict[str, Any]]:
+        state = self._state(oid)
+        if not evidence or evidence["status"] != "risk":
+            self._reset_image_observation(state)
             return False, False, [], {}
+        head, coverage = evidence["head"]["status"], evidence["coverage"]["status"]
+        category = f"head_{head}" if head in {"lost", "ambiguous"} else coverage
+        if state.image_last_frame == frame_index and state.image_category == category:
+            pass
+        elif state.image_last_frame == frame_index - 1 and state.image_count and state.image_category == category:
+            state.image_count += 1
+        else:
+            state.image_count = 1
+            state.image_started_frame = frame_index
+        state.image_last_frame = frame_index
+        state.image_category = category
+        required = max(1, int(self.config.IMAGE_PERSISTENCE_FRAMES))
+        hard = state.image_count >= required
+        reasons = [f"image_{category} observations={state.image_count}/{required} {'HARD' if hard else 'SOFT'}"]
+        details = {"risk_type": "image", "image_risk_reasons": reasons,
+                   "image_observation_count": state.image_count, "image_observation_required": required,
+                   "image_observation_started_frame": state.image_started_frame,
+                   "image_observation_category": category, "image_pending": not hard}
+        if hard:
+            details["pause_started_frame"] = state.image_started_frame
+        if state.image_count in {1, required}:
+            logging.getLogger("review.tracking").info(
+                "tracking.image_risk_observed object=%s frame=%s category=%s observations=%s required=%s first=%s pending=%s",
+                oid, frame_index, category, state.image_count, required, state.image_started_frame, not hard)
+        return hard, not hard, reasons, details
+
+    def _motion_check(self, oid: int, state: _ObjectState, frame_index: int, bbox: list[float], *,
+                      head_evidence: dict[str, Any] | None = None,
+                      samples: list[float] | None = None) -> tuple[bool, bool, list[str], dict[str, Any]]:
+        """Use time/size normalization plus short history without auto-training."""
         cfg = self.config
-        previous_bbox = state.motion_history[-1]
-        previous_frame = state.motion_frame_indices[-1]
+        kind = "head" if head_evidence is not None else "bbox"
+        if state.motion_reference_kind != kind:
+            # A bbox-centre streak and a rigid-subject streak measure different
+            # things. Likewise, explicit bbox feedback cannot loosen head motion.
+            state.motion_streak = 0
+            state.motion_reference_kind = kind
+        previous_bbox = state.motion_history[-1] if state.motion_history else None
+        if kind == "head":
+            history = [list(point) for point in state.head_motion_history]
+            indices = list(state.head_motion_frame_indices)
+            previous = head_evidence.get("previousPoint")
+            previous_frame = head_evidence.get("previousFrameIndex")
+            if previous is not None and (not indices or previous_frame > indices[-1]):
+                history.append(list(previous))
+                indices.append(previous_frame)
+            if not history:
+                return False, False, [], {"motion_reference_kind": "head", "motion_reference_available": False}
+            previous_frame = indices[-1]
+            old_center, center = history[-1], head_evidence["point"]
+            for known_frame, known_box in zip(state.motion_frame_indices, state.motion_history):
+                if known_frame == previous_frame:
+                    previous_bbox = known_box
+                    break
+        else:
+            if not state.motion_history:
+                return False, False, [], {}
+            history = [_bbox_center(box) for box in state.motion_history]
+            indices = state.motion_frame_indices
+            previous_frame = indices[-1]
+            old_center, center = history[-1], _bbox_center(bbox)
         gap = max(1, frame_index - previous_frame)
-        old_center, center = _bbox_center(previous_bbox), _bbox_center(bbox)
         dx, dy = center[0] - old_center[0], center[1] - old_center[1]
         shift = math.hypot(dx, dy)
         if state.manual_baseline:
@@ -374,20 +585,21 @@ class AnomalyDetector:
             # Legacy direct clients can omit source=manual. Fix their first
             # seed scale so growing AI boxes cannot loosen motion detection.
             if state.seed_motion_scale is None:
-                state.seed_motion_scale = max(cfg.MOTION_MIN_SCALE_PX, math.hypot(*_bbox_wh(previous_bbox)))
+                state.seed_motion_scale = max(cfg.MOTION_MIN_SCALE_PX, math.hypot(*_bbox_wh(previous_bbox or bbox)))
             scale = state.seed_motion_scale
         normalizer = self.fps / (30.0 * gap * scale)
         normalized = shift * normalizer
-        samples = self.normal_motion_samples.get(oid, [])
+        if samples is None:
+            samples = (self.normal_head_motion_samples if kind == "head" else self.normal_motion_samples).get(oid, [])
         threshold = max(cfg.MOTION_PAUSE_NORMALIZED, max(samples, default=0.0) * cfg.MOTION_FEEDBACK_MARGIN)
         extreme = max(cfg.MOTION_EXTREME_NORMALIZED, threshold * cfg.MOTION_EXTREME_MULTIPLIER)
 
         # Velocity is diagnostic context. It never increases the thresholds.
         velocities = []
-        for index in range(1, len(state.motion_history)):
-            previous = _bbox_center(state.motion_history[index - 1])
-            current = _bbox_center(state.motion_history[index])
-            elapsed = max(1, state.motion_frame_indices[index] - state.motion_frame_indices[index - 1])
+        for index in range(1, len(history)):
+            previous = history[index - 1]
+            current = history[index]
+            elapsed = max(1, indices[index] - indices[index - 1])
             velocities.append(((current[0] - previous[0]) / elapsed, (current[1] - previous[1]) / elapsed))
         recent_velocity = (median(value[0] for value in velocities), median(value[1] for value in velocities)) if velocities else (0.0, 0.0)
         residual = math.hypot(dx / gap - recent_velocity[0], dy / gap - recent_velocity[1]) * self.fps / (30.0 * scale)
@@ -396,8 +608,8 @@ class AnomalyDetector:
         # oscillation. It interrupts a suspected drift streak, but remains a
         # warning; a huge jump is never exempted by returning toward old data.
         oscillating = False
-        if len(state.motion_history) >= 2 and normalized < threshold * 1.5:
-            older_center = _bbox_center(state.motion_history[-2])
+        if len(history) >= 2 and normalized < threshold * 1.5:
+            older_center = history[-2]
             return_distance = math.hypot(center[0] - older_center[0], center[1] - older_center[1]) / scale
             oscillating = return_distance < 0.35 and dx * (old_center[0] - older_center[0]) + dy * (old_center[1] - older_center[1]) < 0
         if normalized >= threshold and not oscillating:
@@ -409,7 +621,8 @@ class AnomalyDetector:
         reason = "extreme_jump" if normalized >= extreme else "sustained_motion" if hard else "confirmed_motion" if samples and normalized <= threshold else "oscillation" if oscillating else "motion"
         details = {
             "center_shift": shift,
-            "motion_reference_bbox": list(previous_bbox),
+            "motion_reference_bbox": list(previous_bbox) if previous_bbox is not None else None,
+            "motion_reference_kind": kind,
             "motion_reference_frame": previous_frame,
             "frame_gap": gap,
             "source_fps": self.fps,
@@ -426,6 +639,8 @@ class AnomalyDetector:
             "feedback_sample_count": len(samples),
             "normal_sample_matched": bool(samples and normalized <= threshold),
         }
+        if kind == "head":
+            details.update(motion_reference_point=list(old_center), motion_current_point=list(center))
         reasons = [f"adjacent_center_shift={shift:.1f}px normalized={normalized:.3f} {reason} {'HARD' if hard else 'SOFT'}"] if hard or warning else []
         return hard, warning, reasons, details
 
@@ -522,7 +737,8 @@ class AnomalyDetector:
             key=lambda reference: reference.frame_index,
         )[-max(1, int(self.config.GEOMETRY_REFERENCE_LIMIT)):]
 
-    def _geometry_observation(self, oid: int, frame_index: int, bbox: list[float], mask_area: int | None = None
+    def _geometry_observation(self, oid: int, frame_index: int, bbox: list[float], mask_area: int | None = None, *,
+                              geometry_supported: bool = False
                               ) -> tuple[bool, bool, list[str], dict[str, Any]]:
         state, cfg = self._state(oid), self.config
         references: list[tuple[ManualBaseline | ConfirmedGeometryReference, str]] = []
@@ -536,10 +752,28 @@ class AnomalyDetector:
             state.geometry_category = None
             return False, False, [], {}
         checks = [self._geometry_check(bbox, reference, source) for reference, source in references]
+        def physical_extreme(check):
+            detail = check[3]
+            return ((detail["area_ratio"] < cfg.GEOMETRY_EXTREME_AREA_MIN
+                     and not detail["side_exit_shrink_ignored"])
+                    or detail["area_ratio"] > cfg.GEOMETRY_EXTREME_AREA_MAX)
         hard, warning, reasons, details = min(
             reversed(checks),
-            key=lambda check: 3 if check[3].get("geometry_extreme") else 2 if check[0] else 1 if check[1] else 0,
+            key=lambda check: 3 if (physical_extreme(check) if geometry_supported else check[3].get("geometry_extreme"))
+            else 2 if check[0] else 1 if check[1] else 0,
         )
+        if geometry_supported:
+            # Axis-aligned width, height and aspect alone can be arbitrarily
+            # affected by a rotating tail. Independent support downgrades them;
+            # catastrophic area and explicit accepted-mask loss remain separate.
+            details["geometry_supported_by_identity"] = True
+            details["geometry_bbox_only_extreme"] = bool(details.get("geometry_extreme"))
+            details["geometry_extreme"] = physical_extreme((hard, warning, reasons, details))
+            if not details["geometry_extreme"]:
+                warning = warning or hard
+                hard = False
+                reasons = [reason.replace(" HARD", " SOFT") for reason in reasons]
+                details["geometry_observed_risk_reasons"] = list(reasons)
         details["confirmed_geometry_frame"] = max((reference.frame_index for reference in confirmed), default=None)
         details["geometry_reference_count"] = len(references)
         confirmed_areas = [float(reference.mask_area) for reference in confirmed
@@ -629,7 +863,24 @@ class AnomalyDetector:
                 return False
         return True
 
-    def _pair_observation(self, pair: tuple[int, int], boxes: dict[int, list[float]], frame_index: int
+    def _independent_mask_pair(self, pair: tuple[int, int], evidence: dict[int, dict[str, Any]]) -> bool:
+        left, right = (evidence.get(oid) for oid in pair)
+        if not self._supported_identity(left) or not self._supported_identity(right):
+            return False
+        minimum_separation = max(2.0, min(left["head"]["radius"], right["head"]["radius"]) * .5)
+        if math.dist(left["head"]["point"], right["head"]["point"]) <= minimum_separation:
+            return False
+        for item, other in ((left, pair[1]), (right, pair[0])):
+            metrics = item["coverage"].get("metrics", {})
+            overlaps = metrics.get("maskOverlap", {}) if isinstance(metrics, dict) else {}
+            overlap = overlaps.get(str(other)) if isinstance(overlaps, dict) else None
+            if (type(overlap) not in (int, float) or not math.isfinite(overlap)
+                    or not 0 <= overlap < self.config.INDEPENDENT_MASK_IOU_MAX):
+                return False
+        return True
+
+    def _pair_observation(self, pair: tuple[int, int], boxes: dict[int, list[float]], frame_index: int, *,
+                          identity_evidence: dict[int, dict[str, Any]] | None = None
                           ) -> dict[str, Any] | None:
         cfg = self.config
         bbox_a, bbox_b = (boxes[oid] for oid in pair)
@@ -653,7 +904,8 @@ class AnomalyDetector:
                 references.append(seed)
         matched = next((reference for reference in references
                         if self._pair_reference_matches(reference, boxes, coverage, iou)), None)
-        suspect = coverage >= cfg.OVERLAP_HARD and iou >= cfg.OVERLAP_MERGE_IOU and matched is None
+        independent = self._independent_mask_pair(pair, identity_evidence or {})
+        suspect = coverage >= cfg.OVERLAP_HARD and iou >= cfg.OVERLAP_MERGE_IOU and matched is None and not independent
         if suspect:
             if state.last_frame == frame_index:
                 pass
@@ -677,7 +929,8 @@ class AnomalyDetector:
                 "reference_frame": matched.frame_index if matched else None,
                 "reference_source": matched.source if matched else None,
                 "reference_boxes": matched.boxes if matched else None,
-                "normal_reference_matched": matched is not None}
+                "normal_reference_matched": matched is not None,
+                "independent_masks_supported": independent}
 
     def prime_observations(self, frames: Iterable[dict[str, Any]], seed_frame: int,
                            seed_boxes: dict[int, list[float]], *, reset_frames: dict[int, int] | None = None) -> None:
@@ -693,7 +946,8 @@ class AnomalyDetector:
                 reset_frames[oid] = max(reset_frames.get(oid, -1), state.manual_baseline.frame_index)
         seed_frame = int(seed_frame)
         active = set(seed_boxes)
-        count = max(int(self.config.GEOMETRY_PERSISTENCE_FRAMES), int(self.config.OVERLAP_PERSISTENCE_FRAMES), 1)
+        count = max(int(self.config.GEOMETRY_PERSISTENCE_FRAMES), int(self.config.OVERLAP_PERSISTENCE_FRAMES),
+                    int(self.config.IMAGE_PERSISTENCE_FRAMES), 1)
         rows: dict[int, dict[str, Any]] = {}
         for row in frames:
             if not isinstance(row, dict):
@@ -710,6 +964,7 @@ class AnomalyDetector:
             # observation of a three-frame risk window.
             return
         parsed: list[tuple[int, dict[int, list[float]], dict[int, int | None]]] = []
+        evidence_by_frame: dict[int, dict[int, dict[str, Any]]] = {}
         previous_details: dict[tuple[int, int], list[dict[str, Any]]] = {}
         for frame in chosen:
             boxes, masks = {}, {}
@@ -726,6 +981,9 @@ class AnomalyDetector:
                 boxes[oid], masks[oid] = bbox, obj.get("mask_area")
                 details = obj.get("anomaly_details", {})
                 if isinstance(details, dict):
+                    evidence, _ = self._identity_evidence(oid, frame, bbox, masks[oid], details.get("identity_evidence"))
+                    if evidence is not None:
+                        evidence_by_frame.setdefault(frame, {})[oid] = evidence
                     for evidence in details.get("overlap_pairs", []):
                         if isinstance(evidence, dict) and isinstance(evidence.get("object_ids"), list) and len(evidence["object_ids"]) == 2:
                             pair = tuple(sorted(evidence["object_ids"]))
@@ -766,15 +1024,28 @@ class AnomalyDetector:
             state.geometry_count = 0
             state.geometry_started_frame = state.geometry_last_frame = None
             state.geometry_category = None
+            self._reset_image_observation(state)
         for frame, boxes, masks in parsed:
+            frame_evidence = {}
             for oid in active:
                 state = self._state(oid)
                 if oid not in boxes or frame <= reset_frames.get(oid, -1) or (state.manual_baseline and frame < state.manual_baseline.frame_index):
                     state.geometry_count = 0
                     state.geometry_started_frame = state.geometry_last_frame = None
                     state.geometry_category = None
+                    self._reset_image_observation(state)
                     continue
-                self._geometry_observation(oid, frame, boxes[oid], masks.get(oid))
+                # A reused AI seed is not a new human approval. Validate the
+                # saved cues against the effective seed geometry before replay.
+                evidence, _ = self._identity_evidence(oid, frame, boxes[oid], masks.get(oid),
+                                                      evidence_by_frame.get(frame, {}).get(oid))
+                if evidence is not None:
+                    frame_evidence[oid] = evidence
+                self._geometry_observation(oid, frame, boxes[oid], masks.get(oid),
+                                           geometry_supported=self._supported_identity(evidence))
+                self._image_observation(oid, frame, evidence)
+                if evidence and evidence["status"] in {"supported", "risk"} and evidence["head"]["status"] == "matched":
+                    self._remember_head_motion(state, frame, evidence["head"]["point"])
             for pair in list(self._overlap_states):
                 if not set(pair).issubset(boxes):
                     self._overlap_states.pop(pair, None)
@@ -785,10 +1056,11 @@ class AnomalyDetector:
                     if frame <= max(reset_frames.get(oid, -1), reset_frames.get(other, -1)):
                         self._overlap_states.pop(pair, None)
                         continue
-                    self._pair_observation(pair, boxes, frame)
+                    self._pair_observation(pair, boxes, frame, identity_evidence=frame_evidence)
 
     def push(self, frame_index: int, frame_objects: dict[int, list[float]], *, ignored_object_ids: Iterable[int] | None = None,
-             mask_areas: dict[int, int] | None = None) -> AnomalyReport:
+             mask_areas: dict[int, int] | None = None,
+             identity_evidence: dict[int, dict[str, Any]] | None = None) -> AnomalyReport:
         cfg = self.config
         frame_index = int(frame_index)
         self.current_frame_index = frame_index
@@ -796,6 +1068,7 @@ class AnomalyDetector:
         current_ids = {int(value) for value in frame_objects}
         ignored_ids = {int(value) for value in (ignored_object_ids or [])}
         first_report = not self.reports
+        valid_evidence: dict[int, dict[str, Any]] = {}
 
         # Explicitly omitted annotation frames do not terminate model identity
         # or turn a hidden anomaly into a permanent exemption in later frames.
@@ -808,6 +1081,7 @@ class AnomalyDetector:
             state.geometry_count = 0
             state.geometry_started_frame = state.geometry_last_frame = None
             state.geometry_category = None
+            self._reset_image_observation(state)
             if oid in frame_objects:
                 self._remember_motion(state, frame_index, frame_objects[oid])
 
@@ -819,6 +1093,7 @@ class AnomalyDetector:
             state.geometry_count = 0
             state.geometry_started_frame = state.geometry_last_frame = None
             state.geometry_category = None
+            self._reset_image_observation(state)
             last_bbox = state.motion_history[-1] if state.motion_history else None
             if self._is_near_boundary(last_bbox):
                 state.level = AnomalyLevel.NORMAL
@@ -858,13 +1133,27 @@ class AnomalyDetector:
                 "manual_baseline_frame": baseline.frame_index if baseline else None,
                 "manual_baseline_name": baseline.name if baseline else None,
             })
+            payload = identity_evidence.get(oid) if isinstance(identity_evidence, dict) else None
+            evidence, evidence_error = self._identity_evidence(oid, frame_index, bbox,
+                                                               (mask_areas or {}).get(oid), payload)
+            if evidence is not None:
+                valid_evidence[oid] = evidence
+                details["identity_evidence"] = evidence
+            elif evidence_error:
+                details["identity_evidence_error"] = evidence_error
+                logging.getLogger("review.tracking").warning(
+                    "tracking.image_evidence_rejected object=%s frame=%s reason=%s", oid, frame_index, evidence_error)
             hard, warning, geometry_reasons, geometry_details = self._geometry_observation(
                 oid, frame_index, bbox, (mask_areas or {}).get(oid),
+                geometry_supported=self._supported_identity(evidence),
             )
             reasons.extend(geometry_reasons)
             details.update(geometry_details)
 
-            motion_hard, motion_warning, motion_reasons, motion_details = self._motion_check(oid, state, frame_index, bbox)
+            head = (evidence["head"] if evidence and evidence["status"] in {"supported", "risk"}
+                    and evidence["head"]["status"] == "matched" else None)
+            motion_hard, motion_warning, motion_reasons, motion_details = self._motion_check(
+                oid, state, frame_index, bbox, head_evidence=head)
             hard = hard or motion_hard
             warning = warning or motion_warning
             reasons.extend(motion_reasons)
@@ -872,9 +1161,24 @@ class AnomalyDetector:
             if motion_hard:
                 details["pause_started_frame"] = min(details.get("pause_started_frame", frame_index), frame_index)
 
+            image_hard, image_warning, image_reasons, image_details = self._image_observation(oid, frame_index, evidence)
+            previous_start = details.get("pause_started_frame")
+            details.update(image_details)
+            if image_hard and isinstance(previous_start, int):
+                details["pause_started_frame"] = min(previous_start, details["pause_started_frame"])
+            elif not image_hard and hard:
+                # A pending image observation must not relabel an immediate
+                # catastrophe or independent motion pause as its first risk.
+                details["risk_type"] = "geometry" if geometry_details.get("geometry_risk") else "motion"
+            hard = hard or image_hard
+            warning = warning or image_warning
+            reasons.extend(image_reasons)
+
             state.level = AnomalyLevel.ANOMALY if hard else AnomalyLevel.WARNING if warning else AnomalyLevel.NORMAL
             if not hard:
                 self._remember_motion(state, frame_index, bbox)
+                if head is not None:
+                    self._remember_head_motion(state, frame_index, head["point"])
             report.frames.append(AnomalyFrame(frame_index, oid, state.level, reasons, details))
             report.object_levels[oid] = state.level
 
@@ -887,7 +1191,8 @@ class AnomalyDetector:
             boxes = {oid: bbox for oid, bbox in items}
             for index, (oid_a, bbox_a) in enumerate(items):
                 for oid_b, bbox_b in items[index + 1:]:
-                    evidence = self._pair_observation((oid_a, oid_b), boxes, frame_index)
+                    evidence = self._pair_observation((oid_a, oid_b), boxes, frame_index,
+                                                      identity_evidence=valid_evidence)
                     if evidence is None:
                         continue
                     level = AnomalyLevel(evidence["level"])
@@ -932,6 +1237,10 @@ class AnomalyDetector:
                   "geometry_category": item.details.get("geometry_observation_category"),
                   "geometry_observations": item.details.get("geometry_observation_count"),
                   "geometry_ratios": {key: item.details.get(key) for key in ("area_ratio", "width_ratio", "height_ratio", "aspect_ratio_change")},
+                  "risk_type": item.details.get("risk_type"),
+                  "image_category": item.details.get("image_observation_category"),
+                  "image_observations": item.details.get("image_observation_count"),
+                  "motion_reference_kind": item.details.get("motion_reference_kind"),
                   "pause_started_frame": item.details.get("pause_started_frame")}
                  for item in report.frames if item.level in (AnomalyLevel.ANOMALY, AnomalyLevel.DISAPPEARED)],
             )

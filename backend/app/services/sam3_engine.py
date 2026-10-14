@@ -259,7 +259,21 @@ class Sam3Engine:
         )
 
     def decode_tracker_output(self, session, output, keep_masks=False) -> tuple[list[TrackDetection], dict[int, np.ndarray]]:
+        return self._decode_tracker_output(session, output, keep_masks=keep_masks)
+
+    def decode_tracker_output_regions(self, session, output):
+        """Same native-pixel predictions, retaining only each occupied ROI.
+
+        Image evidence consumes these masks in the current iteration. Keeping
+        a full native 4K mask for every identity would multiply peak memory.
+        """
+        return self._decode_tracker_output(session, output, regions=True)
+
+    def _decode_tracker_output(self, session, output, *, keep_masks=False, regions=False):
         self.load_tracker()
+        if regions:
+            from .tracking_evidence import EvidenceConfig, MaskRegion
+            roi_limit = EvidenceConfig().max_roi_side
         ids = [int(x) for x in getattr(session, "obj_ids", [])]
         scores_np = _as_numpy(getattr(output, "object_score_logits", None))
         if scores_np is not None:
@@ -299,6 +313,16 @@ class Sam3Engine:
             )
             if keep_masks:
                 mask_map[object_id] = mask
+            elif regions:
+                # copy detaches this small ROI from the full native array.
+                # A failed segmentation can cover the entire 4K image for
+                # many identities. Geometry is still checked, but the probe
+                # cannot use such a large ROI: do not retain it for each ID.
+                if max(int(xs[-1]-xs[0]+1), int(ys[-1]-ys[0]+1)) <= roi_limit:
+                    mask_map[object_id] = MaskRegion(
+                        occupied[ys[0]:ys[-1]+1, xs[0]:xs[-1]+1].copy(),
+                        (int(xs[0]), int(ys[0])),
+                    )
         return detections, mask_map
 
     @staticmethod

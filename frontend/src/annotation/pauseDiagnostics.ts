@@ -25,6 +25,22 @@ const percent = (value: number) => `${(value * 100).toFixed(1).replace(/\.0$/, '
 
 export function pauseDiagnostics(objectId: number, reasons: string[], details: Record<string, unknown>, nameOf: (id: number) => string) {
   const triggers: string[] = []
+  const imageLabels: Record<string, string> = {
+    image_head_lost: '原图中的参考主体未被当前掩膜可靠覆盖',
+    image_head_ambiguous: '当前对象的主体身份存在歧义',
+    image_tail_loss: '与主体相连的细线结构有明显部分落在当前框外',
+    image_foreign_core: '当前掩膜疑似混入了另一个光学主体',
+    image_merge: '多个追踪对象疑似合并或共用了同一主体',
+  }
+  const imageHard = reasons.some(reason => reason.startsWith('image_') && reason.endsWith(' HARD'))
+  if (imageHard) {
+    for (const reason of reasons) {
+      const label = imageLabels[reason.split(/[ =]/)[0] ?? '']
+      if (label && reason.endsWith(' HARD') && !triggers.includes(label)) triggers.push(label)
+    }
+    const count = numberOf(details.image_observation_count), required = numberOf(details.image_observation_required)
+    if (count != null && required != null && count >= required) triggers.push(`同一对象图像风险持续 ${count} 帧，达到 ${required} 帧暂停条件`)
+  }
   const maskReason = reasons.find(reason => reason.startsWith('confirmed_mask_area_ratio='))
   const currentMaskArea = numberOf(details.current_mask_area), referenceMaskArea = numberOf(details.mask_reference_area)
   const maskRatio = numberOf(details.mask_area_ratio)
@@ -34,6 +50,7 @@ export function pauseDiagnostics(objectId: number, reasons: string[], details: R
   if (maskTrigger) triggers.push(`目标掩膜仅为已确认正常样本的 ${percent(maskRatio)}${details.geometry_extreme === true ? '，立即暂停' : ''}`)
   const thresholds = recordOf(details.geometry_thresholds)
   for (const reason of reasons) {
+    if (imageHard && !reason.endsWith(' HARD')) continue
     const match = /^(?:manual|geometry)_(area_ratio|width_ratio|height_ratio|aspect_change)=([\d.eE+-]+)/.exec(reason)
     if (!match) continue
     const [ , metric, rawValue] = match

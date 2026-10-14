@@ -64,6 +64,34 @@ const feedbackTarget = computed(() => {
 const hasPausedTracking = computed(() => trackingPausedFrame.value != null && pausedAnomalies.value.length > 0)
 const canRestartEarlier = computed(() => hasPausedTracking.value && trackingPausedFrame.value != null && currentFrame.value < trackingPausedFrame.value && currentObjects.value.some(object => object.bbox))
 const feedbackBlocked = computed(() => isAiBusy.value || !!deletingMediaId.value || exactFrameLoading.value || isPlaying.value || workspaceRestoring.value || !!frameError.value || objectDeletionBusy.value || trackingFeedbackBusy.value || (editingBlocked.value && !trackingFeedbackPending.value))
+const missingFeedbackTarget = computed(() => currentFrame.value===trackingPausedFrame.value && !!feedbackTarget.value && !currentObjects.value.some(object=>object.objectId===feedbackTarget.value!.objectId && object.bbox))
+const previousFeedbackTargetFrame = computed(() => {
+  if (!missingFeedbackTarget.value || trackingPausedFrame.value==null) return null
+  const frames=(annotationsByMedia.value[currentMediaId.value] || []).filter(object=>object.objectId===feedbackTarget.value?.objectId && object.bbox && (object.frameIndex ?? 0)<trackingPausedFrame.value!).map(object=>object.frameIndex ?? 0)
+  return frames.length ? Math.max(...frames) : null
+})
+const canCopyMissingFeedbackTarget = computed(() => missingFeedbackTarget.value && previousFeedbackTargetFrame.value===currentFrame.value-1 && !currentObjects.value.some(object=>object.objectId===feedbackTarget.value?.objectId))
+// An automatic selection is a one-shot response to a new pause, an accepted
+// item, or returning to its frame. Ordinary inspection never reselects a box.
+const feedbackSelectionRequest=ref<{mediaId:string;frameIndex:number;objectId:number}|null>(null)
+let applyingFeedbackSelection=false
+function requestFeedbackSelection(objectId:number) {
+  if (trackingPausedFrame.value==null) return
+  feedbackSelectionRequest.value={mediaId:currentMediaId.value,frameIndex:trackingPausedFrame.value,objectId}
+}
+function applyFeedbackSelection() {
+  const request=feedbackSelectionRequest.value
+  if (!request || request.mediaId!==currentMediaId.value || request.frameIndex!==trackingPausedFrame.value) { feedbackSelectionRequest.value=null;return }
+  if (currentFrame.value!==request.frameIndex || feedbackBlocked.value || trackingFeedbackPending.value || editingBlocked.value || trackingRestartBusy.value || trackingRestartPendingAction.value || pointerActive || pan || help.value || restartDialogOpen.value || deletionDialogOpen.value) return
+  if (!unresolvedAnomalies.value.some(item=>item.objectId===request.objectId)) { feedbackSelectionRequest.value=null;return }
+  applyingFeedbackSelection=true
+  feedbackTargetId.value=request.objectId
+  const object=currentObjects.value.find(item=>item.objectId===request.objectId)
+  if (object) { selectTool('select');selectObject(object.id) }
+  else clearSelection()
+  applyingFeedbackSelection=false
+  feedbackSelectionRequest.value=null
+}
 const deleteDialog = ref<HTMLDialogElement | null>(null), deletionDialogOpen = ref(false)
 type DeletionSummary = Awaited<ReturnType<typeof getObjectDeletionSummary>>
 const deletionSummary = ref<DeletionSummary | null>(null), deletionSummaryLoading = ref(false), deletionSummaryError = ref('')
@@ -84,10 +112,27 @@ function deleteSelectedFrame() {
 }
 function undoFrameDeletion() { undo(); frameDeletion.value = null }
 function selectFeedbackObject(objectId:number) {
-  if (trackingFeedbackPending.value || feedbackBlocked.value) return
+  if (trackingFeedbackPending.value || feedbackBlocked.value || editingBlocked.value || currentFrame.value!==trackingPausedFrame.value) return
+  feedbackSelectionRequest.value=null
   feedbackTargetId.value = objectId
   const object = currentObjects.value.find(item => item.objectId === objectId)
-  if (object) selectObject(object.id)
+  if (object) { selectTool('select');selectObject(object.id) }
+  else clearSelection()
+}
+function restoreMissingFeedbackTarget() {
+  const objectId=feedbackTarget.value?.objectId
+  if (objectId==null || !canCopyMissingFeedbackTarget.value || feedbackBlocked.value || trackingFeedbackPending.value || editingBlocked.value) return
+  copyPreviousFrame()
+  selectFeedbackObject(objectId)
+}
+async function locatePreviousFeedbackTarget() {
+  const frame=previousFeedbackTargetFrame.value,objectId=feedbackTarget.value?.objectId,mediaId=currentMediaId.value
+  if (frame==null || objectId==null || feedbackBlocked.value || trackingFeedbackPending.value || editingBlocked.value) return
+  frameInput.value=frame
+  await seekToInputFrame()
+  if(currentMediaId.value!==mediaId || currentFrame.value!==frame || feedbackBlocked.value || trackingFeedbackPending.value || editingBlocked.value) return
+  const object=currentObjects.value.find(item=>item.objectId===objectId&&item.bbox)
+  if(object){selectTool('select');selectObject(object.id)}
 }
 async function confirmFeedback(decision:'normal'|'corrected') {
   const target = feedbackTarget.value
@@ -323,9 +368,22 @@ function beforeUnload(e:BeforeUnloadEvent){if(mediaImportBusy.value||duplicateIm
 watch(trackingRestartPendingAction,(value,previous)=>{if(!value&&previous&&restartDialogOpen.value)closeRestartDialog()})
 watch(help,async value=>{if(value){helpPriorFocus=document.activeElement as HTMLElement;await nextTick();helpDialog.value?.querySelector<HTMLElement>('button')?.focus()}else helpPriorFocus?.focus()})
 watch(()=>selectedObject.value?.id,()=>{if(selectedObject.value)objectNameInput.value=selectedObject.value.name})
-watch(selectedObjectId,()=>{if(!trackingFeedbackPending.value&&selectedObject.value?.objectId!=null)feedbackTargetId.value=selectedObject.value.objectId})
+watch(selectedObjectId,()=>{if(!trackingFeedbackPending.value&&selectedObject.value?.objectId!=null){feedbackTargetId.value=selectedObject.value.objectId;if(!applyingFeedbackSelection)feedbackSelectionRequest.value=null}},{flush:'sync'})
 watch(()=>feedbackTarget.value?.objectId,()=>{if(!trackingFeedbackPending.value)learnNormalMotion.value=true})
 watch(trackingPausedFrame,()=>{feedbackTargetId.value=null;if(!trackingFeedbackPending.value)learnNormalMotion.value=true})
+watch(()=>({mediaId:currentMediaId.value,frame:trackingPausedFrame.value,ids:unresolvedAnomalies.value.map(item=>item.objectId),target:feedbackTarget.value?.objectId}), (value,previous)=>{
+  if (value.frame==null || !value.ids.length) { feedbackSelectionRequest.value=null;return }
+  const newPause=!previous || value.mediaId!==previous.mediaId || value.frame!==previous.frame || !previous.ids.length
+  const acceptedTarget=previous?.target!=null && previous.ids.includes(previous.target) && !value.ids.includes(previous.target)
+  if (!newPause && !acceptedTarget) return
+  // A user may be checking an unflagged object before confirming an edited
+  // target. Keep that deliberate selection instead of advancing over it.
+  const selectedId=selectedObject.value?.objectId
+  if (!newPause && selectedId!=null && !previous.ids.includes(selectedId)) return
+  requestFeedbackSelection(value.target ?? value.ids[0]!)
+},{flush:'post',immediate:true})
+watch(()=>[feedbackSelectionRequest.value,currentFrame.value,feedbackBlocked.value,trackingFeedbackPending.value,editingBlocked.value,trackingRestartBusy.value,trackingRestartPendingAction.value,help.value,restartDialogOpen.value,deletionDialogOpen.value,currentObjects.value],applyFeedbackSelection,{flush:'post'})
+watch(currentFrame,(frame,previous)=>{if(frame!==previous&&frame===trackingPausedFrame.value&&!trackingFeedbackPending.value&&feedbackTarget.value)requestFeedbackSelection(feedbackTarget.value.objectId)})
 watch(currentFrame,value=>{jumpFrame.value=value+1;mousePixel.value=null})
 watch(selectedMediaId,async id=>{closeRestartDialog();cancelPointer();objectSearch.value='';mousePixel.value=null;fit();await nextTick();await resetAnnotationViewForMedia(id);scrollContainerRef.value?.scrollTo(0,0)})
 watch(()=>[selectedMedia.value?.width,selectedMedia.value?.height],fit)
@@ -401,8 +459,8 @@ onUnmounted(()=>{cancelTrackingRestartRequest();closeRestartDialog();if(deleteDi
           <div v-if="magnifier" class="loupe"><canvas ref="loupe" width="200" height="150" :style="{filter}" /><span>4× 原图局部 · {{ mousePixel?`${mousePixel.x}, ${mousePixel.y}`:'移动指针查看' }}</span></div>
           <div class="canvas-bottom"><span class="canvas-hint">{{ hiddenBoxes?'标注已隐藏 · H 恢复':spaceHeld?'拖动画面':activeTool==='bbox'?'拖拽画框 · 空格拖动画面':activeTool==='select'?'拖动移动 · 角点缩放':'单击添加标注点' }}</span><div class="canvas-zoom"><button aria-label="缩小画面" @click="zoomAt(-.25)">−</button><button title="适应画面 (0)" @click="fitView">{{ Math.round(zoom*100) }}%</button><button aria-label="放大画面" @click="zoomAt(.25)">＋</button><button aria-label="适应画面" @click="fitView"><AppIcon name="fit" :size="15" /></button></div></div>
         </div>
-        <AnnotationTrackingFeedback v-if="hasPausedTracking || (trackingFeedbackError && trackingFeedbackPendingAction?.decision!=='reset')" :paused-frame="trackingPausedFrame" :current-frame="currentFrame" :notices="pausedAnomalies" :target="feedbackTarget" :remaining="unresolvedAnomalies.length" v-model:learn="learnNormalMotion" :disabled="feedbackBlocked" :busy="trackingFeedbackBusy" :pending="trackingFeedbackPending" :error="trackingFeedbackError" :can-restart-earlier="canRestartEarlier" @restart="openRestartDialog" @select="selectFeedbackObject" @return="returnToPausedFrame" @confirm="confirmFeedback" @retry="retryTrackingAnomalyFeedback" />
-        <div v-if="trackingWarningSummary.length && !hasPausedTracking" class="tracking-warning-summary" role="status"><AppIcon name="check" :size="14" /><span>{{ trackingWarningSummary.reduce((count,item)=>count+item.count,0) }} 次追踪变化已合并提示，追踪继续并保留风险检查。</span><details><summary>详情</summary><p v-for="item in trackingWarningSummary" :key="`${item.objectId}:${item.reason}`">#{{ item.objectId }} · {{ item.reason==='overlap'?'重叠':item.reason==='size'?'尺寸 / 形状':'运动' }} · 第 {{ item.firstFrame+1 }}–{{ item.lastFrame+1 }} 帧 · {{ item.count }} 次{{ item.calibrated?' · 参考已确认正常样本':'' }}</p></details></div>
+        <AnnotationTrackingFeedback v-if="hasPausedTracking || (trackingFeedbackError && trackingFeedbackPendingAction?.decision!=='reset')" :paused-frame="trackingPausedFrame" :current-frame="currentFrame" :notices="pausedAnomalies" :target="feedbackTarget" :remaining="unresolvedAnomalies.length" v-model:learn="learnNormalMotion" :disabled="feedbackBlocked" :busy="trackingFeedbackBusy" :pending="trackingFeedbackPending" :error="trackingFeedbackError" :can-restart-earlier="canRestartEarlier" :missing-target="missingFeedbackTarget" :can-copy-missing-target="canCopyMissingFeedbackTarget" :previous-target-frame="previousFeedbackTargetFrame" @restart="openRestartDialog" @select="selectFeedbackObject" @return="returnToPausedFrame" @confirm="confirmFeedback" @retry="retryTrackingAnomalyFeedback" @restore-missing="restoreMissingFeedbackTarget" @locate-previous="locatePreviousFeedbackTarget" />
+        <div v-if="trackingWarningSummary.length && !hasPausedTracking" class="tracking-warning-summary" role="status"><AppIcon name="check" :size="14" /><span>{{ trackingWarningSummary.reduce((count,item)=>count+item.count,0) }} 次追踪变化已合并提示，追踪继续并保留风险检查。</span><details><summary>详情</summary><p v-for="item in trackingWarningSummary" :key="`${item.objectId}:${item.reason}`">#{{ item.objectId }} · {{ item.reason==='overlap'?'重叠':item.reason==='size'?'尺寸 / 形状':item.reason==='image'?'主体 / 覆盖':'运动' }} · 第 {{ item.firstFrame+1 }}–{{ item.lastFrame+1 }} 帧 · {{ item.count }} 次{{ item.calibrated?' · 参考已确认正常样本':'' }}</p></details></div>
         <div v-if="focused && trackingCalibrationSummary.length" class="focus-calibration"><span>异常检测持续开启 · 已保存正常确认</span><button v-for="item in trackingCalibrationSummary" :key="item.objectId" class="quiet-button" :disabled="feedbackBlocked||trackingFeedbackPending" @click="resetTrackingCalibration(item.objectId)">#{{ item.objectId }}<template v-if="item.overlapCount"> · {{ item.overlapCount }} 个重叠组合已确认</template> 恢复默认判断</button></div>
         <div v-if="focused && trackingFeedbackError && trackingFeedbackPendingAction?.decision==='reset'" class="focus-calibration tracking-feedback-error" role="alert"><span>{{ trackingFeedbackError }}</span><button class="quiet-button" :disabled="trackingFeedbackBusy" @click="retryTrackingAnomalyFeedback">重试恢复默认判断</button></div>
         <div v-if="focused && (frameDeletionVisible||videoDeletionVisible)" class="focus-calibration object-deletion-feedback" role="status"><span v-if="frameDeletionVisible">#{{ frameDeletion?.objectId }} 已删除本帧标注</span><span v-else-if="lastVideoObjectDeletion">#{{ lastVideoObjectDeletion.objectId }} 已删除 {{ lastVideoObjectDeletion.frameCount }} 帧标注</span><button class="quiet-button" :disabled="editingBlocked||!!objectDeletionPendingAction||trackingFeedbackPending||(frameDeletionVisible?!canUndo:!canUndoVideoDeletion)" @click="frameDeletionVisible?undoFrameDeletion():undoVideoDeletion()"><AppIcon name="undo" :size="13" />撤销</button></div>

@@ -46,6 +46,8 @@ class SimulatedModel:
         for o in session.objects:
             box=list(o['bbox'])
             name = o.get('name', '')
+            if name.startswith('audit-disappear') and session.source_start == 0 and output.frame_idx >= 1:
+                continue
             if name.startswith('policy-geometry'):
                 if session.source_start == 0 and 1 <= output.frame_idx <= 3:
                     cy = (box[1]+box[3])/2

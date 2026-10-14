@@ -35,6 +35,9 @@ defineProps<{
   pending: boolean
   error: string
   canRestartEarlier?: boolean
+  missingTarget?: boolean
+  canCopyMissingTarget?: boolean
+  previousTargetFrame?: number | null
 }>()
 defineEmits<{
   (event: 'update:learn', value: boolean): void
@@ -43,6 +46,8 @@ defineEmits<{
   (event: 'confirm', decision: 'normal' | 'corrected'): void
   (event: 'retry'): void
   (event: 'restart'): void
+  (event: 'restoreMissing'): void
+  (event: 'locatePrevious'): void
 }>()
 </script>
 
@@ -53,11 +58,19 @@ defineEmits<{
       <span>{{ remaining }} 个对象待确认</span>
       <button v-if="pausedFrame != null && currentFrame !== pausedFrame" class="quiet-button" :disabled="busy" @click="$emit('return')">返回第 {{ pausedFrame + 1 }} 帧</button>
     </div>
-    <div v-if="notices.length > 1" class="pause-object-tabs" aria-label="选择待确认对象">
-      <button v-for="item in notices" :key="item.objectId" :class="{active:target?.objectId===item.objectId,resolved:item.resolved}" :aria-pressed="target?.objectId===item.objectId" :disabled="disabled||pending||item.resolved" @click="$emit('select',item.objectId)">#{{ item.objectId }} <AppIcon v-if="item.resolved" name="check" :size="12" /><span v-else>{{ item.displayName }}</span></button>
+    <div v-if="notices.length" class="pause-object-tabs" aria-label="选择待确认对象">
+      <button v-for="item in notices" :key="item.objectId" :class="{active:target?.objectId===item.objectId,resolved:item.resolved}" :aria-label="`选择暂停对象 #${item.objectId} ${item.displayName}`" :aria-pressed="target?.objectId===item.objectId" :disabled="disabled||pending||item.resolved||currentFrame!==pausedFrame" @click="$emit('select',item.objectId)">#{{ item.objectId }} <AppIcon v-if="item.resolved" name="check" :size="12" /><span v-else>{{ item.displayName }}</span></button>
     </div>
     <template v-if="target">
       <p class="tracking-target"><strong>{{ target.displayName }} · {{ target.title }}</strong><span>请检查本帧全部对象的框与目标身份，并查看前几帧是否已经偏移。</span></p>
+      <div v-if="missingTarget" class="tracking-missing-target" data-testid="tracking-missing-object">
+        <span>对象 #{{ target.objectId }} 本帧缺少可编辑框。</span>
+        <button v-if="canCopyMissingTarget" class="btn-secondary" data-testid="restore-missing-tracking-object" :disabled="disabled||pending" @click="$emit('restoreMissing')">复制上一帧补回缺失对象</button>
+        <button v-else-if="previousTargetFrame!=null" class="btn-secondary" data-testid="locate-missing-tracking-object" :disabled="disabled||pending" @click="$emit('locatePrevious')">返回第 {{ previousTargetFrame+1 }} 帧已有框</button>
+        <small v-if="canCopyMissingTarget">保留原对象编号，补回上一帧中本帧缺失的对象；调整后再确认已修正。</small>
+        <small v-else-if="previousTargetFrame!=null">返回已有框的帧修正，再从该帧重新追踪，保留同一对象身份。</small>
+        <small v-else>历史中没有此对象可补回的框，请先重新读取工作区核对来源；新画其他编号不能替代此对象。</small>
+      </div>
       <p v-if="target.triggerSummary" class="tracking-feedback-note" data-testid="tracking-trigger-evidence">{{ target.triggerSummary.split('；')[0] }}<template v-if="target.geometryReferenceFrame!=null&&!target.maskTrigger">；参考第 {{ target.geometryReferenceFrame+1 }} 帧{{ target.geometryReferenceSource==='confirmed-normal'?'人工确认正常的框':'人工框' }}。</template></p>
       <p v-if="target.overlapPairs?.length" class="tracking-feedback-note tracking-overlap-targets" data-testid="tracking-overlap-pairs">本次核对：{{ target.overlapPairs.map(pair=>pair.label).join('；') }}</p>
       <div v-if="canRestartEarlier" class="tracking-feedback-actions"><button class="btn-primary" data-testid="tracking-restart-open" :disabled="disabled||pending" @click="$emit('restart')">从本帧修正并重新追踪</button></div>

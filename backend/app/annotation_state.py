@@ -504,6 +504,8 @@ def _frame_checkpoint(previous: dict[str, Any], directory: Path, body: dict[str,
         if oid not in manual_ids and body.get('calibrate') and any(str(reason).startswith('adjacent_center_shift') for reason in reasons) and type(value) in (int, float) and math.isfinite(value) and value >= 0:
             sample = {'objectId': oid, 'frameIndex': frame, 'reason': 'motion', 'decision': 'normal',
                       'calibrate': True, 'features': {'motionNormalized': value}}
+            if details.get('motion_reference_kind') == 'head':
+                sample['features']['referenceKind'] = 'head'
             samples = [s for s in samples if (s.get('objectId'), s.get('frameIndex'), s.get('reason')) != (oid, frame, 'motion')]
             samples.append(sample)
             event['sample'] = sample
@@ -570,7 +572,7 @@ def feedback_state(previous: dict[str, Any], directory: Path, body: dict[str, An
             # Accepting a size/shape warning is an explicit human geometry
             # judgement, even without redrawing. Keep its server-side snapshot
             # separate from manual annotations and optional movement learning.
-            geometry_reason = any(str(reason).startswith(("manual_area_ratio=", "manual_width_ratio=", "manual_height_ratio=", "manual_aspect_change=", "confirmed_mask_area_ratio=")) for reason in reasons)
+            geometry_reason = any(str(reason).startswith(("manual_area_ratio=", "manual_width_ratio=", "manual_height_ratio=", "manual_aspect_change=", "confirmed_mask_area_ratio=", "image_")) for reason in reasons)
             if geometry_reason:
                 event["geometryReference"] = {"objectId": object_id, "frameIndex": frame,
                                               "bbox": _confirmed_box(obj), "source": "confirmed-normal"}
@@ -585,6 +587,8 @@ def feedback_state(previous: dict[str, Any], directory: Path, body: dict[str, An
             motion_reason = any(str(reason).startswith(("adjacent_center_shift", "center_displacement", "motion_", "normalized_motion", "tracking_motion")) for reason in reasons)
             if bool(body.get("calibrate", False)) and motion_reason and isinstance(value, (int, float)) and math.isfinite(value) and value >= 0:
                 sample = {"objectId": object_id, "frameIndex": frame, "reason": "motion", "decision": "normal", "calibrate": True, "features": {"motionNormalized": value}}
+                if details.get('motion_reference_kind') == 'head':
+                    sample['features']['referenceKind'] = 'head'
                 samples = [s for s in samples if not (s.get("objectId") == object_id and s.get("frameIndex") == frame and s.get("reason") == "motion")]
                 samples.append(sample)
                 event["sample"] = sample
