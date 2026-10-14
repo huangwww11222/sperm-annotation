@@ -136,6 +136,7 @@ export interface ObjectDeletionSummary {
 }
 
 export interface TrackingFeedbackInput {
+  scope?: 'object' | 'frame'
   expectedRevision: number
   objectId: number
   frameIndex: number
@@ -144,6 +145,8 @@ export interface TrackingFeedbackInput {
 }
 
 export interface TrackingFeedbackEvent {
+  scope?: 'object' | 'frame'
+  checkpointId?: string
   objectId: number
   frameIndex: number
   decision: 'normal' | 'corrected' | 'reset'
@@ -154,6 +157,7 @@ export interface TrackingFeedbackEvent {
     source: 'confirmed-normal'
   }>
   geometryReference?: {
+    checkpoint?: boolean
     objectId: number
     frameIndex: number
     bbox: [number, number, number, number]

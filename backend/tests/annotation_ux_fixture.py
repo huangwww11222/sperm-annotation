@@ -4,7 +4,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from app.config import DB_FILE, TRACK_DATA_DIR
-assert '/work/e2e-confirm-ux' in str(DB_FILE), DB_FILE
+assert '/work/e2e-confirm-ux' in DB_FILE.as_posix(), DB_FILE
 for mid, w, h in [('ux-video',800,450), ('ux-portrait',450,800)]:
     directory = TRACK_DATA_DIR / mid
     directory.mkdir(parents=True, exist_ok=True)

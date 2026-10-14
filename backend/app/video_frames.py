@@ -1,5 +1,6 @@
 """Bounded original-frame decoding and derived JPEG cache for a single worker."""
 from collections import OrderedDict
+from contextlib import contextmanager
 import json
 import logging
 from pathlib import Path
@@ -58,6 +59,23 @@ class ExactFrames:
             for cap, _ in self.decoders.values():
                 cap.release()
             self.decoders.clear()
+
+    @contextmanager
+    def removing(self, video):
+        """Release one cached decoder and exclude frame reads while it is removed.
+
+        Windows does not allow ``unlink`` while OpenCV still owns the source
+        file.  Keep the decoder lock for the whole filesystem operation so a
+        concurrent exact-frame request cannot reopen the same video between
+        ``release`` and deletion.  If deletion fails, leaving the context makes
+        the source readable again and the next request opens a fresh decoder.
+        """
+        key = str(Path(video).resolve())
+        with self.lock:
+            prior = self.decoders.pop(key, None)
+            if prior is not None:
+                prior[0].release()
+            yield
 
     def _cache(self, video, signature):
         directory = video.parent / '.frame_cache'

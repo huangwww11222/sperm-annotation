@@ -1060,7 +1060,7 @@ const createWorkspace = () => {
         resume = intent.body.decision !== 'reset' && !pausedAnomalies.value.length
       }
       pendingFeedback.value = null; rememberControls(intent.mediaId)
-      showToast(intent.body.decision === 'reset' ? `已恢复对象 #${intent.body.objectId} 的默认判断` : resume ? '人工确认已保存，继续追踪' : '已确认此对象，请继续检查其他暂停对象')
+      showToast(intent.body.decision === 'reset' ? `已恢复对象 #${intent.body.objectId} 的默认判断` : intent.body.scope === 'frame' ? '本帧全部对象的人工检查点已保存，继续追踪' : resume ? '人工确认已保存，继续追踪' : '已确认此对象，请继续检查其他暂停对象')
       console.info('[annotation.feedback_saved]', { mediaId: intent.serverMediaId, objectId: intent.body.objectId, decision: intent.body.decision, calibrate: intent.body.calibrate, key: intent.key })
     } catch (error) {
       trackingFeedbackError.value = error instanceof Error ? error.message : '确认保存失败，请重试'
@@ -1089,7 +1089,7 @@ const createWorkspace = () => {
     try {
       cancelScheduledSave(media.id)
       await persistWorkspaceState(media.id)
-      pendingFeedback.value = { mediaId: media.id, serverMediaId: media.serverMediaId, key: createRequestId(), body: { expectedRevision: 0, objectId, frameIndex: context?.frameIndex ?? currentFrame.value, decision, calibrate: decision === 'normal' && learn } }
+      pendingFeedback.value = { mediaId: media.id, serverMediaId: media.serverMediaId, key: createRequestId(), body: { expectedRevision: 0, objectId, frameIndex: context?.frameIndex ?? currentFrame.value, decision, calibrate: decision === 'normal' && learn, ...(decision === 'normal' ? {scope: 'frame' as const} : {}) } }
       rememberControls(media.id)
     } catch (error) {
       trackingFeedbackError.value = error instanceof Error ? error.message : '请先重试工作区保存'

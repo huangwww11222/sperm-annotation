@@ -83,6 +83,7 @@ capture.release()
   // FIRST affected frame. A normal decision must use that frame's real box.
   const geometry = await upload('policy-geometry')
   await draw(geometry,'policy-geometry',1,[.3,.3,.1,.1])
+  await draw(geometry,'steady-object',2,[.65,.3,.1,.1])
   const originalManual = (await work(geometry)).manualAnnotations
   await button('AI Tracking').click();let paused=await awaitPause(geometry,1)
   check(paused.lastPausedContext.frameIndex===1,'ordinary size risk pauses at its first frame, not the third observation')
@@ -111,12 +112,29 @@ capture.release()
       await page.getByRole('button',{name:/^退出专注/}).click()
     }
   }
-  await page.getByTestId('confirm-tracking-normal').click();await completed(geometry)
+  const attempts=[]
+  const feedbackRoute='**/api/track/feedback/'+geometry
+  await page.route(feedbackRoute,async route=>{
+    attempts.push({key:route.request().headers()['idempotency-key'],body:route.request().postDataJSON()})
+    const response=await route.fetch()
+    if(attempts.length===1) await route.abort('failed')
+    else await route.fulfill({response})
+  })
+  check((await page.getByTestId('confirm-tracking-normal').innerText()).includes('本帧所有对象'),'button clearly confirms the entire frame')
+  await page.getByTestId('confirm-tracking-normal').click()
+  await page.getByTestId('retry-tracking-feedback').waitFor()
+  check((await result(geometry)).frames.length===2,'lost frame-confirmation response does not start tracking')
+  await page.reload();await ready()
+  await poll(async()=> (await work(geometry)).lastPausedContext===null && await button('AI Tracking').isEnabled(),'checkpoint replay restored editable frame')
+  check((await result(geometry)).frames.length===2,'refresh recovers the confirmed checkpoint without silently starting model inference')
+  await button('AI Tracking').click();await completed(geometry)
+  await page.unroute(feedbackRoute)
+  check(attempts.length===2 && attempts[0].key===attempts[1].key && JSON.stringify(attempts[0].body)===JSON.stringify(attempts[1].body),'refresh replays the same atomic frame checkpoint request and key')
   const confirmed = await work(geometry)
-  check(confirmed.trackingFeedbackEvents.length===1 && confirmed.trackingFeedbackEvents[0].geometryReference.frameIndex===1,'normal confirmation saves the first-risk geometry exactly once')
+  check(confirmed.trackingFeedbackEvents.length===2 && confirmed.trackingFeedbackEvents.every(event=>event.scope==='frame' && event.geometryReference.frameIndex===1 && event.geometryReference.checkpoint),'one checkpoint includes both the risky object and the unflagged object exactly once')
   check(JSON.stringify(confirmed.manualAnnotations)===JSON.stringify(originalManual),'normal confirmation preserves original manual annotations')
   await page.reload();await ready()
-  check(await page.getByTestId('tracking-feedback').count()===0 && (await work(geometry)).trackingFeedbackEvents.length===1,'refresh retains normal reference and never restores the old pause')
+  check(await page.getByTestId('tracking-feedback').count()===0 && (await work(geometry)).trackingFeedbackEvents.length===2,'refresh retains the whole-frame checkpoint and never restores the old pause')
   evidence.push({scenario:'geometry',mediaId:geometry,pauseFrame:1,decisionFrame:3,confirmedFrame:confirmed.trackingFeedbackEvents[0].geometryReference.frameIndex})
 
   // Stable overlap exists in the manually drawn seed. Draw outside the first
@@ -134,8 +152,7 @@ capture.release()
   check((await page.locator('.tracking-warning-summary').innerText()).includes('追踪变化'),'combined warnings do not mislabel overlap as motion')
   evidence.push({scenario:'stable-seed-overlap',mediaId:stable,frames:8})
 
-  // New convergence of three objects must retain every partner, and each
-  // object must still receive its own explicit human confirmation.
+  // One explicit frame inspection confirms every object and overlap pair.
   const overlap = await upload('policy-overlap')
   for(let index=0;index<3;index++) await draw(overlap,'policy-overlap',index+1,[.2+index*.2,.3,.1,.1])
   await button('AI Tracking').click();paused=await awaitPause(overlap,3)
@@ -143,11 +160,9 @@ capture.release()
   const partners=await page.getByTestId('tracking-overlap-pairs').innerText()
   check(partners.includes('#1 ↔ #2')&&partners.includes('#1 ↔ #3'),'first object displays every related pair instead of overwriting its earlier partner')
   check((await page.getByTestId('tracking-overlap-acceptance').innerText()).includes('所有重叠组合'),'confirmation explicitly covers all displayed pairs only')
-  for(let count=1;count<=3;count++) {
-    await page.getByTestId('confirm-tracking-normal').click()
-    await state(overlap,value=>value.trackingFeedbackEvents?.length===count,'explicit overlap confirmation '+count+' saved')
-    if(count<3) check((await work(overlap)).pausedAnomalies.length===3-count,'confirming one object does not silently resolve its partners')
-  }
+  await page.getByTestId('confirm-tracking-normal').click()
+  const checkpoint=await state(overlap,value=>value.trackingFeedbackEvents?.length===3,'whole-frame overlap checkpoint saved')
+  check(checkpoint.pausedAnomalies.length===0 && new Set(checkpoint.trackingFeedbackEvents.map(event=>event.checkpointId)).size===1,'one explicit frame action atomically confirms all three objects')
   await completed(overlap);await page.reload();await ready()
   check((await work(overlap)).trackingFeedbackEvents.length===3 && await page.getByTestId('tracking-feedback').count()===0,'accepted overlap survives continued tracking and reload without immediate repeat pause')
   const calibration=page.locator('.tracking-calibration')

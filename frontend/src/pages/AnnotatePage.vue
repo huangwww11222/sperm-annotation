@@ -52,6 +52,7 @@ const selectedObjectCoverage = computed(() => {
   return new Set((annotationsByMedia.value[currentMediaId.value] || []).filter(object => object.objectId === id).map(object => object.frameIndex ?? 0)).size
 })
 const unresolvedAnomalies = computed(() => pausedAnomalies.value.filter(item => !item.resolved))
+const frameCanLearn = computed(() => unresolvedAnomalies.value.some(item => item.canLearn))
 const feedbackTargetId = ref<number | null>(null), learnNormalMotion = ref(true)
 const feedbackTarget = computed(() => {
   const pendingId = trackingFeedbackPendingAction.value?.objectId
@@ -91,7 +92,7 @@ function selectFeedbackObject(objectId:number) {
 async function confirmFeedback(decision:'normal'|'corrected') {
   const target = feedbackTarget.value
   if (!target || feedbackBlocked.value || trackingFeedbackPending.value || currentFrame.value!==trackingPausedFrame.value) return
-  await confirmTrackingAnomaly(target.objectId, decision, decision==='normal' && target.canLearn && learnNormalMotion.value)
+  await confirmTrackingAnomaly(target.objectId, decision, decision==='normal' && frameCanLearn.value && learnNormalMotion.value)
 }
 async function returnToPausedFrame() {
   if (trackingPausedFrame.value==null || isAiBusy.value || trackingFeedbackBusy.value) return

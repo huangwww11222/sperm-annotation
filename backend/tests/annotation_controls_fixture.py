@@ -13,7 +13,7 @@ from app.config import DATA_DIR, DB_FILE, STORAGE_ROOT, TRACK_DATA_DIR
 
 
 for path in (DATA_DIR, DB_FILE, STORAGE_ROOT):
-    assert "/work/e2e-annotation-controls" in str(path) or "/work/e2e-confirm-ux" in str(path), path
+    assert "/work/e2e-annotation-controls" in path.as_posix() or "/work/e2e-confirm-ux" in path.as_posix(), path
 DB_FILE.parent.mkdir(parents=True, exist_ok=True)
 db.init_db()
 user = db.get_user("annotation-controls-tester")

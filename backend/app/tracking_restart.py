@@ -40,7 +40,7 @@ def _copy_replace(source, target):
     temporary = target.with_name("." + target.name + "." + uuid.uuid4().hex + ".restore")
     try:
         shutil.copyfile(source, temporary)
-        with temporary.open("rb") as stream:
+        with temporary.open("r+b") as stream:
             os.fsync(stream.fileno())
         temporary.replace(target)
         _sync_directory(target.parent)
@@ -185,7 +185,7 @@ def restart(directory, uid, key, body, info, tracking_busy):
                 existed[name] = path.is_file()
                 if existed[name]:
                     shutil.copyfile(path, folder / (name + ".old"))
-                    with (folder / (name + ".old")).open("rb") as stream:
+                    with (folder / (name + ".old")).open("r+b") as stream:
                         os.fsync(stream.fileno())
             with (folder / (FILES[0] + ".new")).open("wb") as stream:
                 for row in kept:

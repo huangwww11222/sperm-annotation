@@ -40,11 +40,12 @@ def publish(name, value, jsonl=False):
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, destination)
-        descriptor = os.open(directory, os.O_RDONLY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        if os.name != 'nt':
+            descriptor = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -66,7 +67,7 @@ else:
 )
 
 export async function trackingRestartChecks(page, fixture, origin, { redProbeOnly = false } = {}) {
-  assert(fixture.directory.includes('/work/e2e-confirm-ux-'), 'restart fixture must be isolated')
+  assert(fixture.directory.replaceAll('\\','/').includes('/work/e2e-confirm-ux-'), 'restart fixture must be isolated')
   const resultFile = `${fixture.directory}/tracker_results.json`
   const item = name => page.getByTestId(`tracking-restart-${name}`)
   let checks = 0, lostReply = false, rejectOnce = false, modelStarts = [], seedWrites = [], restartAttempts = [], receipts = new Map()

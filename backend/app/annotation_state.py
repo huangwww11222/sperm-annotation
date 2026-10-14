@@ -13,6 +13,7 @@ import math
 import os
 import re
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -432,6 +433,86 @@ def _confirmed_overlap_references(row: dict[str, Any], object_id: int, frame: in
     return references
 
 
+def _frame_checkpoint(previous: dict[str, Any], directory: Path, body: dict[str, Any], uid: int) -> dict[str, Any]:
+    """Approve the effective frame once, including unflagged and edited boxes.
+
+    One workspace replacement publishes every reference, clears the pause and
+    records the receipt. Never issue individual writes that could half-confirm.
+    """
+    frame = body.get('frameIndex')
+    if type(frame) is not int or frame < 0:
+        raise HTTPException(422, '人工检查点帧号无效')
+    pending = [item for item in previous.get('pausedAnomalies', [])
+               if not item.get('resolved') and not is_deleted(previous, frame, item.get('objectId', item.get('object_id')))]
+    if (previous.get('lastPausedContext') or {}).get('frameIndex') != frame or not pending:
+        raise HTTPException(409, '该帧已不属于当前待确认暂停，请重新读取工作区')
+    row = next((row for row in read_rows(directory) if tracking_frame_index(row) == frame), None)
+    if row is None:
+        raise HTTPException(409, '该帧追踪结果不存在，请重新读取异常')
+    objects = {obj['object_id']: dict(obj) for obj in row['objects']
+               if not is_deleted(previous, frame, obj['object_id'])}
+    manual_ids = set()
+    manuals = [obj for obj in previous.get('manualAnnotations', []) if obj.get('source') == 'manual'
+               and obj.get('frameIndex') == frame and not is_deleted(previous, frame, obj.get('objectId'))]
+    if manuals:
+        meta = json.loads((directory / 'media.json').read_text(encoding='utf-8'))
+        validate_workspace_geometry({'manualAnnotations': manuals}, meta)
+        for manual in manuals:
+            # A point cannot silently approve a missing tracking rectangle.
+            oid, box = manual['objectId'], manual.get('bbox')
+            if box is None:
+                objects.pop(oid, None)
+                continue
+            width, height = meta['width'], meta['height']
+            objects[oid] = {'object_id': oid, 'name': manual.get('name'), 'bbox': [
+                box['x'] * width / 100, box['y'] * height / 100,
+                (box['x'] + box['width']) * width / 100, (box['y'] + box['height']) * height / 100]}
+            manual_ids.add(oid)
+    missing = {item.get('objectId', item.get('object_id')) for item in pending} - objects.keys()
+    missing.update(oid for oid, obj in objects.items() if obj.get('anomaly_level') == 'disappeared')
+    if missing:
+        raise HTTPException(409, '对象 ' + ', '.join(f'#{oid}' for oid in sorted(missing)) + ' 缺少有效框，请先补框或明确删除，再确认整帧')
+    if not objects:
+        raise HTTPException(409, '当前帧没有可确认的对象框')
+    boxes = {oid: _confirmed_box(obj) for oid, obj in objects.items()}
+    checkpoint_id, timestamp = uuid.uuid4().hex, datetime.now(timezone.utc).isoformat()
+    events = list(previous.get('trackingFeedbackEvents', []))
+    samples = list(previous.get('normalMotionSamples', []))
+    for oid, obj in sorted(objects.items()):
+        reference = {'objectId': oid, 'frameIndex': frame, 'bbox': boxes[oid],
+                     'name': obj.get('name'), 'source': 'confirmed-normal', 'checkpoint': True}
+        mask_area = obj.get('mask_area')
+        if type(mask_area) in (int, float) and math.isfinite(mask_area) and mask_area > 0:
+            reference['maskArea'] = mask_area
+        event = {'id': uuid.uuid4().hex, 'checkpointId': checkpoint_id, 'scope': 'frame',
+                 'createdAt': timestamp, 'objectId': oid, 'frameIndex': frame, 'decision': 'normal',
+                 'userId': uid, 'geometryReference': reference, 'calibrate': bool(body.get('calibrate', False))}
+        # All actual intersecting pairs belong to this frame-wide inspection.
+        # Disjoint objects are not granted a future overlap exemption.
+        pairs = []
+        for other, other_box in sorted(boxes.items()):
+            box = boxes[oid]
+            if other != oid and min(box[2], other_box[2]) > max(box[0], other_box[0]) and min(box[3], other_box[3]) > max(box[1], other_box[1]):
+                ids = sorted((oid, other))
+                pairs.append({'objectIds': ids, 'frameIndex': frame, 'bboxes': [boxes[i] for i in ids], 'source': 'confirmed-normal'})
+        if pairs:
+            event['overlapReferences'] = pairs
+        reasons, details = obj.get('anomaly_reasons', []), obj.get('anomaly_details', {}) or {}
+        event.update(reasons=reasons, details=details)
+        value = details.get('motion_normalized')
+        # Never learn the erroneous pre-edit motion of a corrected object.
+        if oid not in manual_ids and body.get('calibrate') and any(str(reason).startswith('adjacent_center_shift') for reason in reasons) and type(value) in (int, float) and math.isfinite(value) and value >= 0:
+            sample = {'objectId': oid, 'frameIndex': frame, 'reason': 'motion', 'decision': 'normal',
+                      'calibrate': True, 'features': {'motionNormalized': value}}
+            samples = [s for s in samples if (s.get('objectId'), s.get('frameIndex'), s.get('reason')) != (oid, frame, 'motion')]
+            samples.append(sample)
+            event['sample'] = sample
+        events.append(event)
+    log.info('annotation.frame_checkpoint_prepared media=%s user=%s frame=%s objects=%s checkpoint=%s', directory.name, uid, frame, sorted(objects), checkpoint_id)
+    return {**previous, 'trackingFeedbackEvents': events, 'normalMotionSamples': samples,
+            'pausedAnomalies': [], 'lastPausedContext': None, '_pauseCandidates': [], '_pauseContext': None}
+
+
 def feedback_state(previous: dict[str, Any], directory: Path, body: dict[str, Any], uid: int) -> dict[str, Any]:
     object_id, frame = body.get("objectId"), body.get("frameIndex")
     decision = body.get("decision")
@@ -439,6 +520,11 @@ def feedback_state(previous: dict[str, Any], directory: Path, body: dict[str, An
         raise HTTPException(422, "人工确认对象或决定无效")
     if "calibrate" in body and type(body["calibrate"]) is not bool:
         raise HTTPException(422, "校准选项必须为布尔值")
+    scope = body.get('scope', 'object')
+    if scope not in {'object', 'frame'} or (scope == 'frame' and decision != 'normal'):
+        raise HTTPException(422, '整帧检查点仅支持无异常确认')
+    if scope == 'frame':
+        return _frame_checkpoint(previous, directory, body, uid)
     samples = list(previous.get("normalMotionSamples", []))
     events = list(previous.get("trackingFeedbackEvents", []))
     event = {"id": uuid.uuid4().hex, "objectId": object_id, "frameIndex": frame, "decision": decision, "userId": uid}

@@ -105,7 +105,7 @@ def main():
     wrapper = base/'python-under-test'
     wrapper.write_text('#!/bin/sh\nexec '+shlex.join(python)+' "$@"\n')
     wrapper.chmod(0o700)
-    env['TEST_PYTHON'] = str(wrapper)
+    env['TEST_PYTHON'] = python[0] if os.name == 'nt' and not args.backend_image else str(wrapper)
     selected = SUITES[:1] if args.critical_only else SUITES
     report = {'scope':'critical-only' if args.critical_only else 'mandatory',
               'gitHead':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
@@ -157,9 +157,10 @@ def main():
                                '-v',str(ROOT)+':/workspace','-p',f'127.0.0.1:{backend_port}:{backend_port}']
             for k,v in docker_env.items(): backend_command += ['-e', k+'='+v]
             backend_command += [args.backend_image,'backend/tests/browser_server.py','--host','0.0.0.0','--port',str(backend_port)]
-        for name, command in [('backend',backend_command),('frontend',['npm','run','dev','--prefix','frontend','--','--host','127.0.0.1','--port',str(frontend_port),'--strictPort'])]:
+        frontend_command = ['node','node_modules/vite/bin/vite.js','--host','127.0.0.1','--port',str(frontend_port),'--strictPort']
+        for name, command in [('backend',backend_command),('frontend',frontend_command)]:
             handle = (base/(name+'.log')).open('w'); handles.append(handle)
-            processes.append(subprocess.Popen(command, cwd=ROOT, env=env, stdout=handle, stderr=subprocess.STDOUT, start_new_session=True))
+            processes.append(subprocess.Popen(command, cwd=ROOT/'frontend' if name == 'frontend' else ROOT, env=env, stdout=handle, stderr=subprocess.STDOUT, start_new_session=True))
         wait_http(f'http://127.0.0.1:{backend_port}/api/health', processes[0])
         wait_http(f'http://127.0.0.1:{frontend_port}', processes[1])
         fixture('critical_browser_fixture')
@@ -184,6 +185,11 @@ def main():
         import signal
         for process in reversed(processes):
             if process.poll() is None:
+                if os.name == 'nt':
+                    # Only process trees created by this isolated runner.
+                    subprocess.run(['taskkill','/PID',str(process.pid),'/T','/F'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    process.wait(timeout=10)
+                    continue
                 os.killpg(process.pid, signal.SIGTERM)
                 try: process.wait(timeout=10)
                 except subprocess.TimeoutExpired: os.killpg(process.pid, signal.SIGKILL)

@@ -63,6 +63,8 @@ Tracking JSONL 同样先写临时文件再原子替换，发布失败保留旧�
 
 旧媒体没有工作区文件时，只从 seed 的 `source=manual` 恢复人工记录/基准；AI、warning、anomaly 不当人工基准。首次编辑/追踪可写回恢复状态。文件原子替换与 SQLite 事务不是同一跨资源事务；不要假设一个能回滚另一个。
 
+整帧人工检查点保存在同一 `workspace_state.json` 的服务端 `trackingFeedbackEvents`，每对象一条 `scope:frame` normal 事件，共用 checkpointId 和检查时间/操作者，geometryReference 标记 checkpoint:true。它是独立人工确认来源，不伪造 manualAnnotations/manualBaselines，不重复写 seed 或 AI 文件。一个工作区原子替换同时发布全部框和暂停解除及幂等回执；重试不重复生成事件。续追/重启按原始帧号恢复不晚于起点的最近检查点，取代旧尺寸基准；同帧或更新人工修框、删除与 reset 仍优先。属于现有反馈事件的兼容字段扩展，无新增 DB 表，存储契约仍为 1。
+
 seed 的临时写入或替换失败保留旧文件，临时文件清理后可重试；历史 seed 损坏返回读取错误，不能忽略坏人工来源后显示为尚未标注。日志事件为 `annotation.seed_saved/seed_save_failed/legacy_seed_read_failed`。
 
 ## SQLite 数据关系

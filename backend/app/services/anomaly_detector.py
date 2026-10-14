@@ -1,8 +1,9 @@
 """Stateful anomaly detection for SAM3 object tracking.
 
-Size and shape use the latest manual annotation and a bounded set of shapes
-explicitly confirmed as normal by the user. Predictions cannot add references
-or change the manual annotation, so gradual AI drift does not teach itself.
+Size and shape use the latest manual annotation or whole-frame human checkpoint.
+Legacy per-object approvals remain bounded supplementary shapes. Predictions
+cannot create a checkpoint or change manual provenance, so AI drift cannot
+teach itself.
 """
 
 from __future__ import annotations
@@ -123,6 +124,8 @@ class ManualBaseline:
     bbox: list[float]
     frame_index: int
     name: str | None = None
+    source: str = 'manual'
+    mask_area: float | None = None
 
 
 @dataclass(frozen=True)
@@ -275,6 +278,7 @@ class AnomalyDetector:
         for raw_oid, value in baselines.items():
             if isinstance(value, ManualBaseline):
                 self.set_manual_baseline(raw_oid, value.bbox, value.frame_index, value.name)
+                self._state(int(raw_oid)).manual_baseline = value
             else:
                 self.set_manual_baseline(
                     raw_oid,
@@ -523,7 +527,7 @@ class AnomalyDetector:
         state, cfg = self._state(oid), self.config
         references: list[tuple[ManualBaseline | ConfirmedGeometryReference, str]] = []
         if state.manual_baseline is not None:
-            references.append((state.manual_baseline, "manual"))
+            references.append((state.manual_baseline, state.manual_baseline.source))
         confirmed = self._eligible_geometry_references(oid, frame_index)
         references.extend((reference, "confirmed-normal") for reference in confirmed)
         if not references:
@@ -541,6 +545,8 @@ class AnomalyDetector:
         confirmed_areas = [float(reference.mask_area) for reference in confirmed
                            if isinstance(reference.mask_area, (int, float)) and math.isfinite(reference.mask_area)
                            and reference.mask_area > 0]
+        if state.manual_baseline and state.manual_baseline.mask_area:
+            confirmed_areas.append(state.manual_baseline.mask_area)
         if confirmed_areas and isinstance(mask_area, (int, float)) and math.isfinite(mask_area) and mask_area >= 0:
             # Loss is extreme only relative to every explicitly accepted mask.
             # Neither the initial rectangular prompt nor AI history supplies it.

@@ -194,12 +194,13 @@ def _load_latest_manual_baselines(
     seed_path: Path,
     seed_source_frame: int,
 ) -> dict[int, ManualBaseline]:
-    """Restore each object's newest explicit manual bbox up to the seed frame.
+    """Restore each object's latest manual bbox/checkpoint up to the seed frame.
 
     ``annotations_frame_*.json`` is durable per-media state, so this works for
     resume requests and after a backend restart.  The current ``seed_frame`` is
     also considered for direct API clients.  An AI/warning/anomaly box is never
-    accepted, even if it is being reused as a valid SAM3 seed.
+    accepted merely by reusing it as a SAM3 seed. Explicit frame checkpoints
+    are separately restored from server-owned feedback, retaining provenance.
     """
     candidates = list(seed_path.parent.glob("annotations_frame_*.json"))
     if seed_path not in candidates:
@@ -262,6 +263,44 @@ def _load_latest_manual_baselines(
                 frame_index=frame_index,
                 name=item.get("name") or None,
             )
+    # An explicit whole-frame inspection replaces the effective baseline, but
+    # remains a separate human decision instead of forging source=manual data.
+    checkpoints: dict[int, dict[str, Any]] = {}
+    for event in workspace.get('trackingFeedbackEvents', []):
+        if not isinstance(event, dict):
+            continue
+        oid, frame = event.get('objectId'), event.get('frameIndex')
+        if event.get('decision') == 'reset':
+            checkpoints.pop(oid, None)
+            continue
+        if type(frame) is not int or not 0 <= frame <= seed_source_frame:
+            continue
+        if event.get('decision') == 'corrected':
+            checkpoints.pop(oid, None)
+            continue
+        if event.get('scope') == 'frame' and event.get('decision') == 'normal':
+            if type(oid) is not int or oid <= 0:
+                raise ValueError('人工检查点损坏，未继续追踪')
+            prior = checkpoints.get(oid)
+            if prior is None or frame >= prior['frameIndex']:
+                checkpoints[oid] = event
+    for oid, event in checkpoints.items():
+        frame = event['frameIndex']
+        if is_deleted(workspace, frame, oid) or is_deleted(workspace, seed_source_frame, oid):
+            continue
+        baseline = latest.get(oid)
+        # Real edits at this frame or later supersede the inspected geometry.
+        if baseline and baseline.frame_index >= frame:
+            continue
+        ref = event.get('geometryReference')
+        if not isinstance(ref, dict) or ref.get('frameIndex') != frame or ref.get('objectId') != oid or ref.get('source') != 'confirmed-normal' or ref.get('checkpoint') is not True:
+            raise ValueError('人工检查点身份损坏，未继续追踪')
+        bbox = _valid_reference_bbox(ref.get('bbox'))
+        if bbox is None:
+            raise ValueError('人工检查点框损坏，未继续追踪')
+        area = ref.get('maskArea')
+        area = area if type(area) in (int, float) and math.isfinite(area) and area > 0 else None
+        latest[oid] = ManualBaseline(bbox, frame, ref.get('name'), 'confirmed-normal', area)
     return latest
 
 
@@ -373,7 +412,8 @@ def _load_confirmed_overlap_references(
                 continue
             if any(is_deleted(workspace, fi, identity) for identity in ids for fi in (frame, seed_source_frame)):
                 continue
-            if any(identity in manual_baselines and manual_baselines[identity].frame_index >= frame for identity in ids):
+            if any(identity in manual_baselines and (manual_baselines[identity].frame_index > frame or
+                   (manual_baselines[identity].frame_index == frame and manual_baselines[identity].source == 'manual')) for identity in ids):
                 continue
             boxes = entry.get("bboxes")
             if not isinstance(boxes, list) or len(boxes) != 2:
@@ -550,6 +590,10 @@ def track_video(
     )
     logging.getLogger("review.tracking").info("tracking.active_objects seed_frame=%s active_ids=%s deleted_ids=%s",
              seed_source_frame, sorted(active_object_ids), workspace.get("deletedObjectIds", []))
+    logging.getLogger("review.tracking").info("tracking.frame_checkpoints_loaded media=%s seed=%s objects=%s",
+             video_file.parent.name, seed_source_frame,
+             {oid: {'frame': baseline.frame_index, 'bbox': baseline.bbox}
+              for oid, baseline in manual_baselines.items() if baseline.source == 'confirmed-normal'})
 
     # object_id → name 映射，让 tracking 结果继承用户标注的名字
     object_names: dict[int, str] = {int(o["object_id"]): o.get("name") or f"object-{o['object_id']}" for o in objects}

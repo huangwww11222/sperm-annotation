@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { publishTrackingFixture, trackingRestartChecks } from './tracking-restart-checks.mjs'
 const {chromium}=await import(process.env.PLAYWRIGHT_MODULE||'playwright')
 const fixture=JSON.parse(fs.readFileSync('work/tracking-recovery-fixture.json'))
-assert(fixture.directory.includes('/work/e2e-confirm-ux-'))
+assert(fixture.directory.replaceAll('\\','/').includes('/work/e2e-confirm-ux-'))
 const origin=process.env.CONFIRMATION_ORIGIN||'http://127.0.0.1:5387'
 const browser=await chromium.launch({channel:process.env.CHROME_CHANNEL || 'chrome',headless:true})
 const page=await browser.newPage({viewport:{width:1366,height:768}})

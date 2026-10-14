@@ -15,7 +15,7 @@ from app.review_repository import (
 )
 
 # This script only creates isolated test data; never point it at a real database.
-assert "/work/" in str(DB_FILE) and "/e2e-" in str(DB_FILE), DB_FILE
+assert "/work/" in DB_FILE.as_posix() and "/e2e-" in DB_FILE.as_posix(), DB_FILE
 DB_FILE.parent.mkdir(parents=True, exist_ok=True)
 db.init_db()
 for name in ["review-A", "review-B", "review-C"]:

@@ -9,8 +9,8 @@ from app.auth import sign_jwt
 from app.config import DB_FILE, TRACK_DATA_DIR
 from app.review_schema import apply_review_schema
 
-assert '/work/e2e-confirm-' in str(DB_FILE), DB_FILE
-assert '/work/e2e-confirm-' in str(TRACK_DATA_DIR), TRACK_DATA_DIR
+assert '/work/e2e-confirm-' in DB_FILE.as_posix(), DB_FILE
+assert '/work/e2e-confirm-' in TRACK_DATA_DIR.as_posix(), TRACK_DATA_DIR
 with db.connect() as c:
     apply_review_schema(c);review.migrate(c);confirmation.migrate(c)
 result={'token':sign_jwt({'uid':1}), 'items':{}}

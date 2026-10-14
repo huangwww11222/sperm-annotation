@@ -8,11 +8,13 @@ import pytest
 from fastapi.testclient import TestClient
 from app import main
 from app.auth import sign_jwt
+from app.video_frames import frames
 from .test_review_workflow import task
 
 
 @pytest.fixture
 def media(tmp_path, monkeypatch, task):
+    frames.close()
     monkeypatch.setattr(main, 'TRACK_DATA_DIR', tmp_path / 'media')
     monkeypatch.setattr(main, 'LEGACY_TRACK_DATA_DIR', tmp_path / 'legacy')
     monkeypatch.setattr(main, 'TASKS', {})
@@ -20,11 +22,20 @@ def media(tmp_path, monkeypatch, task):
     root.mkdir(parents=True)
     writer = cv2.VideoWriter(str(root / 'video.avi'), cv2.VideoWriter_fourcc(*'MJPG'), 10, (64, 48))
     writer.write(np.zeros((48, 64, 3), dtype=np.uint8))
+    writer.write(np.full((48, 64, 3), 64, dtype=np.uint8))
     writer.release()
     (root / 'workspace_state.json').write_text('{}')
     client = TestClient(main.app)
     client.headers['Authorization'] = 'Bearer ' + sign_jwt({'uid': 1})
-    return client, root
+    try:
+        yield client, root
+    finally:
+        client.close()
+        frames.close()
+
+
+def decoder_key(root):
+    return str((root / 'video.avi').resolve())
 
 
 def test_delete_is_persistent_and_does_not_remove_same_named_other_media(media, caplog):
@@ -42,16 +53,60 @@ def test_delete_is_persistent_and_does_not_remove_same_named_other_media(media, 
     assert 'media.deleted' in caplog.text and root.name in caplog.text
 
 
+def test_delete_releases_cached_exact_frame_decoder(media):
+    client, root = media
+    key = decoder_key(root)
+
+    assert client.get(f'/api/track/frame/{root.name}/0').status_code == 200
+    assert key in frames.decoders
+
+    response = client.delete('/api/track/media/' + root.name)
+
+    assert response.status_code == 200
+    assert not root.exists()
+    assert key not in frames.decoders
+
+
+def test_delete_releases_only_target_exact_frame_decoder(media):
+    client, root = media
+    sibling = root.with_name('keep-fixture')
+    shutil.copytree(root, sibling)
+    target_key = decoder_key(root)
+    sibling_key = decoder_key(sibling)
+
+    assert client.get(f'/api/track/frame/{root.name}/0').status_code == 200
+    assert client.get(f'/api/track/frame/{sibling.name}/0').status_code == 200
+    assert target_key in frames.decoders and sibling_key in frames.decoders
+
+    response = client.delete('/api/track/media/' + root.name)
+
+    assert response.status_code == 200
+    assert target_key not in frames.decoders
+    assert sibling_key in frames.decoders
+    assert client.get(f'/api/track/frame/{sibling.name}/1').status_code == 200
+    assert sibling.exists()
+
+
 def test_failed_filesystem_delete_returns_error_and_log_not_false_success(media, monkeypatch, caplog):
     client, root = media
+    key = decoder_key(root)
+    assert client.get(f'/api/track/frame/{root.name}/0').status_code == 200
+    assert key in frames.decoders
+
     def denied(*args, **kwargs):
         if not kwargs.get('ignore_errors'):
             raise PermissionError('fixture read-only directory')
+
     monkeypatch.setattr(shutil, 'rmtree', denied)
     response = client.delete('/api/track/media/' + root.name)
     assert response.status_code == 500
     assert root.exists()
+    assert key not in frames.decoders
     assert 'media.delete_failed' in caplog.text and 'fixture read-only directory' in caplog.text
+    # The removal lock is released after the failure, and an uncached frame
+    # opens a fresh decoder instead of leaving this media permanently blocked.
+    assert client.get(f'/api/track/frame/{root.name}/1').status_code == 200
+    assert key in frames.decoders
 
 
 def test_review_baseline_keeps_source_immutable(media):

@@ -15,7 +15,7 @@ const sections = guide.split(/^## /m).slice(1).map(part => {
     const type = /^\d+\. /.test(text) ? 'ol' : text.startsWith('- ') ? 'ul' : 'p'
     return { type, rows: [], text, items: rows.map(row => row.replace(/^(\d+\. |- )/, '')) }
   })
-  return { title: title!, text: part, blocks }
+  return { title: title!.trim(), text: part, blocks }
 })
 const matches = computed(() => sections.filter(s => s.text.toLowerCase().includes(search.value.trim().toLowerCase())))
 const current = computed(() => matches.value.find(s => s.title === selected.value) || matches.value[0])

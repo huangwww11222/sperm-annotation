@@ -19,7 +19,7 @@ from app.review_repository import (
 )
 from app.review_schema import apply_review_schema
 
-assert "/work/" in str(DB_FILE) and "/e2e-confirm" in str(DB_FILE), DB_FILE
+assert "/work/" in DB_FILE.as_posix() and "/e2e-confirm" in DB_FILE.as_posix(), DB_FILE
 DB_FILE.parent.mkdir(parents=True, exist_ok=True)
 db.init_db()
 for name in ["confirm-A", "confirm-B", "confirm-C"]:

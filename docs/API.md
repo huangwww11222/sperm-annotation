@@ -62,6 +62,10 @@
 
 ### 正常参照与短时风险观察
 
+新版“本帧所有对象无异常”使用原 feedback API，另带 `scope:"frame"`（仅 `decision:"normal"`）。默认/省略 `scope` 保持以上逐对象旧契约，`corrected/reset` 仍逐对象。帧级确认不按请求 `objectId` 限定范围：服务端读取暂停帧全部有效对象、人工修框优先、应用删除规则；包括正常对象，缺失异常对象的有效框则拒绝全部操作。不能用客户端传来的框、对象列表或参照取代实际数据。
+
+每个有效对象追加一个 normal 事件，带共同 `checkpointId`、`scope:"frame"`、`createdAt`/`userId`；`geometryReference` 带 `checkpoint:true` 和实际像素 bbox/name/frameIndex，可带真实 maskArea。实际相交组合保存 overlapReferences，已人工修框的对象不采纳旧 AI 运动样本。全部事件、所有暂停项的清除和版本/回执一次原子保存，版本只增加一次。失败不部分确认；原键重放返回原响应且不新增检查点。后续从事件恢复最新适用检查点作为固定尺寸基准，reset 或更新人工框按原规则优先；原人工标注和 AI 数据不改写。
+
 尺寸/形状的 `normal` 可在 `geometryReference` 追加正值 `maskArea`（取自服务端模型结果；未知不填），恢复时最多使用每对象最近 3 个完整人工认可框，不拼接不同框的宽高范围。原人工框与来源不改变。续追校验最新适用的正常参考确实已载入；删除、人工修正、重置或分支时序使参照不适用时按各自规则处理，不把缺失参考静默当正常。
 
 对重叠原因的 `normal`，事件可追加 `overlapReferences:[{objectIds:[a,b],frameIndex,bboxes:[boxA,boxB],source:"confirmed-normal"}]`，仅从同帧实际对象及全部明确的重叠组合生成；不接受客户端提供组合或坐标。认可只限于这对对象的相近状态，不豁免新的伙伴、明显恶化、分离后的新风险或独立异常。成功反馈可返回兼容扩展 `confirmedReference:{eventId,geometryReference|null,overlapReferences:[]}`，原键重放保留原摘要。
