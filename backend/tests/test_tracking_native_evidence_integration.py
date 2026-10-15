@@ -6,25 +6,34 @@ import pytest
 from .test_tracking_adaptive_feedback import FakeEngine, _geometry_segment
 
 
+@pytest.fixture(autouse=True)
+def simulated_source(tmp_path):
+    (tmp_path / "video.avi").write_bytes(b"simulated-engine-source")
+
+
 def setup(monkeypatch, *, status='supported', coverage='no_clear_loss', fault=None):
     from app.services import tracking_image_evidence
     seen = {'closed': False, 'observed': []}
 
     class Images:
         def __init__(self, video, **options):
-            seen['references'] = options['manual_baselines']
+            seen['references'] = options['manual_baselines']; seen['video'] = video
         def __enter__(self): return self
         def __exit__(self, *args): seen['closed'] = True
         def observe(self, frame, boxes, masks):
             seen['observed'].append(frame)
             if fault == frame:
                 raise RuntimeError('injected probe fault')
-            return {oid: {'version': 1, 'source': 'native-frame-mask-v1', 'objectId': oid,
+            return {oid: {'version': 2, 'source': 'native-frame-mask-v2', 'objectId': oid,
                           'frameIndex': frame, 'bbox': box, 'maskArea': 1000,
+                          'sourceSignature': __import__('app.video_frames', fromlist=['source_signature']).source_signature(seen['video']),
+                          'geometryReferenceFrameIndex': seen['references'][oid].frame_index,
+                          'geometryReferenceBBox': seen['references'][oid].bbox,
                           'status': status if oid == 7 else 'supported',
-                          'head': {'status': 'matched', 'confidence': .99, 'radius': 5,
+                          'head': {'status': 'matched', 'associationStatus': 'reliable', 'confidence': .99, 'radius': 5,
                                    'point': [(box[0]+box[2])/2, (box[1]+box[3])/2],
                                    'referenceFrameIndex': seen['references'][oid].frame_index,
+                                   'referenceBBox': seen['references'][oid].bbox,
                                    'referencePoint': [(seen['references'][oid].bbox[0]+seen['references'][oid].bbox[2])/2,
                                                       (seen['references'][oid].bbox[1]+seen['references'][oid].bbox[3])/2]},
                           'coverage': {'status': coverage if oid == 7 else 'no_clear_loss'},

@@ -330,7 +330,8 @@ def test_normal_size_confirmation_saves_server_reference_without_redrawing(contr
     assert response.status_code == 200
     body = response.json()
     event = body["trackingFeedbackEvents"][-1]
-    assert event["geometryReference"] == {"objectId": 7, "frameIndex": 1, "bbox": expected_box, "source": "confirmed-normal"}
+    assert event["geometryReference"] == {"objectId": 7, "frameIndex": 1, "bbox": expected_box,
+                                          "source": "confirmed-normal", "checkpoint": True}
     assert body["normalMotionSamples"] == []
     stored = annotation_state.read_state(root)
     assert stored["manualAnnotations"] == state["manualAnnotations"]
@@ -370,9 +371,15 @@ def test_size_confirmation_rejects_invalid_server_geometry(controls, box):
     assert annotation_state.read_state(root)["revision"] == 0
 
 
-def test_normal_motion_feedback_does_not_rebase_shape(controls):
+def test_normal_object_checkpoint_separates_geometry_from_motion_and_manual_source(controls):
     client, root, state = controls
-    assert "geometryReference" not in feedback(client).json()["trackingFeedbackEvents"][-1]
+    result = feedback(client).json()
+    event = result["trackingFeedbackEvents"][-1]
+    assert event['geometryReference'] == {'objectId': 7, 'frameIndex': 1, 'bbox': [10, 10, 30, 30],
+                                          'source': 'confirmed-normal', 'checkpoint': True}
+    assert result['normalMotionSamples'][0]['features'] == {'motionNormalized': 1.4}
+    assert annotation_state.read_state(root)['manualAnnotations'] == state['manualAnnotations']
+    assert not event.get('identityReference')  # legacy geometry is not identity trust
 
 
 def test_combined_shape_and_motion_confirmation_records_independent_evidence(controls):

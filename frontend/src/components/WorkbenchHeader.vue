@@ -10,10 +10,10 @@ defineProps<{ title: string; description?: string }>()
 </template>
 
 <style scoped>
-.workbench-heading{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:40px;flex-shrink:0}
+.workbench-heading{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:28px;flex-shrink:0}
 .workbench-heading-text{display:flex;align-items:baseline;gap:14px;min-width:0}
-.workbench-heading h2{margin:0;font-size:19px;font-weight:650;letter-spacing:-.02em;color:var(--text);white-space:nowrap;flex-shrink:0}
-.workbench-heading p{margin:0;color:var(--muted);font-size:11px;line-height:1.5;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.workbench-heading h2{margin:0;font-size:18px;font-weight:650;letter-spacing:-.02em;color:var(--text);white-space:nowrap;flex-shrink:0}
+.workbench-heading p{margin:0;color:var(--muted);font-size:12px;line-height:1.5;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .workbench-heading-actions{display:flex;align-items:center;gap:12px;flex-shrink:0}
-@media(max-width:1100px){.workbench-heading-text{gap:8px}.workbench-heading p{font-size:10px}}
+@media(max-width:1100px){.workbench-heading-text{gap:8px}.workbench-heading p{font-size:12px}}
 </style>

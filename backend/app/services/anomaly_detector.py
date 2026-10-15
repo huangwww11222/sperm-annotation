@@ -52,7 +52,14 @@ class AnomalyConfig:
     GEOMETRY_EXTREME_DIMENSION_MAX: float = 2.50
     GEOMETRY_EXTREME_ASPECT_CHANGE: float = 4.00
     GEOMETRY_EXTREME_MASK_LOSS: float = 0.25
+    # With a current native image/Mask observation, a rotating flexible tail
+    # cannot be judged lost from axis-aligned width/height/area alone. These
+    # conservative whole-box scale limits still guard clear collapse/explosion
+    # against a fixed human reference; AI output never updates the reference.
+    GEOMETRY_EXTREME_DIAGONAL_MIN: float = 0.40
+    GEOMETRY_EXTREME_DIAGONAL_MAX: float = 2.00
     IMAGE_PERSISTENCE_FRAMES: int = 3
+    SHARED_CORE_PERSISTENCE_FRAMES: int = 12
     INDEPENDENT_MASK_IOU_MAX: float = 0.20
 
     # Motion is expressed in manual-box diagonals per 1/30 second. These are
@@ -171,10 +178,12 @@ class _ObjectState:
     geometry_started_frame: int | None = None
     geometry_last_frame: int | None = None
     geometry_category: str | None = None
+    mask_area_logged_decision: str | None = None
     image_count: int = 0
     image_started_frame: int | None = None
     image_last_frame: int | None = None
     image_category: str | None = None
+    image_partner_object_id: int | None = None
     head_motion_history: list[list[float]] = field(default_factory=list)
     head_motion_frame_indices: list[int] = field(default_factory=list)
     motion_reference_kind: str = "bbox"
@@ -292,6 +301,7 @@ class AnomalyDetector:
         state.image_count = 0
         state.image_started_frame = state.image_last_frame = None
         state.image_category = None
+        state.image_partner_object_id = None
 
     def set_manual_baseline(self, object_id: int, bbox, frame_index: int, name: str | None = None) -> None:
         """Replace the baseline; callers must pass only ``source=manual``."""
@@ -402,8 +412,9 @@ class AnomalyDetector:
 
         A source label is provenance, not authentication. The internal producer
         must have checked the native image and real mask; this consumer rejects
-        stale, mismatched, nonfinite or inconsistent summaries. Invalid/unknown
-        evidence cannot become a geometry or overlap exemption.
+        stale, mismatched, nonfinite or inconsistent summaries. Unknown identity
+        remains unknown. Only a separately verified native observation can
+        downgrade weak rectangle-only accusations; it cannot approve identity.
         """
         if payload is None:
             return None, None
@@ -431,11 +442,16 @@ class AnomalyDetector:
 
         if not isinstance(payload, dict) or not finite_json(payload):
             return None, "invalid_or_nonfinite_summary"
-        if (type(payload.get("version")) is not int or payload.get("version") != 1
-                or payload.get("source") != "native-frame-mask-v1"
+        version = payload.get('version')
+        if (type(version) is not int or version not in (1, 2)
+                or payload.get("source") != f"native-frame-mask-v{version}"
                 or type(payload.get("objectId")) is not int or payload.get("objectId") != oid
                 or type(payload.get("frameIndex")) is not int or payload.get("frameIndex") != frame_index):
             return None, "object_frame_or_version_mismatch"
+        if version == 2:
+            expected_signature = getattr(self, 'image_source_signature', None)
+            if expected_signature is not None and payload.get('sourceSignature') != expected_signature:
+                return None, 'source_signature_mismatch'
         bound_box = payload.get("bbox")
         if (not isinstance(bound_box, (list, tuple)) or len(bound_box) != 4
                 or not all(number(v) for v in bound_box)
@@ -449,13 +465,15 @@ class AnomalyDetector:
               or abs(float(mask_area) - float(bound_area)) > 1e-6):
             return None, "mask_area_mismatch"
         status, head, coverage = payload.get("status"), payload.get("head"), payload.get("coverage")
-        if (status not in {"supported", "risk", "unknown"} or not isinstance(head, dict)
+        if (status not in {"supported", "risk", "unknown", "warning", "uncertain"} or not isinstance(head, dict)
                 or not isinstance(coverage, dict)
                 or head.get("status") not in {"matched", "lost", "ambiguous", "unknown"}
-                or coverage.get("status") not in {"no_clear_loss", "tail_loss", "foreign_core", "merge", "unknown"}
+                or coverage.get("status") not in {"no_clear_loss", "tail_loss", "foreign_core", "merge", "unknown", "mask_contamination", "local_mask_coverage", "subject_present_uncertain"}
                 or not isinstance(payload.get("reasons"), list)
                 or any(not isinstance(reason, str) for reason in payload["reasons"])):
             return None, "invalid_evidence_status"
+        if any('metrics' in part and not isinstance(part['metrics'], dict) for part in (head, coverage)):
+            return None, 'invalid_evidence_metrics'
         for label in ("point", "previousPoint", "referencePoint"):
             if head.get(label) is not None and not point(head[label]):
                 return None, "invalid_head_point"
@@ -467,7 +485,10 @@ class AnomalyDetector:
         reference_frame = head.get("referenceFrameIndex")
         if reference_frame is not None and (type(reference_frame) is not int or not 0 <= reference_frame <= frame_index):
             return None, "invalid_reference_head_frame"
-        if status in {"supported", "risk"}:
+        has_optical_reference = (version == 2 and any(value is not None for value in (
+            head.get('referenceFrameIndex'), head.get('referencePoint'), head.get('referenceBBox'),
+            payload.get('geometryReferenceFrameIndex'), payload.get('geometryReferenceBBox'))))
+        if status in {"supported", "risk", "warning", "uncertain"} or has_optical_reference:
             # Reusing a current AI bbox must not revive an optical anchor from
             # before a human edit/checkpoint. The referenced core must be bound
             # to the latest applicable human geometry, not just an earlier frame.
@@ -477,11 +498,30 @@ class AnomalyDetector:
                 references.append(baseline)
             newest = max((ref.frame_index for ref in references), default=None)
             reference_point = head.get("referencePoint")
-            matching = [ref for ref in references if ref.frame_index == reference_frame]
-            if (type(reference_frame) is not int or newest is None or reference_frame != newest
+            binding_frame = payload.get('geometryReferenceFrameIndex') if version == 2 else reference_frame
+            matching = [ref for ref in references if ref.frame_index == binding_frame]
+            if version == 2:
+                signature = payload.get('sourceSignature')
+                expected_signature = getattr(self, 'image_source_signature', None)
+                if expected_signature is not None and signature != expected_signature:
+                    return None, 'source_signature_mismatch'
+                geometry_box = payload.get('geometryReferenceBBox')
+                origin_box = head.get('referenceBBox')
+                if (not isinstance(origin_box,list) or len(origin_box)!=4 or not all(number(v) for v in origin_box)
+                        or not 0 <= origin_box[0] < origin_box[2] <= self.frame_width
+                        or not 0 <= origin_box[1] < origin_box[3] <= self.frame_height
+                        or not point(reference_point) or not origin_box[0] <= reference_point[0] <= origin_box[2]
+                        or not origin_box[1] <= reference_point[1] <= origin_box[3]):
+                    return None,'invalid_identity_origin_binding'
+                if (type(binding_frame) is not int or not isinstance(geometry_box,list) or len(geometry_box)!=4
+                        or not all(number(v) for v in geometry_box)
+                        or not any(all(abs(a-b)<1e-6 for a,b in zip(ref.bbox,geometry_box)) for ref in matching)
+                        or type(reference_frame) is not int or not 0 <= reference_frame <= binding_frame):
+                    return None, 'identity_geometry_binding_mismatch'
+            if (type(reference_frame) is not int or newest is None or binding_frame != newest
                     or not point(reference_point)
-                    or not any(ref.bbox[0] <= reference_point[0] <= ref.bbox[2]
-                               and ref.bbox[1] <= reference_point[1] <= ref.bbox[3] for ref in matching)
+                    or (version == 1 and not any(ref.bbox[0] <= reference_point[0] <= ref.bbox[2]
+                               and ref.bbox[1] <= reference_point[1] <= ref.bbox[3] for ref in matching))
                     or (previous_frame is not None and previous_frame < reference_frame)):
                 return None, "stale_or_unbound_human_optical_reference"
         if head.get("confidence") is not None and (not number(head["confidence"]) or not 0 <= head["confidence"] <= 1):
@@ -501,38 +541,174 @@ class AnomalyDetector:
                 or not (head["status"] in {"lost", "ambiguous"}
                         or coverage["status"] in {"tail_loss", "foreign_core", "merge"})):
             return None, "unsubstantiated_image_risk"
+        if version == 2 and status in ('supported','warning','uncertain'):
+            association = head.get('associationStatus')
+            if (association not in ('reliable','temporary-occlusion') or not number(bound_area) or bound_area <= 0
+                    or not point(head.get('point')) or not bbox[0] <= head['point'][0] <= bbox[2]
+                    or not bbox[1] <= head['point'][1] <= bbox[3]
+                    or coverage['status'] not in ('no_clear_loss','mask_contamination','local_mask_coverage','subject_present_uncertain')):
+                return None, 'unsubstantiated_identity_preservation'
         return copy.deepcopy(payload), None
 
     @staticmethod
     def _supported_identity(evidence) -> bool:
-        return bool(evidence and evidence.get("status") == "supported"
-                    and evidence["head"]["status"] == "matched"
-                    and evidence["coverage"]["status"] == "no_clear_loss")
+        return bool(evidence and evidence.get('version') == 2
+                    and evidence.get("status") in {"supported","warning","uncertain"}
+                    and evidence['head'].get('associationStatus') in {'reliable','temporary-occlusion'}
+                    and evidence["coverage"]["status"] in {'no_clear_loss','mask_contamination','local_mask_coverage','subject_present_uncertain'})
 
-    def _image_observation(self, oid: int, frame_index: int, evidence
+    def _native_observation_verified(self, evidence) -> bool:
+        """A current native read is not an affirmative identity match.
+
+        This is consumed only after strict object/frame/box/Mask validation.
+        The producer sets the flag after reading a valid native image and a
+        nonempty Mask, even if no trusted identity reference can be recovered.
+        Missing/broken reads and historical summaries keep the legacy fallback.
+        """
+        expected = getattr(self, 'image_source_signature', None)
+        return bool(evidence and evidence.get('version') == 2
+                    and evidence.get('observationVerified') is True
+                    and isinstance(expected, list) and len(expected) == 4
+                    and evidence.get('sourceSignature') == expected
+                    and type(evidence.get('maskArea')) in (int, float)
+                    and evidence['maskArea'] > 0
+                    and not set(evidence.get('reasons', [])).intersection({
+                        'invalid_bbox', 'native_image_unavailable', 'source_unavailable',
+                        'source_changed', 'roi_too_large', 'mask_unavailable',
+                        'reference_in_future', 'observation_in_future'}))
+
+    def _current_subject_supports_mask_change(self, evidence) -> bool:
+        """Require affirmative current image evidence before softening area loss.
+
+        A flexible body can rotate, bend or become faint while its Mask area
+        drops far below an explicitly accepted historic Mask. Native readability
+        alone is insufficient: unknown identity, a temporary occlusion or a
+        positive head/tail/merge diagnosis must retain the conservative fallback.
+        This helper consumes only strictly validated summaries, never raw input.
+        """
+        return bool(self._native_observation_verified(evidence)
+                    and evidence.get('status') in {'supported', 'warning', 'uncertain'}
+                    and evidence['head'].get('status') == 'matched'
+                    and evidence['head'].get('associationStatus') == 'reliable'
+                    and evidence['coverage'].get('status') in {
+                        'no_clear_loss', 'mask_contamination', 'local_mask_coverage',
+                        'subject_present_uncertain'})
+
+    def _single_core_conflict(self, oid: int, frame_index: int, evidence,
+                              boxes: dict[int, list[float]], mask_areas: dict[int, int | None],
+                              all_evidence: dict[int, dict[str, Any]]) -> dict[str, Any] | None:
+        """Cross-check a native unknown object's shared visible-core diagnosis.
+
+        A single visible foreground core plus two almost identical real Masks
+        is stronger evidence than overlapping rectangles. It is still not an
+        identity reference for the unknown object. A separately trusted partner
+        must confirm the same current optical point and Mask intersection.
+        """
+        if (not self._native_observation_verified(evidence) or evidence.get('status') != 'unknown'
+                or evidence.get('head', {}).get('status') != 'unknown'
+                or evidence['head'].get('point') is not None
+                or 'reference_missing' not in evidence.get('reasons', [])):
+            return None
+        value = evidence.get('singleCoreConflict')
+        if not isinstance(value, dict):
+            return None
+        peer_id = value.get('partnerObjectId')
+        if (type(peer_id) is not int or peer_id == oid or peer_id not in boxes
+                or type(value.get('visibleCoreCount')) is not int or value['visibleCoreCount'] != 1
+                or value.get('reason') != 'unreferenced_single_core_shared'):
+            return None
+
+        def number(v):
+            return type(v) in (int, float) and math.isfinite(v)
+
+        point, radius = value.get('point'), value.get('radius')
+        if (not isinstance(point, list) or len(point) != 2 or not all(number(v) for v in point)
+                or not number(radius) or radius <= 0
+                or not number(value.get('maskIoU')) or not .90 <= value['maskIoU'] <= 1
+                or any(not number(value.get(key)) or not .80 <= value[key] <= 1
+                       for key in ('maskHeadCoverage', 'partnerMaskHeadCoverage'))):
+            return None
+        peer, error = self._identity_evidence(peer_id, frame_index, boxes[peer_id],
+                                              mask_areas.get(peer_id), all_evidence.get(peer_id))
+        if (error or not self._native_observation_verified(peer)
+                or peer.get('status') not in ('supported', 'warning')
+                or peer['head']['status'] != 'matched'
+                or peer['head'].get('associationStatus') != 'reliable'):
+            return None
+        peer_point, peer_radius = peer['head']['point'], peer['head']['radius']
+        if (math.dist(point, peer_point) > max(2., min(radius, peer_radius)*.5)
+                or not .5 <= radius/peer_radius <= 2.):
+            return None
+        for item, other, current_box, expected_coverage in (
+                (evidence, peer_id, boxes[oid], value['maskHeadCoverage']),
+                (peer, oid, boxes[peer_id], value['partnerMaskHeadCoverage'])):
+            if not current_box[0] <= point[0] <= current_box[2] or not current_box[1] <= point[1] <= current_box[3]:
+                return None
+            metrics = item.get('coverage', {}).get('metrics', {})
+            if not isinstance(metrics, dict):
+                return None
+            overlaps = metrics.get('maskOverlap', {})
+            overlap = overlaps.get(str(other)) if isinstance(overlaps, dict) else None
+            if not number(overlap) or abs(overlap-value['maskIoU']) > 1e-6:
+                return None
+            if item is peer:
+                head_metrics = peer['head'].get('metrics', {})
+                if not isinstance(head_metrics, dict):
+                    return None
+                head_coverage = head_metrics.get('maskCoverage')
+                if not number(head_coverage) or abs(head_coverage-expected_coverage) > 1e-6:
+                    return None
+        return copy.deepcopy(value)
+
+    def _image_observation(self, oid: int, frame_index: int, evidence, *,
+                           single_core_conflict: dict[str, Any] | None = None
                            ) -> tuple[bool, bool, list[str], dict[str, Any]]:
         state = self._state(oid)
-        if not evidence or evidence["status"] != "risk":
+        if evidence and evidence['status'] == 'unknown' and self._native_observation_verified(evidence) and single_core_conflict is None:
+            # The read succeeded but identity could not be established. Keep
+            # this visible without turning uncertainty into a repeated pause
+            # or an assertion that the object is correctly tracked.
+            self._reset_image_observation(state)
+            return False, True, ['image_identity_unknown'], {
+                'image_quality_reasons': evidence.get('reasons', []),
+                'image_identity_status': 'unknown',
+            }
+        if evidence and evidence['status'] == 'warning':
+            self._reset_image_observation(state)
+            return False, True, ['image_quality_warning'], {'image_quality_reasons': evidence.get('reasons', [])}
+        if not evidence or (evidence["status"] not in {"risk", "uncertain"} and single_core_conflict is None):
             self._reset_image_observation(state)
             return False, False, [], {}
         head, coverage = evidence["head"]["status"], evidence["coverage"]["status"]
-        category = f"head_{head}" if head in {"lost", "ambiguous"} else coverage
-        if state.image_last_frame == frame_index and state.image_category == category:
+        category = ('shared_core_unresolved' if single_core_conflict is not None
+                    else f"head_{head}" if head in {"lost", "ambiguous"} else coverage)
+        partner = single_core_conflict['partnerObjectId'] if single_core_conflict is not None else None
+        same_observation = state.image_category == category and state.image_partner_object_id == partner
+        if state.image_last_frame == frame_index and same_observation:
             pass
-        elif state.image_last_frame == frame_index - 1 and state.image_count and state.image_category == category:
+        elif state.image_last_frame == frame_index - 1 and state.image_count and same_observation:
             state.image_count += 1
         else:
             state.image_count = 1
             state.image_started_frame = frame_index
         state.image_last_frame = frame_index
         state.image_category = category
+        state.image_partner_object_id = partner
         required = max(1, int(self.config.IMAGE_PERSISTENCE_FRAMES))
+        if evidence['status'] == 'uncertain':
+            required = max(12, required*4)
+        if single_core_conflict is not None:
+            required = max(1, int(self.config.SHARED_CORE_PERSISTENCE_FRAMES))
         hard = state.image_count >= required
         reasons = [f"image_{category} observations={state.image_count}/{required} {'HARD' if hard else 'SOFT'}"]
         details = {"risk_type": "image", "image_risk_reasons": reasons,
                    "image_observation_count": state.image_count, "image_observation_required": required,
                    "image_observation_started_frame": state.image_started_frame,
                    "image_observation_category": category, "image_pending": not hard}
+        if single_core_conflict is not None:
+            details['single_core_conflict'] = single_core_conflict
+            details['image_identity_status'] = 'unknown'
+            details['image_observation_partner_object_id'] = partner
         if hard:
             details["pause_started_frame"] = state.image_started_frame
         if state.image_count in {1, required}:
@@ -656,6 +832,8 @@ class AnomalyDetector:
         base_area, cur_area = _bbox_area(baseline.bbox), _bbox_area(bbox)
         base_aspect, cur_aspect = _bbox_aspect(baseline.bbox), _bbox_aspect(bbox)
         area_ratio = cur_area / base_area if base_area else 0.0
+        base_diagonal = math.hypot(base_width, base_height)
+        diagonal_ratio = math.hypot(cur_width, cur_height)/base_diagonal if base_diagonal else 0.0
         width_ratio = cur_width / base_width if base_width else 0.0
         height_ratio = cur_height / base_height if base_height else 0.0
         aspect_ratio_ratio = cur_aspect / base_aspect if base_aspect else 0.0
@@ -673,6 +851,7 @@ class AnomalyDetector:
             "baseline_area": base_area,
             "current_area": cur_area,
             "area_ratio": area_ratio,
+            "diagonal_ratio": diagonal_ratio,
             "width_ratio": width_ratio,
             "height_ratio": height_ratio,
             "aspect_ratio_ratio": aspect_ratio_ratio,
@@ -737,8 +916,28 @@ class AnomalyDetector:
             key=lambda reference: reference.frame_index,
         )[-max(1, int(self.config.GEOMETRY_REFERENCE_LIMIT)):]
 
+    def _log_mask_area_decision(self, oid: int, frame_index: int, decision: str | None,
+                                current=None, reference=None, ratio=None) -> None:
+        """Log transitions only; per-frame measurements remain in diagnostics."""
+        state = self._state(oid)
+        previous = state.mask_area_logged_decision
+        if previous == decision:
+            return
+        state.mask_area_logged_decision = decision
+        logger = logging.getLogger('review.tracking')
+        if decision is not None:
+            logger.info(
+                'tracking.mask_area_candidate object=%s frame=%s current=%s reference=%s ratio=%.6f decision=%s previous=%s',
+                oid, frame_index, current, reference, ratio, decision, previous)
+        elif previous is not None:
+            logger.info('tracking.mask_area_candidate_cleared object=%s frame=%s previous=%s current=%s reference=%s ratio=%s',
+                        oid, frame_index, previous, current, reference, ratio)
+
     def _geometry_observation(self, oid: int, frame_index: int, bbox: list[float], mask_area: int | None = None, *,
-                              geometry_supported: bool = False
+                              geometry_supported: bool = False,
+                              native_observation_verified: bool = False,
+                              mask_area_supported: bool = False,
+                              log_mask_decision: bool = True,
                               ) -> tuple[bool, bool, list[str], dict[str, Any]]:
         state, cfg = self._state(oid), self.config
         references: list[tuple[ManualBaseline | ConfirmedGeometryReference, str]] = []
@@ -750,23 +949,31 @@ class AnomalyDetector:
             state.geometry_count = 0
             state.geometry_started_frame = state.geometry_last_frame = None
             state.geometry_category = None
+            if log_mask_decision:
+                self._log_mask_area_decision(oid, frame_index, None, current=mask_area)
             return False, False, [], {}
         checks = [self._geometry_check(bbox, reference, source) for reference, source in references]
         def physical_extreme(check):
             detail = check[3]
+            if native_observation_verified:
+                return ((detail['diagonal_ratio'] < cfg.GEOMETRY_EXTREME_DIAGONAL_MIN
+                         and not detail['side_exit_shrink_ignored'])
+                        or detail['diagonal_ratio'] > cfg.GEOMETRY_EXTREME_DIAGONAL_MAX)
             return ((detail["area_ratio"] < cfg.GEOMETRY_EXTREME_AREA_MIN
                      and not detail["side_exit_shrink_ignored"])
                     or detail["area_ratio"] > cfg.GEOMETRY_EXTREME_AREA_MAX)
         hard, warning, reasons, details = min(
             reversed(checks),
-            key=lambda check: 3 if (physical_extreme(check) if geometry_supported else check[3].get("geometry_extreme"))
+            key=lambda check: 3 if (physical_extreme(check) if geometry_supported or native_observation_verified else check[3].get("geometry_extreme"))
             else 2 if check[0] else 1 if check[1] else 0,
         )
-        if geometry_supported:
-            # Axis-aligned width, height and aspect alone can be arbitrarily
-            # affected by a rotating tail. Independent support downgrades them;
-            # catastrophic area and explicit accepted-mask loss remain separate.
-            details["geometry_supported_by_identity"] = True
+        if geometry_supported or native_observation_verified:
+            # A rotating tail changes axis-aligned dimensions without proving
+            # subject loss. Independent identity support or an explicitly
+            # verified native observation downgrades these weak accusations.
+            # Unknown identity is never relabelled as affirmative support.
+            details["geometry_supported_by_identity"] = geometry_supported
+            details["geometry_native_observation_verified"] = native_observation_verified
             details["geometry_bbox_only_extreme"] = bool(details.get("geometry_extreme"))
             details["geometry_extreme"] = physical_extreme((hard, warning, reasons, details))
             if not details["geometry_extreme"]:
@@ -774,6 +981,20 @@ class AnomalyDetector:
                 hard = False
                 reasons = [reason.replace(" HARD", " SOFT") for reason in reasons]
                 details["geometry_observed_risk_reasons"] = list(reasons)
+            if native_observation_verified:
+                details['geometry_thresholds']['manual_diagonal_ratio'] = {
+                    'min': cfg.GEOMETRY_EXTREME_DIAGONAL_MIN,
+                    'max': cfg.GEOMETRY_EXTREME_DIAGONAL_MAX,
+                    'extreme_min': cfg.GEOMETRY_EXTREME_DIAGONAL_MIN,
+                    'extreme_max': cfg.GEOMETRY_EXTREME_DIAGONAL_MAX,
+                }
+                # Ratio diagnostics are still useful, but only the new physical
+                # scale guard may be the actionable geometry cause here.
+                reasons = [reason.replace(' HARD', ' SOFT') for reason in reasons]
+                if details['geometry_extreme']:
+                    hard = True
+                    reasons.append(f"manual_diagonal_ratio={details['diagonal_ratio']:.3f} HARD")
+                details['geometry_bbox_only_warning'] = bool(warning and not hard)
         details["confirmed_geometry_frame"] = max((reference.frame_index for reference in confirmed), default=None)
         details["geometry_reference_count"] = len(references)
         confirmed_areas = [float(reference.mask_area) for reference in confirmed
@@ -781,6 +1002,7 @@ class AnomalyDetector:
                            and reference.mask_area > 0]
         if state.manual_baseline and state.manual_baseline.mask_area:
             confirmed_areas.append(state.manual_baseline.mask_area)
+        mask_decision = None
         if confirmed_areas and isinstance(mask_area, (int, float)) and math.isfinite(mask_area) and mask_area >= 0:
             # Loss is extreme only relative to every explicitly accepted mask.
             # Neither the initial rectangular prompt nor AI history supplies it.
@@ -788,9 +1010,24 @@ class AnomalyDetector:
             ratio = mask_area / mask_reference
             details.update(current_mask_area=mask_area, mask_reference_area=mask_reference, mask_area_ratio=ratio)
             if ratio < cfg.GEOMETRY_EXTREME_MASK_LOSS and not details.get("side_exit_shrink_ignored"):
-                hard = True
-                details["geometry_extreme"] = True
-                reasons.append(f"confirmed_mask_area_ratio={ratio:.3f} HARD")
+                # A historical area ratio alone cannot overrule affirmative
+                # current head/coverage evidence. This is a warning, not a new
+                # human approval; independent image/motion/scale protection is
+                # evaluated unchanged and a later failed read restores fallback.
+                supported = native_observation_verified and mask_area_supported
+                mask_decision = ('reliable_current_subject_warning' if supported
+                                 else 'extreme_mask_loss_fallback')
+                details['mask_area_decision'] = mask_decision
+                if supported:
+                    warning = True
+                else:
+                    hard = True
+                    details["geometry_extreme"] = True
+                reasons.append(f"confirmed_mask_area_ratio={ratio:.3f} {'SOFT' if supported else 'HARD'}")
+        if log_mask_decision:
+            self._log_mask_area_decision(oid, frame_index, mask_decision, current=mask_area,
+                                        reference=details.get('mask_reference_area'),
+                                        ratio=details.get('mask_area_ratio'))
         extreme = bool(details.get("geometry_extreme"))
         details["geometry_risk_reasons"] = [reason for reason in reasons if reason.endswith(" HARD")]
         shrinking = any(details[label] < minimum for label, minimum in (
@@ -905,7 +1142,13 @@ class AnomalyDetector:
         matched = next((reference for reference in references
                         if self._pair_reference_matches(reference, boxes, coverage, iou)), None)
         independent = self._independent_mask_pair(pair, identity_evidence or {})
-        suspect = coverage >= cfg.OVERLAP_HARD and iou >= cfg.OVERLAP_MERGE_IOU and matched is None and not independent
+        native_reviewed = all(self._native_observation_verified((identity_evidence or {}).get(oid)) for oid in pair)
+        # Similar rectangles are not proof that naturally approaching heads
+        # became one tracked identity. Native head/core/major-loss risks have
+        # their own independent observation streaks in _image_observation;
+        # a high BBox IoU must not double-count or accelerate that same evidence.
+        suspect = (coverage >= cfg.OVERLAP_HARD and iou >= cfg.OVERLAP_MERGE_IOU
+                   and matched is None and not independent and not native_reviewed)
         if suspect:
             if state.last_frame == frame_index:
                 pass
@@ -930,7 +1173,8 @@ class AnomalyDetector:
                 "reference_source": matched.source if matched else None,
                 "reference_boxes": matched.boxes if matched else None,
                 "normal_reference_matched": matched is not None,
-                "independent_masks_supported": independent}
+                "independent_masks_supported": independent,
+                "native_bbox_overlap_only": native_reviewed}
 
     def prime_observations(self, frames: Iterable[dict[str, Any]], seed_frame: int,
                            seed_boxes: dict[int, list[float]], *, reset_frames: dict[int, int] | None = None) -> None:
@@ -947,7 +1191,7 @@ class AnomalyDetector:
         seed_frame = int(seed_frame)
         active = set(seed_boxes)
         count = max(int(self.config.GEOMETRY_PERSISTENCE_FRAMES), int(self.config.OVERLAP_PERSISTENCE_FRAMES),
-                    int(self.config.IMAGE_PERSISTENCE_FRAMES), 1)
+                    int(self.config.IMAGE_PERSISTENCE_FRAMES), int(self.config.SHARED_CORE_PERSISTENCE_FRAMES), 1)
         rows: dict[int, dict[str, Any]] = {}
         for row in frames:
             if not isinstance(row, dict):
@@ -981,9 +1225,13 @@ class AnomalyDetector:
                 boxes[oid], masks[oid] = bbox, obj.get("mask_area")
                 details = obj.get("anomaly_details", {})
                 if isinstance(details, dict):
-                    evidence, _ = self._identity_evidence(oid, frame, bbox, masks[oid], details.get("identity_evidence"))
+                    evidence, evidence_error = self._identity_evidence(oid, frame, bbox, masks[oid], details.get("identity_evidence"))
                     if evidence is not None:
                         evidence_by_frame.setdefault(frame, {})[oid] = evidence
+                    elif evidence_error:
+                        logging.getLogger('review.tracking').warning(
+                            'tracking.image_evidence_rejected object=%s frame=%s phase=history reason=%s',
+                            oid, frame, evidence_error)
                     for evidence in details.get("overlap_pairs", []):
                         if isinstance(evidence, dict) and isinstance(evidence.get("object_ids"), list) and len(evidence["object_ids"]) == 2:
                             pair = tuple(sorted(evidence["object_ids"]))
@@ -1042,8 +1290,13 @@ class AnomalyDetector:
                 if evidence is not None:
                     frame_evidence[oid] = evidence
                 self._geometry_observation(oid, frame, boxes[oid], masks.get(oid),
-                                           geometry_supported=self._supported_identity(evidence))
-                self._image_observation(oid, frame, evidence)
+                                           geometry_supported=self._supported_identity(evidence),
+                                           native_observation_verified=self._native_observation_verified(evidence),
+                                           mask_area_supported=self._current_subject_supports_mask_change(evidence),
+                                           log_mask_decision=False)
+                conflict = self._single_core_conflict(oid, frame, evidence, boxes, masks,
+                                                       evidence_by_frame.get(frame, {}))
+                self._image_observation(oid, frame, evidence, single_core_conflict=conflict)
                 if evidence and evidence["status"] in {"supported", "risk"} and evidence["head"]["status"] == "matched":
                     self._remember_head_motion(state, frame, evidence["head"]["point"])
             for pair in list(self._overlap_states):
@@ -1069,6 +1322,8 @@ class AnomalyDetector:
         ignored_ids = {int(value) for value in (ignored_object_ids or [])}
         first_report = not self.reports
         valid_evidence: dict[int, dict[str, Any]] = {}
+        visible_boxes = {int(oid): bbox for oid, bbox in frame_objects.items()
+                         if int(oid) not in ignored_ids and not self._state(int(oid)).is_dead}
 
         # Explicitly omitted annotation frames do not terminate model identity
         # or turn a hidden anomaly into a permanent exemption in later frames.
@@ -1146,14 +1401,21 @@ class AnomalyDetector:
             hard, warning, geometry_reasons, geometry_details = self._geometry_observation(
                 oid, frame_index, bbox, (mask_areas or {}).get(oid),
                 geometry_supported=self._supported_identity(evidence),
+                native_observation_verified=self._native_observation_verified(evidence),
+                mask_area_supported=self._current_subject_supports_mask_change(evidence),
             )
             reasons.extend(geometry_reasons)
             details.update(geometry_details)
 
-            head = (evidence["head"] if evidence and evidence["status"] in {"supported", "risk"}
+            head = (evidence["head"] if evidence and evidence["status"] in {"supported", "risk", "warning", "uncertain"}
                     and evidence["head"]["status"] == "matched" else None)
-            motion_hard, motion_warning, motion_reasons, motion_details = self._motion_check(
-                oid, state, frame_index, bbox, head_evidence=head)
+            if evidence and evidence['status'] == 'uncertain' and evidence['head'].get('associationStatus') == 'temporary-occlusion':
+                # A tail-changing BBox centre must not substitute for an
+                # explicitly ambiguous optical head during bounded occlusion.
+                motion_hard, motion_warning, motion_reasons, motion_details = False, True, [], {'motion_reference_kind': 'temporarily-unavailable'}
+            else:
+                motion_hard, motion_warning, motion_reasons, motion_details = self._motion_check(
+                    oid, state, frame_index, bbox, head_evidence=head)
             hard = hard or motion_hard
             warning = warning or motion_warning
             reasons.extend(motion_reasons)
@@ -1161,7 +1423,10 @@ class AnomalyDetector:
             if motion_hard:
                 details["pause_started_frame"] = min(details.get("pause_started_frame", frame_index), frame_index)
 
-            image_hard, image_warning, image_reasons, image_details = self._image_observation(oid, frame_index, evidence)
+            conflict = self._single_core_conflict(oid, frame_index, evidence, visible_boxes,
+                                                   mask_areas or {}, identity_evidence or {})
+            image_hard, image_warning, image_reasons, image_details = self._image_observation(
+                oid, frame_index, evidence, single_core_conflict=conflict)
             previous_start = details.get("pause_started_frame")
             details.update(image_details)
             if image_hard and isinstance(previous_start, int):

@@ -42,17 +42,20 @@ def _evidence(oid, frame, box, *, status="supported", head_status="matched",
               coverage_status="no_clear_loss", point=None, previous_point=None,
               previous_frame=None, reference_frame=0, reference_point=None,
               mask_area=1000, reasons=None):
-    """Full object/frame/geometry binding matching the internal v1 contract."""
-    head = {"status": head_status, "confidence": .97,
+    """Explicit synthetic v2 identity and independent human geometry binding."""
+    head = {"status": head_status, "confidence": .97, "associationStatus": "reliable",
             "referencePoint": list(reference_point if reference_point is not None else [260, 270]),
-            "referenceFrameIndex": reference_frame}
+            "referenceFrameIndex": reference_frame,
+            "referenceBBox": _box(center=reference_point if reference_point is not None else [260,270])}
     if head_status == "matched":
         head.update(point=list(point or _center(box)), radius=5.0)
     if previous_point is not None:
         head.update(previousPoint=list(previous_point),
                     previousFrameIndex=frame - 1 if previous_frame is None else previous_frame)
     return {
-        "version": 1, "source": "native-frame-mask-v1", "objectId": oid,
+        "version": 2, "source": "native-frame-mask-v2", "objectId": oid,
+        "geometryReferenceFrameIndex": reference_frame,
+        "geometryReferenceBBox": _box(center=head["referencePoint"]),
         "frameIndex": frame, "bbox": list(box), "maskArea": mask_area,
         "status": status, "head": head,
         "coverage": {"status": coverage_status},
@@ -66,6 +69,12 @@ def _push(detector, frame, boxes, *, evidences=None, mask_areas=None, ignored=No
     if ignored is not None:
         kwargs["ignored_object_ids"] = ignored
     if evidences is not None:
+        for oid, evidence in evidences.items():
+            baseline = detector.states.get(oid).manual_baseline if oid in detector.states else None
+            if baseline and evidence.get("geometryReferenceFrameIndex") == baseline.frame_index:
+                evidence["geometryReferenceBBox"] = list(baseline.bbox)
+                if evidence["head"].get("referenceFrameIndex") == baseline.frame_index:
+                    evidence["head"]["referenceBBox"] = list(baseline.bbox)
         kwargs["identity_evidence"] = evidences
     return detector.push(frame, boxes, **kwargs)
 
@@ -229,7 +238,7 @@ def test_wrong_or_invalid_evidence_binding_cannot_suppress_bbox_protection(bindi
         elif binding == "other_object": evidence["objectId"] = 2
         elif binding == "other_bbox": evidence["bbox"] = _box()
         elif binding == "other_mask_area": evidence["maskArea"] = 2000
-        elif binding == "version": evidence["version"] = 2
+        elif binding == "version": evidence["version"] = 3
         elif binding == "boolean_version": evidence["version"] = True
         elif binding == "boolean_frame": evidence["frameIndex"] = True
         elif binding == "nonfinite_point": evidence["head"]["point"] = [math.nan, 270]
@@ -548,3 +557,40 @@ def test_optical_reference_point_must_belong_to_the_actual_human_box():
         1, frame, current, point=[260, 270], previous_point=[260, 270],
         reference_frame=0, reference_point=[220, 270])}) for frame in (1, 2, 3)]
     assert [report.should_pause for report in reports] == [False, False, True]
+
+
+def test_legacy_supported_peak_does_not_silently_grant_new_geometry_exemption():
+    detector=_detector();current=_box(55,60)
+    reports=[]
+    for frame in (1,2,3):
+        evidence=_evidence(1,frame,current,previous_point=[260,270])
+        evidence.update(version=1,source='native-frame-mask-v1')
+        reports.append(detector.push(frame,{1:current},mask_areas={1:1000},identity_evidence={1:evidence}))
+    assert [r.should_pause for r in reports]==[False,False,True]
+
+
+def test_temporary_optical_occlusion_freezes_bbox_fallback_but_cannot_continue_indefinitely():
+    detector=_detector();current=_box(32,160)
+    reports=[]
+    for frame in range(1,13):
+        evidence=_evidence(1,frame,current,status='uncertain',head_status='ambiguous',coverage_status='subject_present_uncertain',point=[260,270])
+        evidence['head'].update(point=[260,270],radius=5.,associationStatus='temporary-occlusion')
+        reports.append(_push(detector,frame,{1:current},evidences={1:evidence}))
+    assert not any(r.should_pause for r in reports[:11])
+    assert reports[-1].should_pause
+    assert _item(reports[-1]).details['image_observation_required']==12
+    assert _item(reports[-1]).details['geometry_observation_count']==0
+
+
+@pytest.mark.parametrize('fault',['geometry_frame','geometry_box','origin_point','source'])
+def test_v2_independent_binding_cannot_waive_protection_when_malformed(fault):
+    detector=_detector();detector.image_source_signature=['source',123,456,789];current=_box(55,60)
+    reports=[]
+    for frame in (1,2,3):
+        evidence=_evidence(1,frame,current,previous_point=[260,270]);evidence['sourceSignature']=list(detector.image_source_signature)
+        if fault=='geometry_frame':evidence['geometryReferenceFrameIndex']=frame
+        elif fault=='geometry_box':evidence['geometryReferenceBBox']=current
+        elif fault=='origin_point':evidence['head']['referencePoint']=[3500,2500]
+        elif fault=='source':evidence['sourceSignature']=['other',123,456,789]
+        reports.append(detector.push(frame,{1:current},mask_areas={1:1000},identity_evidence={1:evidence}))
+    assert [r.should_pause for r in reports]==[False,False,True]

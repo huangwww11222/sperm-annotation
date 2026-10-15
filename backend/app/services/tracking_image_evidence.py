@@ -7,6 +7,7 @@ An unavailable or changed source remains unknown and cannot approve geometry.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Mapping, Sequence, TYPE_CHECKING
 
@@ -34,7 +35,8 @@ class NativeImageEvidence:
 
     def __init__(self, video_path: str | Path, *, fps: float, width: int,
                  height: int, manual_baselines: Mapping[int, ManualBaseline],
-                 seed_frame: int):
+                 seed_frame: int, identity_baselines: Mapping[int, ManualBaseline] | None = None,
+                 identity_references: Mapping[int, dict] | None = None):
         self.video_path = Path(video_path)
         self.width, self.height = int(width), int(height)
         self.seed_frame = int(seed_frame)
@@ -43,6 +45,8 @@ class NativeImageEvidence:
         self.probe = TrackingEvidenceProbe(fps=fps, frame_width=self.width,
                                            frame_height=self.height)
         self._baselines = dict(manual_baselines)
+        self._identity_baselines = None if identity_baselines is None else dict(identity_baselines)
+        self._identity_references = dict(identity_references or {})
         self._reader = None
         self._next_frame: int | None = None
         self._primed = False
@@ -50,6 +54,7 @@ class NativeImageEvidence:
         self._source_problem: str | None = None
         try:
             self._signature = tuple(source_signature(self.video_path))
+            self.probe.source_signature = list(self._signature)
         except (OSError, ValueError) as exc:
             self._signature = None
             self._source_problem = 'source_unavailable'
@@ -58,7 +63,11 @@ class NativeImageEvidence:
     def __enter__(self) -> NativeImageEvidence:
         if self._closed:
             raise RuntimeError('native image evidence reader is closed')
-        self._prime()
+        try:
+            self._prime()
+        except Exception:
+            self.close()
+            raise
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -121,6 +130,12 @@ class NativeImageEvidence:
         if self._primed:
             return
         self._primed = True
+        if self._identity_baselines is not None:
+            self._prime_identity_history()
+            self._baselines.clear()
+            self._identity_baselines.clear()
+            self._identity_references.clear()
+            return
         groups = {}
         for oid, baseline in self._baselines.items():
             if (type(oid) is not int or oid <= 0
@@ -147,6 +162,61 @@ class NativeImageEvidence:
                 # previous 4K frame while decoding the next baseline group.
                 del image
         self._baselines.clear()
+
+    def _prime_identity_history(self):
+        """Bounded legacy migration at tracking startup, never inside save locks.
+
+        Human shape acceptance and identity origins have different lifetimes.
+        For old checkpoints without compact reliable identities, recover the
+        optical trajectory from the last true manual frame. No AI mask or
+        rectangle is used to teach an identity during this recovery.
+        """
+        started = time.monotonic()
+        valid = {oid: baseline for oid, baseline in self._identity_baselines.items()
+                 if type(oid) is int and oid > 0 and baseline.source == 'manual'
+                 and type(baseline.frame_index) is int and 0 <= baseline.frame_index <= self.seed_frame}
+        saved = {oid: ref for oid,ref in self._identity_references.items()
+                 if oid in valid and isinstance(ref,dict)
+                 and type(ref.get('frameIndex')) is int
+                 and ref['frameIndex'] >= valid[oid].frame_index}
+        restored = self.probe.restore_references(saved, frame_limit=self.seed_frame)
+        groups = {}
+        for oid, baseline in valid.items():
+            if oid not in restored:
+                groups.setdefault(baseline.frame_index,{})[oid] = list(baseline.bbox)
+        starts = list(groups) + [self.probe._references[oid].last_frame for oid in restored]
+        if starts:
+            first = min(starts)
+            if self.seed_frame-first > 128:
+                # Avoid replaying thousands of 4K images on every restart. A
+                # missing legacy identity stays unknown; current geometry does
+                # not silently revive the invalid old brightest-core anchor.
+                log.warning('tracking.identity_warmup_skipped media=%s first=%s seed=%s reason=legacy_gap_exceeds_128', self.video_path.parent.name, first, self.seed_frame)
+                groups = {frame: boxes for frame,boxes in groups.items() if self.seed_frame-frame <= 128}
+                starts = list(groups) + [self.probe._references[oid].last_frame for oid in restored if self.seed_frame-self.probe._references[oid].last_frame <= 128]
+                for oid in list(restored):
+                    if self.seed_frame-self.probe._references[oid].last_frame > 128:
+                        self.probe._references.pop(oid, None)
+                first = min(starts) if starts else self.seed_frame+1
+            log.info('tracking.identity_warmup_started media=%s first=%s seed=%s restored=%s', self.video_path.parent.name, first, self.seed_frame, sorted(restored))
+            for frame in range(first,self.seed_frame+1):
+                image = self._read_observation(frame)
+                if image is None:
+                    # Failed intermediate decoding cannot be treated as a
+                    # trustworthy continuous identity path.
+                    self.probe._references.clear()
+                    break
+                try:
+                    self.probe.advance_references(frame,image)
+                    if frame in groups:
+                        self.probe.prime(frame,image,groups[frame])
+                finally:
+                    del image
+        for oid, baseline in self._baselines.items():
+            self.probe.bind_geometry(oid,baseline.frame_index,baseline.bbox)
+        self._release_reader()
+        log.info('tracking.identity_warmup_completed media=%s seed=%s reliable=%s elapsedMs=%s',
+                 self.video_path.parent.name,self.seed_frame,len(self.probe._references),round((time.monotonic()-started)*1000))
 
     def _read_observation(self, frame: int):
         try:
@@ -190,3 +260,46 @@ class NativeImageEvidence:
     def close(self):
         self._closed = True
         self._release_reader()
+
+
+def derive_identity_references(video_path, *, fps, width, height, frame_index,
+                               boxes, prior_references=None):
+    """One current-frame decode for server feedback; no historical warmup.
+
+    Callers supply only server-owned candidate state. This helper revalidates
+    its source signature, object, native bounds and current optical ownership.
+    Decoder failures propagate instead of being misrepresented as empty data.
+    """
+    path = Path(video_path)
+    signature = source_signature(path)
+    probe = TrackingEvidenceProbe(fps=fps,frame_width=width,frame_height=height)
+    probe.source_signature = list(signature)
+    restored = probe.restore_references(prior_references or {},frame_limit=frame_index)
+    reader = None
+    try:
+        reader = open_capture_at(path,frame_index)
+        ok,image = reader.read()
+        if not ok or not probe._image_ok(image) or int(round(reader.get(cv2.CAP_PROP_POS_FRAMES))) != frame_index+1:
+            raise FrameReadError(f'无法读取第 {frame_index} 帧身份参考')
+        if source_signature(path) != signature:
+            raise FrameReadError('原视频已变化，未保存身份参考',409)
+        probe.advance_references(frame_index,image)
+        # Joint priming is a legacy fallback on this one explicit human frame;
+        # it cannot replace an existing reliable identity with a new peak.
+        missing = {oid: box for oid,box in boxes.items() if oid not in restored}
+        if missing:
+            # Include restored rectangles as competitors but retain their
+            # validated references after the current-frame joint extraction.
+            retained = {oid:probe._references[oid] for oid in restored}
+            probe.prime(frame_index,image,boxes)
+            probe._references.update(retained)
+        for oid,box in boxes.items():
+            probe.bind_geometry(oid,frame_index,box)
+        result = probe.export_references(frame_index,boxes)
+        # Never certify two IDs from the same point, even if a legacy single
+        # frame happens to provide identical trusted rectangles.
+        conflicts = probe._candidate_conflicts({oid:{'point':ref['point'],'radius':ref['radius']} for oid,ref in result.items()})
+        return {oid:ref for oid,ref in result.items() if oid in restored and oid not in conflicts}
+    finally:
+        if reader is not None:
+            reader.release()

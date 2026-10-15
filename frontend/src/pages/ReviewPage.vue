@@ -21,6 +21,7 @@ watch(modal,async(value,previous)=>{
   else priorFocus?.focus()
 })
 const historical=ref<number|null>(null), jump=ref('1'), overlay=ref(false), zoom=ref(1), playing=ref(false)
+const autoFit=ref(true)
 const viewport=ref<HTMLElement|null>(null), drawing=ref<SVGSVGElement|null>(null), jumpInput=ref<HTMLInputElement|null>(null)
 const history=ref<ReviewObject[][]>([])
 const objectFilter=ref<'all'|'changed'>('all'), objectQuery=ref('')
@@ -62,7 +63,15 @@ async function list() { try { sessions.value=(await api.list()).items } catch(e)
 function applyFrame(f:Frame) { frame.value=f;working.value=clone(f.effectiveObjects);jump.value=String(f.frameIndex+1) }
 function fit() {
   if(!viewport.value||!session.value||pointer) return
+  autoFit.value=true
   zoom.value=Math.min((viewport.value.clientWidth-24)/session.value.media.width,(viewport.value.clientHeight-24)/session.value.media.height,1)
+}
+function changeZoom(delta:number) {
+  if(!session.value||pointer) return
+  // Occupying scrollbars resize the viewport too. Keep the user's scale until
+  // they explicitly fit again, including across frame and layout changes.
+  autoFit.value=false
+  zoom.value=Math.max(.1,Math.min(5,zoom.value+delta))
 }
 let pendingBookmark:{sid:string;index:number;revision:number;key:string}|null=null
 async function bookmark() {
@@ -281,7 +290,7 @@ function keydown(e:KeyboardEvent) {
 function beforeUnload(e:BeforeUnloadEvent){if(dirty.value||pending||busy.value){e.preventDefault();e.returnValue=''}}
 onMounted(async()=>{
   await list()
-  resizeObserver=new ResizeObserver(()=>fit());if(viewport.value)resizeObserver.observe(viewport.value)
+  resizeObserver=new ResizeObserver(()=>{if(autoFit.value)fit()});if(viewport.value)resizeObserver.observe(viewport.value)
   window.addEventListener('keydown',keydown);window.addEventListener('beforeunload',beforeUnload)
   removeGuard=addLeaveGuard(async()=>{stopPlayback();return await flush()})
 })
@@ -340,7 +349,7 @@ onUnmounted(()=>{alive=false;stopPlayback();cancelGesture();removeGuard();resize
           </div>
           <p v-else class="empty-state">{{ busy?'正在加载视频帧…':'选择左侧视频，查看原始标注并逐帧审查' }}</p>
         </div>
-        <div class="zoom-bar"><small>{{ isReadonly?'只读查看': '拖动框移动 · 拖动角点缩放' }}</small><button @click="zoom=Math.max(.1,zoom-.1)" aria-label="缩小">−</button><span>{{ Math.round(zoom*100) }}%</span><button @click="zoom=Math.min(5,zoom+.1)" aria-label="放大">+</button><button @click="fit" title="显示完整视频帧">适应窗口</button></div>
+        <div class="zoom-bar"><small>{{ isReadonly?'只读查看': '拖动框移动 · 拖动角点缩放' }}</small><button @click="changeZoom(-.1)" aria-label="缩小">−</button><span>{{ Math.round(zoom*100) }}%</span><button @click="changeZoom(.1)" aria-label="放大">+</button><button @click="fit" title="显示完整视频帧">适应窗口</button></div>
         <div class="review-controls"><button :disabled="!frame||busy||!!error" @click="togglePlay" :aria-label="playing?'暂停':'播放'">{{ playing?'Ⅱ':'▶' }}</button><span>{{ time(fi) }} / {{ time(total) }}</span><input class="timeline" type="range" aria-label="视频时间轴" min="0" :max="Math.max(0,total-1)" :value="fi" :disabled="busy||!frame" @change="navigate(Number(($event.target as HTMLInputElement).value))"/><button :disabled="busy||!frame||fi===0" @click="navigate(fi-1)" title="上一帧（←）">上一帧</button><button :disabled="busy||!frame||fi===total-1" @click="navigate(fi+1)" title="下一帧（→）">下一帧</button><label>跳转到 <input ref="jumpInput" v-model="jump" aria-label="跳转帧号" inputmode="numeric" :disabled="busy||!frame" /></label><button :disabled="busy||!frame" @click="doJump">确定</button></div>
       </main>
       </template>

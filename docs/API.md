@@ -50,15 +50,23 @@
 
 旧无版本请求携带的 `deletedTrackingIds` 只能是当前已有历史删除标记的子集（也可省略）；服务端保留完整当前集合，不删除既有标记。尝试新增历史删除标记同样返回 428，不能利用旧字段绕过版本校验。带版本及幂等键的当前客户端可正常删除和撤销。
 
-`POST /api/track` 新前端另携带 `Idempotency-Key`，同账号原键/输入在当前后端进程内返回同一个 taskId，原键用于不同输入返回 409；覆盖轮次仍校验，不能借回执绕过 generationId。旧无键客户端保持兼容。状态 GET 含 `stage`（queued/decoding/preparing_model/tracking/saving_results/paused/completed）、处理帧数与原始 `lastProcessedFrame`，不暴露请求 hash/key。模型失败在任务状态返回 failed 与具体 message，短 HTTP 超时不等于后台任务已失败。工作区浏览状态可在追踪中保存；改人工框、基准或删除规则返回 409。rewind 成功的 `overlayRegenerated` 为 false，不重编码源视频；结果发布原子完成。
+`POST /api/track` 新前端另携带 `Idempotency-Key`，同账号原键/输入在当前后端进程内返回同一个 taskId，原键用于不同输入返回 409；覆盖轮次仍校验，不能借回执绕过 generationId。旧无键客户端保持兼容。状态 GET 含 `stage`（queued/decoding/preparing_model/tracking/saving_results/paused/completed）、处理帧数与原始 `lastProcessedFrame`，不暴露请求 hash/key。模型失败在任务状态返回 failed 与具体 message，短 HTTP 超时不等于后台任务已失败。工作区浏览状态可在追踪中保存；改人工框、基准或删除规则返回 409。rewind 成功的 `overlayRegenerated` 为 false，不重编码源视频；结果发布原子完成。普通 rewind 将结果截断与被丢弃未来的身份/关系认可退休一起纳入两文件恢复日志，API 使用真实账号的内部 SQL 回执判断提交；不递增人工工作区 revision，不导致随后正常保存/续追的版本冲突。
 
 删除规则是 `deletedObjectIds:number[]`（整视频）和 `deletedFrameObjects:[{objectId,frameIndex}]`（单帧）；`deletedTrackingIds` 仅保留历史兼容。规则同时作用于人工/AI、seed、追踪读取、人工记录查询与送审。单帧删除不关闭后续该对象的追踪；整视频删除不允许该对象进入后续 seed。原追踪文件不物理抹除，撤销通过恢复工作区及移除对应删除标记实现。A/B/F 不随删除或撤销改变。
 
 删除预览前必须保存当前工作区。响应为 `{mediaId,objectId,name,revision,totalCount,frameCount,manualCount,aiCount,firstFrame,lastFrame}`；同对象同帧人工覆盖 AI 只算一框；帧号 0 起，无框时首末帧为 null。确认删除时仍用当前工作区版本，不能把预览数量当无需校验的删除许可。
 
-反馈请求为 `{expectedRevision,objectId,frameIndex,decision:'normal'|'corrected'|'reset',calibrate:boolean}`，使用 `Idempotency-Key`，与工作区共享版本。`reset` 不要求帧号，清该对象活动运动样本并使已确认尺寸参照失效，保留审计。`normal` 只在明确勾选校准且持久化追踪结果包含位移依据时生成 `normalMotionSamples`；每条为 `{objectId,frameIndex,reason:'motion',decision:'normal',calibrate:true,features:{motionNormalized}}`。数值取自服务端追踪数据，不接受客户提供阈值。`corrected` 要求当前帧已保存的人工框实际不同于异常原框，且不生成正常样本。 对尺寸/形状原因的 `normal`，服务端从实际追踪行取有效像素框，在该条 `trackingFeedbackEvents` 中保存 `geometryReference:{objectId,frameIndex,bbox,source:"confirmed-normal"}`；无须重画，且不依赖运动校准勾选。不接受客户端提供参照，不能将该框改写为人工标注。该字段为兼容旧事件的可选扩展。
+反馈请求为 `{expectedRevision,objectId,frameIndex,decision:'normal'|'corrected'|'reset',calibrate:boolean,scope?:'object'|'frame'}`，使用 `Idempotency-Key`，与工作区共享版本。`reset` 不要求帧号，清该对象活动运动样本并使已确认尺寸及身份参照失效，保留审计。`normal` 只在明确勾选校准且持久化追踪结果包含位移依据时生成 `normalMotionSamples`；每条为 `{objectId,frameIndex,reason:'motion',decision:'normal',calibrate:true,features:{motionNormalized}}`。数值取自服务端追踪数据，不接受客户提供阈值。已保存人工修框不学习旧 AI 位移。`corrected` 要求当前帧已保存的人工框实际不同于异常原框，且不生成正常样本。
+
+默认/`scope:"object"` 的“本对象正常”只清除该对象当前暂停，其他项继续待处理；正常事件从当前实际有效框保存 `geometryReference:{objectId,frameIndex,bbox,source:"confirmed-normal",checkpoint:true}`，已保存人工框优先，无须重画且不依赖运动校准。它更新该对象独立的几何检查点，不修改人工标注来源，也不重新选择框内最强光学核来当可信身份。消失或缺少有效框时拒绝正常确认。`pausedAnomalies` 返回尚待处理项，全部成功保存后才可续追；失败或原键重放不清除另一项。
 
 图像风险的逐对象 normal 同样保存上述实际参考；它可用于后续原图光学建档，不能把正常确认改成在线模型训练。主体位移样本在 features 追加 `referenceKind:"head"`，旧样本省略即 bbox；两类独立使用，避免旧框中心阈值放宽主体跳跃。
+
+追踪行的 v2 `identity_evidence` 可追加 `observationVerified`：仅由生产图像核验器在原图、BBox、非空二值Mask及框内占用有效时设置，不接受客户端宣称。该标志与 `status/head/identityReference` 独立，身份缺参考仍为unknown。当前源签名及帧/对象/框/Mask面积验证通过后，普通矩形形变和两框高重叠只作提示；独立图像风险、整体尺度极端与对象消失仍保护。历史Mask面积骤减仅在当前证据严格有效、主体可靠且无明确丢失时降提示；未知、失效或旧证据保留坍缩兜底。新增 `diagonal_ratio`、`geometry_thresholds.manual_diagonal_ratio` 及 `manual_diagonal_ratio=... HARD` 诊断解释实际整体尺度触发，不把同条记录的SOFT宽高指标冒充硬暂停原因。旧行缺字段不自动升级为已核验，没有新增确认权限或API写入字段。
+
+诊断可追加 `mask_area_decision`（可靠当前主体提示或保守坍缩兜底），及coverage.metrics中的尾部光学归属标志；不新增客户端写入权限。`pausedObjects.type` 的尺寸分类包含对角线HARD，发布/持久化/前端说明按真实HARD原因统一；兼容历史错误type但保有raw reasons的记录，不根据SOFT尺寸把运动HARD改写成尺寸。原始框、掩膜面积、参考和暂停帧不因展示修正而重写。
+
+可选 `singleCoreConflict` 仅记录当前唯一可见光核与可信伙伴、真实Mask交叠的核验摘要；对象身份仍可为unknown。持续未恢复时以 `image_shared_core_unresolved` 提示身份未辨明，按同一partner连续计数，不给未知对象新身份或修改单对象正常确认范围。已提供但非字典的head/coverage metrics被明确拒绝并记录，不让损坏历史摘要触发属性访问错误。
 
 反馈响应包含 `{ok,mediaId,revision,normalMotionSamples,trackingFeedbackEvents,pausedAnomalies,lastPausedContext}`。正常/已修正请求必须匹配当前持久化暂停帧及未解决对象，并核验真实追踪行；新键不能再次确认已解决的历史异常。每次只移除选定对象及已被删除的暂停项；仍有待处理对象时保留暂停上下文。运动样本按媒体、对象和位移原因隔离；尺寸参照单独按确认事件恢复，不豁免重叠或丢失检测。普通工作区 PUT 不能注入校准样本。Tracking 状态另返回 `warningSummary`，用于合并轻提示，不把每次轻微抖动升级为阻塞弹窗。
 
@@ -70,11 +78,15 @@
 
 尺寸/形状的 `normal` 可在 `geometryReference` 追加正值 `maskArea`（取自服务端模型结果；未知不填），恢复时最多使用每对象最近 3 个完整人工认可框，不拼接不同框的宽高范围。原人工框与来源不改变。续追校验最新适用的正常参考确实已载入；删除、人工修正、重置或分支时序使参照不适用时按各自规则处理，不把缺失参考静默当正常。
 
-对重叠原因的 `normal`，事件可追加 `overlapReferences:[{objectIds:[a,b],frameIndex,bboxes:[boxA,boxB],source:"confirmed-normal"}]`，仅从同帧实际对象及全部明确的重叠组合生成；不接受客户端提供组合或坐标。认可只限于这对对象的相近状态，不豁免新的伙伴、明显恶化、分离后的新风险或独立异常。成功反馈可返回兼容扩展 `confirmedReference:{eventId,geometryReference|null,overlapReferences:[]}`，原键重放保留原摘要。
+重叠认可来自同帧实际有效框，不接受客户端组合或坐标。单项正常只记录本对象的候选邻居快照，不能直接认可整对。双方在同一次暂停、同一双框/人工编辑快照下分别正常确认成功，或显式 `scope:"frame"` 同时检查后，才保存 `overlapReferences:[{objectIds:[a,b],frameIndex,bboxes:[boxA,boxB],source:"confirmed-normal",approvalVersion:2,pauseId,pairSnapshotId,generationId,objectEpochs,confirmedObjectIds,confirmedEventIds}]`。首个事件保持不可变，第二次确认只在自己的新事件中发布有效双边认可；不能拼凑历史暂停的双方决定。修改、删除/撤销删除、重置和新追踪分支使对应旧认可失效；撤销恢复框不能复活已退休的关系认可。仅更名或其他对象的编辑不退休这对认可。认可仅限原对象对的相近状态，不豁免新的伙伴、明显恶化、分离后的新风险或独立异常。双方还须有服务器核验的可靠身份参照，才能附带 `identityReferences`；仅有旧几何认可不提供新的图像可信身份。成功反馈可返回兼容扩展 `confirmedReference:{eventId,geometryReference|null,overlapReferences:[],identityReference?}`，原键重放保留原摘要。
+
+`identityReference` 是与几何检查点分开的可选服务器字段：`{version:2,source:"native-frame-mask-v2",objectId,frameIndex,bbox,originFrameIndex,referenceBBox,referencePoint,point,radius,appearance,status:"reliable",sourceSignature,generationId,objectEpoch}`。仅从当前真实追踪行的新版可靠来源取候选，并在一次当前原视频解码的小区域核验后保存；不接受客户提供可信点、外观、阈值或参考帧。旧 v1 的 `matched` 光学点不能升级为可信身份，缺新版依据时正常确认仍保存几何，身份由后续追踪后台按真实人工来源重新核验。旧身份原点不能通过改帧号伪装成当前可靠来源；无法分辨时保留不确定而不生成可信引用。
 
 普通尺寸越界与新增疑似合并按原始帧观察连续 3 帧，同对象/对象对独立计数；严重几何突变、极端跳跃与异常消失仍及时暂停。初始稳定重叠及低 IoU 的大小框包含仅提示。JSONL 的 `anomaly_details` 提供 `geometry_thresholds`、`geometry_observation_count/required`、`overlap_pairs`（全部组合）、`pause_started_frame` 和 `decision_frame_index`。持续异常暂停定位首次风险帧，观察窗口中的后续帧不发布为正常结果；`lastProcessedFrame`/`processedFrames` 对应实际发布结果，不能用模型分析到的第三帧冒充已保存进度。短时观察跨追踪轮次恢复，确认或新的人工工作结束对应旧观察。
 
-真实原图/Mask 辅助核验的兼容诊断为 `identity_evidence:{version:1,source:"native-frame-mask-v1",objectId,frameIndex,bbox,maskArea,status,head,coverage,reasons,thresholds}`，绑定当前对象/源帧/框/Mask 面积。status 为 supported/risk/unknown，head 包含光学匹配点、参考/前帧、半径与度量；coverage 包含细线遗漏、光核/合并线索与实际 Mask overlap。它不是精子分类概率，也不证明完整尾部。缺字段、坏绑定或弱证据回退旧保护。可靠原图主体+无明确遗漏才将普通 BBox 几何降提示，并用独立主体运动历史；面积/已确认 Mask 灾难性变化仍保护。独立图像持续风险提供 `image_observation_count/required`、`image_pending` 与首次风险帧；pausedObjects.type 兼容新增 `coverage_loss` / `identity_loss`。前端只解释实际证据，不推断或决定风险。Mask ROI 和原图不进入该 JSON，仍按真实原始像素坐标保存。
+真实原图/Mask 辅助核验的诊断为 `identity_evidence:{version:2,source:"native-frame-mask-v2",sourceSignature,objectId,frameIndex,bbox,maskArea,status,geometryReferenceFrameIndex,geometryReferenceBBox,head,coverage,reasons,thresholds,identityReference?}`，仍兼容读取 v1 诊断。当前对象/源帧/框/Mask 面积、原始身份建立帧/框和最新适用几何检查点分别校验，不能改帧号伪造引用。status 为 supported/risk/unknown/warning/uncertain；head 包含光学匹配点、原身份参考/前次可靠点、半径与 associationStatus，coverage 区分明确丢失、局部 Mask 覆盖不足、邻居污染与暂时粘连。它不是精子分类概率，也不证明完整尾部。
+
+可靠独立主体仍保留时，旋转、甩尾和仅 Mask 混入邻居不直接按宽高硬停；局部细线在框内但 Mask 覆盖不足为提示，明确大段结构跑出框仍保护。短暂粘连使用有限不确定观察并冻结可信身份；不能将粘连质心更新成正常位置，也不能无限放行。缺字段、坏绑定或其他未知证据保留旧保护，已确认Mask骤减仅在可靠当前主体且无明确丢失时降为候选，明确消失仍检查。图像持续风险提供 `image_observation_count/required`、`image_pending` 与首次风险帧；pausedObjects.type 兼容 `coverage_loss` / `identity_loss`。前端只解释实际证据，不推断或决定风险。Mask ROI 和原图不进入 JSON，仍按真实原始像素坐标保存。
 
 暂停工作区可带服务端 `diagnostic` 以刷新恢复完整解释。客户端展示字段不参与后端判定；原始帧号、稳定对象 ID、幂等/版本、删除及送审边界保持原协议。
 
@@ -82,7 +94,7 @@
 
 `POST /api/track/restart-branch/{mediaId}` 使用 Bearer 和 `Idempotency-Key`，正文为 `{expectedRevision,expectedPausedFrame,startFrame,confirmDiscardFuture:true,generationId?}`，帧号全部为原始 0 起编号。首次执行必须 `startFrame < expectedPausedFrame`、服务器暂停仍未解决、起点有有效框、原视频存在、轮次/工作区版本一致，且未送审、无运行中的 Tracking。暂停帧及之后只能使用逐项异常确认；普通 rewind/track 不得绕过未解决暂停。
 
-成功返回 `{ok,mediaId,revision,pausedAnomalies:[],lastPausedContext:null,cutoffFrame,removedRows,keptRows,deletedFutureSeedFiles:0,overlayRegenerated:false}`。只截断起点之后的旧 AI 行，清除旧分支的当前暂停及未来派生提示；所有人工框、seed/基准、删除规则、历史反馈和正常样本保留，不生成 normal/corrected 事件。操作不自动启动模型；客户端成功核对后保存该早帧 seed，再启动追踪，不重复普通 rewind。
+成功返回 `{ok,mediaId,revision,pausedAnomalies:[],lastPausedContext:null,cutoffFrame,removedRows,keptRows,deletedFutureSeedFiles:0,overlayRegenerated:false}`。只截断起点之后的旧 AI 行，清除旧分支的当前暂停及未来派生提示；所有人工框、seed/基准、删除规则、历史反馈和正常样本保留，不生成 normal/corrected 事件。被丢弃未来里的身份/关系认可通过内部事件 ID 退休，不删除人工决定、几何历史或旧回执；起点同帧及更早认可仍适用，避免正常续追立即丢掉刚保存的判断。以后新分支走过旧确认帧再启动，也不能恢复旧分支的未来关系认可。操作不自动启动模型；客户端成功核对后保存该早帧 seed，再启动追踪，不重复普通 rewind。
 
 跨文件发布通过持久日志与 SQL `review_write_receipts` 协调，收据重放早于业务版本/暂停校验，但轮次重置后不重放旧轮次操作；同账号原键原正文恢复已完成的重建，不再截断之后新模型的结果。相同 key 用不同意图返回 409。合法收据只证明过去已完成的分支操作；客户端恢复后另查询当前送审状态，已送审时停止 seed/模型启动，查询失败保留原起点待重试，不当作未送审。发布失败和重启按提交证据恢复两份文件，读取不能混用中间状态；临时故障保留原请求、暂停和数据，冲突需明确重读。当前暂停由真实追踪任务持久化，普通工作区 PUT 可以补展示信息和删除/撤销对象，但不能清空或伪造已确认暂停；显式反馈或重建才解除。运行时暂停更新不改变人工工作区 revision。
 

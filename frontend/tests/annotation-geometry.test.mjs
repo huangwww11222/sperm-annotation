@@ -1,6 +1,6 @@
 import {test} from 'node:test'
 import assert from 'node:assert/strict'
-import {moveBox,resizeBox,hitHandle} from '../../work/annotation-helpers/geometry.js'
+import {moveBox,resizeBox,hitHandle,revealBoxScroll} from '../../work/annotation-helpers/geometry.js'
 import {FrameCache} from '../../work/annotation-helpers/frameCache.js'
 test('pixel hit radius is stable at different zoom/aspect ratios',()=>{
   const box={x:10,y:20,width:5,height:5}
@@ -18,6 +18,18 @@ test('move and all resize handles remain inside source bounds with subpixel prec
     assert(b.width>=.25&&b.height>=.5)
   }
   assert.equal(moveBox(box,.125,0).x,10.25)
+})
+test('object localization preserves a visible view and reveals offscreen targets with bounded pan',()=>{
+  const viewport={x:100,y:100,width:300,height:200},scroll={left:200,top:300,maxLeft:1000,maxTop:1000}
+  assert.deepEqual(revealBoxScroll({x:140,y:140,width:30,height:40},viewport,scroll),{left:200,top:300})
+  const offscreen={x:500,y:420,width:30,height:40},next=revealBoxScroll(offscreen,viewport,scroll)
+  const visible={...offscreen,x:offscreen.x-(next.left-scroll.left),y:offscreen.y-(next.top-scroll.top)}
+  assert(visible.x>=viewport.x&&visible.y>=viewport.y&&visible.x+visible.width<=viewport.x+viewport.width&&visible.y+visible.height<=viewport.y+viewport.height)
+  const edge=revealBoxScroll({x:-500,y:-300,width:20,height:20},viewport,scroll)
+  assert.equal(edge.left,0);assert.equal(edge.top,0)
+  const oversized=revealBoxScroll({x:300,y:50,width:800,height:50},viewport,scroll)
+  assert.equal(300+800/2-(oversized.left-scroll.left),viewport.x+viewport.width/2)
+  assert.deepEqual(revealBoxScroll({x:NaN,y:0,width:1,height:1},viewport,scroll),{left:200,top:300})
 })
 test('cache coalesces concurrent requests and respects LRU entry budget',async()=>{
   const c=new FrameCache(2,100);let calls=0

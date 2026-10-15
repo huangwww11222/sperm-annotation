@@ -1,7 +1,7 @@
 import { createRequestId } from '../utils/browserCompat'
 import { computed, nextTick, reactive, ref, shallowRef, watch } from 'vue'
 import { FrameCache } from '../annotation/frameCache'
-import { pauseDiagnostics, type OverlapPairNotice } from '../annotation/pauseDiagnostics'
+import { pauseDiagnostics, pauseTypeFromEvidence, type OverlapPairNotice } from '../annotation/pauseDiagnostics'
 import { savedTrackingCalibration } from '../annotation/trackingCalibration'
 import { hitHandle, moveBox, resizeBox, type Box } from '../annotation/geometry'
 import type { AnnotationObject, AnnotationTool, EffectResult, MediaAsset, SavedAnnotationFile } from '../types/annotation'
@@ -246,7 +246,7 @@ const createWorkspace = () => {
   type FeedbackIntent = { mediaId: string; serverMediaId: string; key: string; body: TrackingFeedbackInput }
   const pendingFeedback = ref<FeedbackIntent | null>(null)
   const objectDeletionPendingAction = computed(() => pendingDeletion.value ? { objectId: pendingDeletion.value.record.objectId, action: pendingDeletion.value.action } : null)
-  const trackingFeedbackPendingAction = computed(() => pendingFeedback.value ? { objectId: pendingFeedback.value.body.objectId, decision: pendingFeedback.value.body.decision, learn: pendingFeedback.value.body.calibrate } : null)
+  const trackingFeedbackPendingAction = computed(() => pendingFeedback.value ? { objectId: pendingFeedback.value.body.objectId, decision: pendingFeedback.value.body.decision, learn: pendingFeedback.value.body.calibrate, scope:pendingFeedback.value.body.scope ?? 'object' } : null)
   const trackingFeedbackPending = computed(() => !!pendingFeedback.value)
   const canUndoVideoDeletion = computed(() => !!videoDeletionHistory.value[currentMediaId.value] && !videoDeletionHistory.value[currentMediaId.value].undone)
   const lastVideoObjectDeletion = computed(() => canUndoVideoDeletion.value ? videoDeletionHistory.value[currentMediaId.value] : null)
@@ -1057,11 +1057,11 @@ const createWorkspace = () => {
         lastPausedContext.value = response.lastPausedContext ? { mediaId: intent.mediaId, frameIndex: response.lastPausedContext.frameIndex } : null
         anomalyObjectIds.value = pausedAnomalies.value.map(item => item.objectId)
         anomalyPanelVisible.value = pausedAnomalies.value.length > 0
-        resume = intent.body.decision !== 'reset' && !pausedAnomalies.value.length
+        resume = intent.body.decision !== 'reset' && !pausedAnomalies.value.some(item=>!item.resolved) && !response.lastPausedContext
       }
       pendingFeedback.value = null; rememberControls(intent.mediaId)
       showToast(intent.body.decision === 'reset' ? `已恢复对象 #${intent.body.objectId} 的默认判断` : intent.body.scope === 'frame' ? '本帧全部对象的人工检查点已保存，继续追踪' : resume ? '人工确认已保存，继续追踪' : '已确认此对象，请继续检查其他暂停对象')
-      console.info('[annotation.feedback_saved]', { mediaId: intent.serverMediaId, objectId: intent.body.objectId, decision: intent.body.decision, calibrate: intent.body.calibrate, key: intent.key })
+      console.info('[annotation.feedback_saved]', { mediaId: intent.serverMediaId, objectId: intent.body.objectId, decision: intent.body.decision, scope:intent.body.scope ?? 'object', remaining:response.pausedAnomalies.filter(item=>!(item as {resolved?:boolean}).resolved).length, calibrate: intent.body.calibrate, key: intent.key })
     } catch (error) {
       trackingFeedbackError.value = error instanceof Error ? error.message : '确认保存失败，请重试'
       if (definiteRejection(error)) { pendingFeedback.value = null; rememberControls(intent.mediaId) }
@@ -1078,7 +1078,7 @@ const createWorkspace = () => {
     }
     return true
   }
-  const prepareTrackingFeedback = async (objectId: number, decision: 'normal' | 'corrected' | 'reset', learn: boolean): Promise<boolean> => {
+  const prepareTrackingFeedback = async (objectId: number, decision: 'normal' | 'corrected' | 'reset', learn: boolean,scope:'object'|'frame'='object'): Promise<boolean> => {
     const media = selectedMedia.value
     if (!media?.serverMediaId || editingBlocked.value || isInteracting()) return false
     const context = lastPausedContext.value
@@ -1089,7 +1089,7 @@ const createWorkspace = () => {
     try {
       cancelScheduledSave(media.id)
       await persistWorkspaceState(media.id)
-      pendingFeedback.value = { mediaId: media.id, serverMediaId: media.serverMediaId, key: createRequestId(), body: { expectedRevision: 0, objectId, frameIndex: context?.frameIndex ?? currentFrame.value, decision, calibrate: decision === 'normal' && learn, ...(decision === 'normal' ? {scope: 'frame' as const} : {}) } }
+      pendingFeedback.value = { mediaId: media.id, serverMediaId: media.serverMediaId, key: createRequestId(), body: { expectedRevision: 0, objectId, frameIndex: context?.frameIndex ?? currentFrame.value, decision, calibrate: decision === 'normal' && learn, ...(decision !== 'reset' ? {scope} : {}) } }
       rememberControls(media.id)
     } catch (error) {
       trackingFeedbackError.value = error instanceof Error ? error.message : '请先重试工作区保存'
@@ -1098,7 +1098,7 @@ const createWorkspace = () => {
     } finally { trackingFeedbackBusy.value = false }
     return retryTrackingAnomalyFeedback()
   }
-  const confirmTrackingAnomaly = (objectId: number, decision: 'normal' | 'corrected', learn: boolean) => prepareTrackingFeedback(objectId, decision, learn)
+  const confirmTrackingAnomaly = (objectId: number, decision: 'normal' | 'corrected', learn: boolean,scope:'object'|'frame'='object') => prepareTrackingFeedback(objectId, decision, learn,scope)
   const resetTrackingCalibration = (objectId: number) => prepareTrackingFeedback(objectId, 'reset', false)
 
   const deleteMedia = async (mediaId: string) => {
@@ -1847,14 +1847,21 @@ const createWorkspace = () => {
     return local?.name?.trim() || `object-${objectId}`
   }
 
-  const isGeometryReason = (reason: string) => /^(?:manual|geometry)_(?:area_ratio|width_ratio|height_ratio|aspect_change)=|^confirmed_mask_area_ratio=/.test(reason)
+  const isGeometryReason = (reason: string) => /^(?:manual|geometry)_(?:area_ratio|width_ratio|height_ratio|aspect_change|diagonal_ratio)=|^confirmed_mask_area_ratio=/.test(reason)
   const canLearnNormalMotion = (reasons: string[]) => reasons.some(reason => reason.startsWith('adjacent_center_shift='))
-    && reasons.every(reason => reason.startsWith('adjacent_center_shift=') || reason.startsWith('motion_') || isGeometryReason(reason))
+    && reasons.every(reason => reason.startsWith('adjacent_center_shift=') || reason.startsWith('motion_')
+      // Recognizing the new display metric must not expand motion learning.
+      || (isGeometryReason(reason) && !/^(?:manual|geometry)_diagonal_ratio=/.test(reason)))
 
   const normalizePauseNotice = (item: typeof pausedAnomalies.value[number]) => {
     // Older saved pauses have only the displayed title and canLearn flag.
     // This restores their explanation; the server validates the real evidence.
-    const diagnostic: Partial<typeof pausedAnomalies.value[number]> = item.diagnostic ? explainPausedObject(item.diagnostic) : {}
+    const rawDiagnostic = item.diagnostic ?? (item.rawReasons?.some(reason => reason.endsWith(' HARD')) ? {
+      object_id: item.objectId, display_name: item.displayName, type: '', reasons: item.rawReasons,
+      manualBaselineFrame: item.baselineFrame,
+      details: { geometry_reference_frame: item.geometryReferenceFrame, geometry_reference_source: item.geometryReferenceSource },
+    } : undefined)
+    const diagnostic: Partial<typeof pausedAnomalies.value[number]> = rawDiagnostic ? explainPausedObject(rawDiagnostic) : {}
     const acceptsGeometry = !!item.acceptsGeometry || (item.rawReasons ?? []).some(isGeometryReason)
       || ['框相对最近人工标注明显缩小', '框相对最近人工标注明显扩大或变形'].includes(item.title)
     return {
@@ -1873,7 +1880,7 @@ const createWorkspace = () => {
   const explainPausedObject = (item: NonNullable<Awaited<ReturnType<typeof trackApi.getStatus>>['pausedObjects']>[number]) => {
     const details = item.details ?? {}
     const reasons = item.reasons ?? []
-    const type = item.type
+    const type = pauseTypeFromEvidence(item.type, reasons)
     const displayName = objectDisplayName(item.object_id, item.display_name || item.name)
     const evidence = pauseDiagnostics(item.object_id, reasons, details, id => objectDisplayName(id))
     const baselineFrame = Number(item.manualBaselineFrame ?? details.manual_baseline_frame ?? NaN)
@@ -1900,7 +1907,7 @@ const createWorkspace = () => {
       formatMetric('重叠覆盖率', item.metrics?.overlapCoverage ?? details.overlap_coverage),
     ].filter(Boolean)
 
-    if (type === 'coverage_loss' || type === 'identity_loss' || reasons.some(reason => reason.startsWith('image_') && reason.endsWith(' HARD'))) {
+    if (type === 'coverage_loss' || type === 'identity_loss') {
       return {
         objectId: item.object_id,
         displayName,
@@ -1914,7 +1921,7 @@ const createWorkspace = () => {
         suggestion: '这些是追踪检查线索；请结合原图核验。全部对象正确可确认无异常，有误先修框，再确认。',
       }
     }
-    if (type === 'overlap' || reasons.some((reason) => reason.startsWith('bbox_overlap_with=') && reason.endsWith(' HARD'))) {
+    if (type === 'overlap') {
       const otherId = Number(item.other_object_id ?? details.other_object_id)
       const otherName = Number.isFinite(otherId) ? objectDisplayName(otherId, item.other_display_name) : '另一个对象'
       return {
@@ -1932,14 +1939,16 @@ const createWorkspace = () => {
         suggestion: '核对这里列出的所有对象组合；框准确可确认无异常，有误先修正。所有待处理对象确认后才续追。',
       }
     }
+    const diagonalHard = reasons.some(reason => /^(?:manual|geometry)_diagonal_ratio=/.test(reason) && reason.endsWith(' HARD'))
     if (type === 'size_shrink') {
       return {
         objectId: item.object_id,
         displayName,
-        title: `框相对${referenceName}明显缩小`,
+        title: diagonalHard ? '标注范围明显缩小' : `框相对${referenceName}明显缩小`,
         ...geometryReference,
         ...evidence,
-        summary: `${displayName} 的框相对${referenceName}明显缩小，可能已经丢失精子尾部。`,
+        summary: diagonalHard ? `${displayName} 的框整体跨度相对${referenceName}明显缩小，请检查是否遗漏目标的主体或尾部。`
+          : `${displayName} 的框相对${referenceName}明显缩小，可能已经丢失精子尾部。`,
         metrics,
         baselineFrame: Number.isFinite(baselineFrame) ? baselineFrame : undefined,
         reviewRange,
@@ -1951,10 +1960,11 @@ const createWorkspace = () => {
       return {
         objectId: item.object_id,
         displayName,
-        title: `框相对${referenceName}明显扩大或变形`,
+        title: diagonalHard ? '标注范围明显扩大' : `框相对${referenceName}明显扩大或变形`,
         ...geometryReference,
         ...evidence,
-        summary: `${displayName} 的框相对${referenceName}明显扩大或变形，可能框入了杂质或其他精子。`,
+        summary: diagonalHard ? `${displayName} 的框整体跨度相对${referenceName}明显扩大，可能混入邻近对象，请检查框的覆盖范围。`
+          : `${displayName} 的框相对${referenceName}明显扩大或变形，可能框入了杂质或其他精子。`,
         metrics,
         baselineFrame: Number.isFinite(baselineFrame) ? baselineFrame : undefined,
         reviewRange,
@@ -1962,7 +1972,7 @@ const createWorkspace = () => {
         suggestion: '框准确时可直接确认无异常；若框入其他对象，先修正为只覆盖当前目标，再确认。',
       }
     }
-    if (type === 'disappearance' || reasons.some((reason) => reason.includes('disappearance'))) {
+    if (type === 'disappearance') {
       return {
         objectId: item.object_id,
         displayName,

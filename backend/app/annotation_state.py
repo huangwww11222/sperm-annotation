@@ -259,12 +259,14 @@ def write_state(directory: Path, media_id: str, uid: int, key: str,
                         pausedAnomalies=clean.get("pausedAnomalies", []),
                         lastPausedContext=clean.get("lastPausedContext"))
         event = clean["trackingFeedbackEvents"][-1]
-        if event.get("geometryReference") or event.get("overlapReferences"):
+        if event.get("geometryReference") or event.get("overlapReferences") or event.get('identityReference'):
             response["confirmedReference"] = {
                 "eventId": event["id"],
                 "geometryReference": event.get("geometryReference"),
                 "overlapReferences": event.get("overlapReferences", []),
             }
+            if event.get('identityReference'):
+                response['confirmedReference']['identityReference'] = event['identityReference']
     receipts[receipt_key] = {"digest": digest, "response": response}
     # Events are immutable append-only history. Reference each committed prefix
     # instead of embedding it again in every feedback receipt; replay still
@@ -290,7 +292,7 @@ def write_state(directory: Path, media_id: str, uid: int, key: str,
         log.info("annotation.deletion_changed media=%s user=%s revision=%s global_ids=%s frame_rules=%s key=%s", media_id, uid, revision + 1, clean.get("deletedObjectIds", []), len(clean.get("deletedFrameObjects", [])), key)
     if operation == "feedback":
         event = clean["trackingFeedbackEvents"][-1]
-        log.info("annotation.feedback_saved media=%s user=%s object=%s frame=%s decision=%s calibrated=%s geometry_reference_frame=%s mask_area=%s overlap_pairs=%s event=%s reasons=%s revision=%s key=%s", media_id, uid, event["objectId"], event.get("frameIndex"), event["decision"], "sample" in event, event.get("geometryReference", {}).get("frameIndex"), event.get("geometryReference", {}).get("maskArea"), [reference["objectIds"] for reference in event.get("overlapReferences", [])], event["id"], event.get("reasons", []), revision + 1, key)
+        log.info("annotation.feedback_saved media=%s user=%s object=%s frame=%s decision=%s scope=%s pause_id=%s calibrated=%s geometry_reference_frame=%s identity_origin_frame=%s mask_area=%s overlap_pairs=%s remaining=%s event=%s reasons=%s revision=%s key=%s", media_id, uid, event["objectId"], event.get("frameIndex"), event["decision"], event.get('scope', 'object'), event.get('pauseId'), "sample" in event, event.get("geometryReference", {}).get("frameIndex"), event.get('identityReference', {}).get('originFrameIndex'), event.get("geometryReference", {}).get("maskArea"), [reference["objectIds"] for reference in event.get("overlapReferences", [])], len(clean.get('pausedAnomalies', [])), event["id"], event.get("reasons", []), revision + 1, key)
     return response
 
 
@@ -398,6 +400,44 @@ def _confirmed_box(obj: dict[str, Any] | None) -> list[float]:
         raise HTTPException(422, "追踪框无效，不能保存正常判断参照；请重新读取或修正该对象") from exc
 
 
+def _feedback_objects(previous: dict[str, Any], directory: Path, row: dict[str, Any],
+                      frame: int) -> tuple[dict[int, dict[str, Any]], set[int]]:
+    """The same effective saved boxes supply individual and frame approvals."""
+    objects = {obj['object_id']: dict(obj) for obj in row['objects']
+               if not is_deleted(previous, frame, obj['object_id'])}
+    manuals = [obj for obj in previous.get('manualAnnotations', []) if obj.get('source') == 'manual'
+               and obj.get('frameIndex') == frame and not is_deleted(previous, frame, obj.get('objectId'))]
+    manual_ids = set()
+    if manuals:
+        meta = json.loads((directory / 'media.json').read_text(encoding='utf-8'))
+        validate_workspace_geometry({'manualAnnotations': manuals}, meta)
+        for manual in manuals:
+            oid, box = manual['objectId'], manual.get('bbox')
+            if box is None:
+                objects.pop(oid, None)
+                continue
+            width, height = meta['width'], meta['height']
+            # Old AI evidence and motion describe the pre-edit rectangle.
+            objects[oid] = {'object_id': oid, 'name': manual.get('name'), 'bbox': [
+                box['x'] * width / 100, box['y'] * height / 100,
+                (box['x'] + box['width']) * width / 100, (box['y'] + box['height']) * height / 100]}
+            manual_ids.add(oid)
+    return objects, manual_ids
+
+
+def _pair_snapshot(previous: dict[str, Any], frame: int, pause_id: str,
+                   pair: list[int], boxes: list[list[float]]) -> str:
+    # Include real edits even when rounding happens to leave an equal AI box.
+    manuals = [obj for obj in previous.get('manualAnnotations', []) if obj.get('source') == 'manual'
+               and obj.get('frameIndex') == frame and obj.get('objectId') in pair]
+    value = {'generationId': previous.get('generationId'), 'pauseId': pause_id,
+             'frameIndex': frame, 'objectIds': pair, 'bboxes': boxes,
+             'manuals': sorted(manuals, key=lambda item: item['objectId']),
+             'objectEpochs': {str(oid): previous.get('_overlapReferenceEpochs', {}).get(str(oid), 0) for oid in pair}}
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False,
+                                     allow_nan=False).encode()).hexdigest()
+
+
 def _confirmed_overlap_references(row: dict[str, Any], object_id: int, frame: int,
                                   reasons: list[Any], details: dict[str, Any],
                                   workspace: dict[str, Any]) -> list[dict[str, Any]]:
@@ -421,6 +461,15 @@ def _confirmed_overlap_references(row: dict[str, Any], object_id: int, frame: in
                 and identities[0] != identities[1] and object_id in identities):
             pairs.add(tuple(sorted(identities)))
     objects = {item["object_id"]: item for item in row["objects"]}
+    box = _confirmed_box(objects.get(object_id))
+    # A current human inspection may concern a neighbour without a BBox alarm.
+    # This is a candidate only: both objects must explicitly approve it below.
+    for other_id, obj in objects.items():
+        if other_id == object_id:
+            continue
+        other_box = _confirmed_box(obj)
+        if min(box[2], other_box[2]) > max(box[0], other_box[0]) and min(box[3], other_box[3]) > max(box[1], other_box[1]):
+            pairs.add(tuple(sorted((object_id, other_id))))
     references = []
     for pair in sorted(pairs):
         if any(is_deleted(workspace, frame, oid) for oid in pair):
@@ -431,6 +480,87 @@ def _confirmed_overlap_references(row: dict[str, Any], object_id: int, frame: in
                            "bboxes": [_confirmed_box(objects[oid]) for oid in pair],
                            "source": "confirmed-normal"})
     return references
+
+
+def _approve_pairs(previous: dict[str, Any], event: dict[str, Any],
+                   candidates: list[dict[str, Any]], all_events: dict[int, dict[str, Any]] | None = None) -> None:
+    """Never assemble unilateral or stale confirmations into a pair approval."""
+    snapshots = {}
+    approved = []
+    for candidate in candidates:
+        pair = candidate['objectIds']
+        snapshot = _pair_snapshot(previous, event['frameIndex'], event['pauseId'], pair, candidate['bboxes'])
+        snapshots[str(next(oid for oid in pair if oid != event['objectId']))] = snapshot
+        owners = {event['objectId']: event}
+        if all_events is not None:
+            owners.update({oid: all_events[oid] for oid in pair})
+        else:
+            other = next(oid for oid in pair if oid != event['objectId'])
+            for prior in reversed(previous.get('trackingFeedbackEvents', [])):
+                if prior.get('objectId') != other:
+                    continue
+                # The newest decision for the neighbour is the only eligible
+                # candidate. A reset/correction/new pause ends older acceptance.
+                if (prior.get('decision') == 'normal' and prior.get('pauseId') == event['pauseId']
+                        and prior.get('frameIndex') == event['frameIndex']
+                        and prior.get('pairSnapshots', {}).get(str(event['objectId'])) == snapshot):
+                    owners[other] = prior
+                break
+        if all(oid in owners for oid in pair):
+            reference = {**candidate, 'approvalVersion': 2, 'pauseId': event['pauseId'],
+                         'pairSnapshotId': snapshot, 'generationId': previous.get('generationId'),
+                         'confirmedObjectIds': pair, 'confirmedEventIds': [owners[oid]['id'] for oid in pair],
+                         'objectEpochs': {str(oid): previous.get('_overlapReferenceEpochs', {}).get(str(oid), 0) for oid in pair}}
+            identities = [owners[oid].get('identityReference') for oid in pair]
+            if all(isinstance(identity, dict) and identity.get('version') == 2
+                   and identity.get('status') == 'reliable' for identity in identities):
+                reference['identityReferences'] = identities
+            approved.append(reference)
+    event['pairSnapshots'] = snapshots
+    if approved:
+        event['overlapReferences'] = approved
+
+
+def _feedback_identity_references(previous: dict[str, Any], directory: Path, frame: int,
+                                  objects: dict[int, dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    """Recheck server-produced v2 identities on one current native frame only.
+
+    Never promote v1 optical guesses or client fields into identity trust. The
+    asynchronous tracker owns any historical warmup for a legacy workspace.
+    """
+    from .main import find_video
+    video = find_video(directory)
+    if video is None:
+        log.info('annotation.identity_reference_unavailable media=%s frame=%s reason=no_native_source', directory.name, frame)
+        return {}
+    priors = {}
+    for oid, obj in objects.items():
+        evidence = (obj.get('anomaly_details') or {}).get('identity_evidence') or {}
+        reference = evidence.get('identityReference')
+        if (isinstance(reference, dict) and reference.get('version') == 2
+                and reference.get('source') == 'native-frame-mask-v2'
+                and reference.get('objectId') == oid and reference.get('frameIndex') == frame
+                and reference.get('bbox') == obj.get('bbox') and reference.get('status') == 'reliable'):
+            priors[oid] = reference
+    if not priors:
+        # A legacy row needs tracking's historical/manual identity bootstrap.
+        # Confirming geometry here cannot bless its strongest neighbour anew.
+        log.info('annotation.identity_reference_unavailable media=%s frame=%s reason=no_reliable_v2_source', directory.name, frame)
+        return {}
+    from .services.tracking_image_evidence import derive_identity_references
+    try:
+        meta = json.loads((directory / 'media.json').read_text(encoding='utf-8'))
+        refs = derive_identity_references(video, fps=float(meta.get('fps') or 0),
+                                         width=int(meta['width']), height=int(meta['height']),
+                                         frame_index=frame,
+                                         boxes={oid: _confirmed_box(obj) for oid, obj in objects.items()},
+                                         prior_references=priors)
+    except (OSError, ValueError, KeyError) as exc:
+        log.exception('annotation.identity_reference_read_failed media=%s frame=%s', directory.name, frame)
+        raise HTTPException(503, '当前原图主体参照无法核验，请保留确认操作并使用原请求重试') from exc
+    return {oid: {**ref, 'generationId': previous.get('generationId'),
+                  'objectEpoch': previous.get('_overlapReferenceEpochs', {}).get(str(oid), 0)}
+            for oid, ref in refs.items() if oid in priors}
 
 
 def _frame_checkpoint(previous: dict[str, Any], directory: Path, body: dict[str, Any], uid: int) -> dict[str, Any]:
@@ -449,25 +579,7 @@ def _frame_checkpoint(previous: dict[str, Any], directory: Path, body: dict[str,
     row = next((row for row in read_rows(directory) if tracking_frame_index(row) == frame), None)
     if row is None:
         raise HTTPException(409, '该帧追踪结果不存在，请重新读取异常')
-    objects = {obj['object_id']: dict(obj) for obj in row['objects']
-               if not is_deleted(previous, frame, obj['object_id'])}
-    manual_ids = set()
-    manuals = [obj for obj in previous.get('manualAnnotations', []) if obj.get('source') == 'manual'
-               and obj.get('frameIndex') == frame and not is_deleted(previous, frame, obj.get('objectId'))]
-    if manuals:
-        meta = json.loads((directory / 'media.json').read_text(encoding='utf-8'))
-        validate_workspace_geometry({'manualAnnotations': manuals}, meta)
-        for manual in manuals:
-            # A point cannot silently approve a missing tracking rectangle.
-            oid, box = manual['objectId'], manual.get('bbox')
-            if box is None:
-                objects.pop(oid, None)
-                continue
-            width, height = meta['width'], meta['height']
-            objects[oid] = {'object_id': oid, 'name': manual.get('name'), 'bbox': [
-                box['x'] * width / 100, box['y'] * height / 100,
-                (box['x'] + box['width']) * width / 100, (box['y'] + box['height']) * height / 100]}
-            manual_ids.add(oid)
+    objects, manual_ids = _feedback_objects(previous, directory, row, frame)
     missing = {item.get('objectId', item.get('object_id')) for item in pending} - objects.keys()
     missing.update(oid for oid, obj in objects.items() if obj.get('anomaly_level') == 'disappeared')
     if missing:
@@ -476,27 +588,22 @@ def _frame_checkpoint(previous: dict[str, Any], directory: Path, body: dict[str,
         raise HTTPException(409, '当前帧没有可确认的对象框')
     boxes = {oid: _confirmed_box(obj) for oid, obj in objects.items()}
     checkpoint_id, timestamp = uuid.uuid4().hex, datetime.now(timezone.utc).isoformat()
+    pause_id = previous.get('_pauseFeedbackId') or uuid.uuid4().hex
+    identity_refs = _feedback_identity_references(previous, directory, frame, objects)
     events = list(previous.get('trackingFeedbackEvents', []))
     samples = list(previous.get('normalMotionSamples', []))
+    current_events = {}
     for oid, obj in sorted(objects.items()):
         reference = {'objectId': oid, 'frameIndex': frame, 'bbox': boxes[oid],
                      'name': obj.get('name'), 'source': 'confirmed-normal', 'checkpoint': True}
         mask_area = obj.get('mask_area')
         if type(mask_area) in (int, float) and math.isfinite(mask_area) and mask_area > 0:
             reference['maskArea'] = mask_area
-        event = {'id': uuid.uuid4().hex, 'checkpointId': checkpoint_id, 'scope': 'frame',
+        event = {'id': uuid.uuid4().hex, 'checkpointId': checkpoint_id, 'scope': 'frame', 'pauseId': pause_id,
                  'createdAt': timestamp, 'objectId': oid, 'frameIndex': frame, 'decision': 'normal',
                  'userId': uid, 'geometryReference': reference, 'calibrate': bool(body.get('calibrate', False))}
-        # All actual intersecting pairs belong to this frame-wide inspection.
-        # Disjoint objects are not granted a future overlap exemption.
-        pairs = []
-        for other, other_box in sorted(boxes.items()):
-            box = boxes[oid]
-            if other != oid and min(box[2], other_box[2]) > max(box[0], other_box[0]) and min(box[3], other_box[3]) > max(box[1], other_box[1]):
-                ids = sorted((oid, other))
-                pairs.append({'objectIds': ids, 'frameIndex': frame, 'bboxes': [boxes[i] for i in ids], 'source': 'confirmed-normal'})
-        if pairs:
-            event['overlapReferences'] = pairs
+        if oid in identity_refs:
+            event['identityReference'] = identity_refs[oid]
         reasons, details = obj.get('anomaly_reasons', []), obj.get('anomaly_details', {}) or {}
         event.update(reasons=reasons, details=details)
         value = details.get('motion_normalized')
@@ -509,10 +616,16 @@ def _frame_checkpoint(previous: dict[str, Any], directory: Path, body: dict[str,
             samples = [s for s in samples if (s.get('objectId'), s.get('frameIndex'), s.get('reason')) != (oid, frame, 'motion')]
             samples.append(sample)
             event['sample'] = sample
+        current_events[oid] = event
+    effective_row = {**row, 'objects': list(objects.values())}
+    for oid, event in sorted(current_events.items()):
+        candidates = _confirmed_overlap_references(effective_row, oid, frame, [], {}, previous)
+        _approve_pairs(previous, event, candidates, current_events)
         events.append(event)
     log.info('annotation.frame_checkpoint_prepared media=%s user=%s frame=%s objects=%s checkpoint=%s', directory.name, uid, frame, sorted(objects), checkpoint_id)
     return {**previous, 'trackingFeedbackEvents': events, 'normalMotionSamples': samples,
-            'pausedAnomalies': [], 'lastPausedContext': None, '_pauseCandidates': [], '_pauseContext': None}
+            'pausedAnomalies': [], 'lastPausedContext': None, '_pauseCandidates': [], '_pauseContext': None,
+            '_pauseFeedbackId': pause_id}
 
 
 def feedback_state(previous: dict[str, Any], directory: Path, body: dict[str, Any], uid: int) -> dict[str, Any]:
@@ -529,7 +642,8 @@ def feedback_state(previous: dict[str, Any], directory: Path, body: dict[str, An
         return _frame_checkpoint(previous, directory, body, uid)
     samples = list(previous.get("normalMotionSamples", []))
     events = list(previous.get("trackingFeedbackEvents", []))
-    event = {"id": uuid.uuid4().hex, "objectId": object_id, "frameIndex": frame, "decision": decision, "userId": uid}
+    event = {"id": uuid.uuid4().hex, "objectId": object_id, "frameIndex": frame, "decision": decision,
+             "userId": uid, "scope": "object", "createdAt": datetime.now(timezone.utc).isoformat()}
     if decision == "reset":
         samples = [sample for sample in samples if sample.get("objectId") != object_id]
     else:
@@ -572,20 +686,28 @@ def feedback_state(previous: dict[str, Any], directory: Path, body: dict[str, An
             # Accepting a size/shape warning is an explicit human geometry
             # judgement, even without redrawing. Keep its server-side snapshot
             # separate from manual annotations and optional movement learning.
-            geometry_reason = any(str(reason).startswith(("manual_area_ratio=", "manual_width_ratio=", "manual_height_ratio=", "manual_aspect_change=", "confirmed_mask_area_ratio=", "image_")) for reason in reasons)
-            if geometry_reason:
-                event["geometryReference"] = {"objectId": object_id, "frameIndex": frame,
-                                              "bbox": _confirmed_box(obj), "source": "confirmed-normal"}
-                mask_area = (obj or {}).get("mask_area")
-                if type(mask_area) in (int, float) and math.isfinite(mask_area) and mask_area > 0:
-                    event["geometryReference"]["maskArea"] = mask_area
-            overlap_references = _confirmed_overlap_references(row, object_id, frame, reasons, details, previous)
-            if overlap_references:
-                event["overlapReferences"] = overlap_references
+            objects, manual_ids = _feedback_objects(previous, directory, row, frame)
+            effective = objects.get(object_id)
+            if effective is None or effective.get('anomaly_level') == 'disappeared':
+                raise HTTPException(409, '当前对象缺少有效框，请先补框或明确删除，再确认正常')
+            event['pauseId'] = previous.get('_pauseFeedbackId') or uuid.uuid4().hex
+            event['checkpointId'] = uuid.uuid4().hex
+            event["geometryReference"] = {"objectId": object_id, "frameIndex": frame,
+                                          "bbox": _confirmed_box(effective), "source": "confirmed-normal",
+                                          "checkpoint": True}
+            mask_area = effective.get("mask_area")
+            if type(mask_area) in (int, float) and math.isfinite(mask_area) and mask_area > 0:
+                event["geometryReference"]["maskArea"] = mask_area
+            identity_refs = _feedback_identity_references(previous, directory, frame, objects)
+            if object_id in identity_refs:
+                event['identityReference'] = identity_refs[object_id]
+            effective_row = {**row, 'objects': list(objects.values())}
+            overlap_references = _confirmed_overlap_references(effective_row, object_id, frame, reasons, details, previous)
+            _approve_pairs(previous, event, overlap_references)
             # A motion sample never exempts shape, identity, overlap or loss.
             value = details.get("motion_normalized")
             motion_reason = any(str(reason).startswith(("adjacent_center_shift", "center_displacement", "motion_", "normalized_motion", "tracking_motion")) for reason in reasons)
-            if bool(body.get("calibrate", False)) and motion_reason and isinstance(value, (int, float)) and math.isfinite(value) and value >= 0:
+            if object_id not in manual_ids and bool(body.get("calibrate", False)) and motion_reason and isinstance(value, (int, float)) and math.isfinite(value) and value >= 0:
                 sample = {"objectId": object_id, "frameIndex": frame, "reason": "motion", "decision": "normal", "calibrate": True, "features": {"motionNormalized": value}}
                 if details.get('motion_reference_kind') == 'head':
                     sample['features']['referenceKind'] = 'head'
@@ -594,6 +716,8 @@ def feedback_state(previous: dict[str, Any], directory: Path, body: dict[str, An
                 event["sample"] = sample
     events.append(event)
     result = {**previous, "normalMotionSamples": samples, "trackingFeedbackEvents": events}
+    if event.get('pauseId'):
+        result['_pauseFeedbackId'] = event['pauseId']
     pause_frame = (previous.get("lastPausedContext") or {}).get("frameIndex", frame)
     # A frame deletion may have been saved by an older client without updating
     # its presentation-only pause list. Deleted targets never remain blockers.
@@ -610,6 +734,54 @@ def feedback_state(previous: dict[str, Any], directory: Path, body: dict[str, An
     return result
 
 
+def _retire_changed_object_references(previous: dict[str, Any], clean: dict[str, Any]) -> set[int]:
+    """An undo restores source boxes, never an earlier relationship approval."""
+    changed = set()
+    for field in ('manualAnnotations', 'manualBaselines'):
+        def geometry(state):
+            records = {}
+            for item in state.get(field, []):
+                oid = item.get('objectId') if isinstance(item, dict) else None
+                if type(oid) is int and oid > 0:
+                    record = {key: item.get(key) for key in ('source', 'frameIndex', 'bbox', 'point')}
+                    records.setdefault(oid, []).append(json.dumps(record, sort_keys=True, allow_nan=False))
+            return {oid: sorted(values) for oid, values in records.items()}
+        old, new = geometry(previous), geometry(clean)
+        changed.update(oid for oid in old.keys() | new.keys() if old.get(oid) != new.get(oid))
+    changed.update(set(previous.get('deletedObjectIds', [])) ^ set(clean.get('deletedObjectIds', [])))
+    old_frames = {(item['objectId'], item['frameIndex']) for item in previous.get('deletedFrameObjects', [])}
+    new_frames = {(item['objectId'], item['frameIndex']) for item in clean.get('deletedFrameObjects', [])}
+    changed.update(oid for oid, _ in old_frames ^ new_frames)
+    for item in set(map(str, previous.get('deletedTrackingIds', []))) ^ set(map(str, clean.get('deletedTrackingIds', []))):
+        match = re.fullmatch(r'(?:ai-\d+-|manual-\d+-)?(\d+)', item)
+        if match:
+            changed.add(int(match.group(1)))
+    changed = {oid for oid in changed if type(oid) is int and oid > 0}
+    if changed:
+        epochs = dict(previous.get('_overlapReferenceEpochs', {}))
+        for oid in changed:
+            epochs[str(oid)] = int(epochs.get(str(oid), 0)) + 1
+        clean['_overlapReferenceEpochs'] = epochs
+    return changed
+
+
+def retire_future_relationships(state: dict[str, Any], cutoff: int) -> dict[str, Any]:
+    """Discard branch-specific future identity/pairs, retaining human history.
+
+    Shape snapshots and the cutoff-frame decision remain applicable. Receipts
+    still replay their exact historical event prefixes and accepted references.
+    """
+    retired = set(state.get('_retiredTrackingRelationshipEventIds', []))
+    for event in state.get('trackingFeedbackEvents', []):
+        frame = event.get('frameIndex') if isinstance(event, dict) else None
+        if (type(frame) is int and frame > cutoff and isinstance(event.get('id'), str)
+                and (event.get('overlapReferences') or event.get('identityReference'))):
+            retired.add(event['id'])
+    if retired == set(state.get('_retiredTrackingRelationshipEventIds', [])):
+        return dict(state)
+    return {**state, '_retiredTrackingRelationshipEventIds': sorted(retired)}
+
+
 def preserve_pause(previous: dict[str, Any], clean: dict[str, Any], payload: dict[str, Any], directory: Path | None = None) -> None:
     """PUT can enrich labels or delete/undo objects, but cannot accept a pause."""
     candidates = previous.get("_pauseCandidates", previous.get("pausedAnomalies", []))
@@ -620,6 +792,11 @@ def preserve_pause(previous: dict[str, Any], clean: dict[str, Any], payload: dic
     clean["_pauseCandidates"] = enriched
     clean["_pauseContext"] = context
     pause_frame = (context or {}).get("frameIndex")
+    # Edits and delete/undo operations must not combine an earlier individual
+    # acceptance with a later neighbour decision, even if boxes become equal.
+    changed_objects = _retire_changed_object_references(previous, clean)
+    if type(pause_frame) is int and changed_objects:
+        clean['_pauseFeedbackId'] = uuid.uuid4().hex
     clean["pausedAnomalies"] = [item for item in enriched if not item.get("resolved") and not is_deleted(clean, pause_frame, item.get("objectId", item.get("object_id")))] if type(pause_frame) is int else []
     if directory is not None and not previous.get("pausedAnomalies") and clean["pausedAnomalies"]:
         # A discarded branch must not be restored merely by undoing a deletion.
@@ -633,6 +810,7 @@ def preserve_pause(previous: dict[str, Any], clean: dict[str, Any], payload: dic
 def publish_tracking_pause(directory: Path, media_id: str, pause: dict[str, Any] | None, publication_id: str | None = None) -> None:
     """Persist real task output without advancing the editor's saved revision."""
     from .review_source_lock import source_write
+    from .tracking_pause_policy import classify_pause_reason
     @source_write
     def publish():
         state = read_state(directory, recover_pause=False)
@@ -648,10 +826,12 @@ def publish_tracking_pause(directory: Path, media_id: str, pause: dict[str, Any]
                 if type(oid) is not int or oid <= 0:
                     raise HTTPException(500, "追踪暂停对象身份无效")
                 reasons = item.get("reasons", [])
-                geometry = item.get("type") in {"size_shrink", "size_growth", "shape_change"} or any(str(r).startswith(("manual_area_ratio=", "manual_width_ratio=", "manual_height_ratio=", "manual_aspect_change=", "confirmed_mask_area_ratio=")) for r in reasons)
-                notices.append(dict(objectId=oid, displayName=item.get("display_name") or item.get("name") or f"精子 {oid}", title=titles.get(item.get("type"), "追踪异常"), summary="请检查当前目标及暂停前的框是否正确。", metrics=[], suggestion="修正后确认，或回到更早的错误帧重建追踪分支。", acceptsGeometry=geometry, canLearn=any(str(r).startswith("adjacent_center_shift=") for r in reasons), rawReasons=reasons, diagnostic=item))
+                pause_type = classify_pause_reason(reasons, disappeared=item.get('type') == 'disappearance', fallback=item.get('type', 'tracking_motion'))
+                geometry = pause_type in {"size_shrink", "size_growth", "shape_change"} or any(str(r).startswith(("manual_area_ratio=", "manual_width_ratio=", "manual_height_ratio=", "manual_aspect_change=", "manual_diagonal_ratio=", "geometry_diagonal_ratio=", "confirmed_mask_area_ratio=")) for r in reasons)
+                notices.append(dict(objectId=oid, displayName=item.get("display_name") or item.get("name") or f"精子 {oid}", title=titles.get(pause_type, "追踪异常"), summary="请检查当前目标及暂停前的框是否正确。", metrics=[], suggestion="修正后确认，或回到更早的错误帧重建追踪分支。", acceptsGeometry=geometry, canLearn=any(str(r).startswith("adjacent_center_shift=") for r in reasons), rawReasons=reasons, diagnostic=item))
         context = {"mediaId": media_id, "frameIndex": pause["frame_index"]} if pause and notices else None
-        state.update(_pauseCandidates=notices, _pauseContext=context, pausedAnomalies=notices, lastPausedContext=context)
+        state.update(_pauseCandidates=notices, _pauseContext=context, pausedAnomalies=notices,
+                     lastPausedContext=context, _pauseFeedbackId=uuid.uuid4().hex)
         if publication_id is not None:
             state["_pausePublicationId"] = publication_id
         temporary = directory / ("." + FILE_NAME + "." + uuid.uuid4().hex + ".tmp")

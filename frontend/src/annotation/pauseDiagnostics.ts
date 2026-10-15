@@ -23,6 +23,22 @@ const frameOf = (value: unknown) => {
 }
 const percent = (value: number) => `${(value * 100).toFixed(1).replace(/\.0$/, '')}%`
 
+// The raw hard reasons are authoritative even when an older saved record has
+// an incorrect display type. This only formats evidence; it grants no scope.
+export function pauseTypeFromEvidence(type: string | undefined, reasons: string[]) {
+  const hard = reasons.filter(reason => reason.endsWith(' HARD'))
+  if (type === 'disappearance' || hard.some(reason => reason.includes('disappearance'))) return 'disappearance'
+  if (hard.some(reason => reason.startsWith('image_tail'))) return 'coverage_loss'
+  if (hard.some(reason => reason.startsWith('image_'))) return 'identity_loss'
+  if (hard.some(reason => reason.startsWith('bbox_overlap_with='))) return 'overlap'
+  const sizes = hard.map(reason => /^(?:(?:manual|geometry)_(?:area_ratio|width_ratio|height_ratio|diagonal_ratio)|confirmed_mask_area_ratio)=([\d.eE+-]+)/.exec(reason))
+    .flatMap(match => { const value = match ? numberOf(match[1]) : undefined; return value == null ? [] : [value] })
+  if (sizes.length) return sizes.some(value => value < 1) ? 'size_shrink' : 'size_growth'
+  if (hard.some(reason => /^(?:manual|geometry)_aspect_change=/.test(reason))) return 'shape_change'
+  if (hard.some(reason => reason.startsWith('adjacent_center_shift=') || reason.startsWith('motion_'))) return 'tracking_motion'
+  return type || 'tracking_motion'
+}
+
 export function pauseDiagnostics(objectId: number, reasons: string[], details: Record<string, unknown>, nameOf: (id: number) => string) {
   const triggers: string[] = []
   const imageLabels: Record<string, string> = {
@@ -31,7 +47,9 @@ export function pauseDiagnostics(objectId: number, reasons: string[], details: R
     image_tail_loss: '与主体相连的细线结构有明显部分落在当前框外',
     image_foreign_core: '当前掩膜疑似混入了另一个光学主体',
     image_merge: '多个追踪对象疑似合并或共用了同一主体',
+    image_shared_core_unresolved: '两个追踪结果持续共用同一可见主体，身份尚未辨明',
   }
+  const hasHard = reasons.some(reason => reason.endsWith(' HARD'))
   const imageHard = reasons.some(reason => reason.startsWith('image_') && reason.endsWith(' HARD'))
   if (imageHard) {
     for (const reason of reasons) {
@@ -41,7 +59,7 @@ export function pauseDiagnostics(objectId: number, reasons: string[], details: R
     const count = numberOf(details.image_observation_count), required = numberOf(details.image_observation_required)
     if (count != null && required != null && count >= required) triggers.push(`同一对象图像风险持续 ${count} 帧，达到 ${required} 帧暂停条件`)
   }
-  const maskReason = reasons.find(reason => reason.startsWith('confirmed_mask_area_ratio='))
+  const maskReason = reasons.find(reason => reason.startsWith('confirmed_mask_area_ratio=') && (!hasHard || reason.endsWith(' HARD')))
   const currentMaskArea = numberOf(details.current_mask_area), referenceMaskArea = numberOf(details.mask_reference_area)
   const maskRatio = numberOf(details.mask_area_ratio)
     ?? (currentMaskArea != null && referenceMaskArea != null && referenceMaskArea > 0 ? currentMaskArea/referenceMaskArea : undefined)
@@ -50,8 +68,8 @@ export function pauseDiagnostics(objectId: number, reasons: string[], details: R
   if (maskTrigger) triggers.push(`目标掩膜仅为已确认正常样本的 ${percent(maskRatio)}${details.geometry_extreme === true ? '，立即暂停' : ''}`)
   const thresholds = recordOf(details.geometry_thresholds)
   for (const reason of reasons) {
-    if (imageHard && !reason.endsWith(' HARD')) continue
-    const match = /^(?:manual|geometry)_(area_ratio|width_ratio|height_ratio|aspect_change)=([\d.eE+-]+)/.exec(reason)
+    if (hasHard && !reason.endsWith(' HARD')) continue
+    const match = /^(?:manual|geometry)_(area_ratio|width_ratio|height_ratio|aspect_change|diagonal_ratio)=([\d.eE+-]+)/.exec(reason)
     if (!match) continue
     const [ , metric, rawValue] = match
     const threshold = recordOf(thresholds[`manual_${metric}`] ?? thresholds[metric])
@@ -63,7 +81,7 @@ export function pauseDiagnostics(objectId: number, reasons: string[], details: R
     // The server can include advisory SOFT metrics alongside the trigger. Do
     // not present a value inside the pause observation bounds as its cause.
     if ((minimum != null || maximum != null) && !crossesMinimum && !crossesMaximum) continue
-    const label = metric === 'area_ratio' ? '面积' : metric === 'width_ratio' ? '宽度' : metric === 'height_ratio' ? '高度' : '长宽比变化'
+    const label = metric === 'area_ratio' ? '面积' : metric === 'width_ratio' ? '宽度' : metric === 'height_ratio' ? '高度' : metric === 'diagonal_ratio' ? '整体跨度' : '长宽比变化'
     const valueText = metric === 'aspect_change' ? `${value.toFixed(2)} 倍` : `为参考框的 ${percent(value)}`
     const bound = crossesMinimum ? `，低于观察下限 ${percent(minimum!)}`
       : crossesMaximum ? `，${metric === 'aspect_change' ? `达到观察界限 ${maximum!.toFixed(2)} 倍` : `高于观察上限 ${percent(maximum!)}`}` : ''
@@ -89,11 +107,12 @@ export function pauseDiagnostics(objectId: number, reasons: string[], details: R
     }
   }
   const geometryStreak = numberOf(details.geometry_streak ?? details.geometry_observation_count), geometryPersistence = numberOf(details.geometry_persistence_frames ?? details.geometry_observation_required)
-  if (details.geometry_extreme === true && !maskTrigger) {
+  const geometryTriggered = reasons.some(reason => /^(?:manual|geometry)_/.test(reason) && (!hasHard || reason.endsWith(' HARD')))
+  if (details.geometry_extreme === true && !maskTrigger && geometryTriggered) {
     if (triggers.length) triggers[0] += '，立即暂停'
     else triggers.push('明显尺寸突变，立即暂停')
   }
-  else if (geometryStreak != null && geometryPersistence != null && geometryStreak >= geometryPersistence) triggers.push(`同一对象尺寸风险持续 ${geometryStreak} 帧，达到 ${geometryPersistence} 帧暂停条件`)
+  else if (geometryTriggered && geometryStreak != null && geometryPersistence != null && geometryStreak >= geometryPersistence) triggers.push(`同一对象尺寸风险持续 ${geometryStreak} 帧，达到 ${geometryPersistence} 帧暂停条件`)
   return {triggerSummary: triggers.join('；'), overlapPairs, maskTrigger,
     pauseStartFrame: frameOf(details.pause_started_frame ?? details.pause_frame_index ?? details.geometry_risk_start_frame),
     decisionFrame: frameOf(details.decision_frame_index),

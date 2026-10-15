@@ -856,21 +856,8 @@ def rewind_tracking(req: dict[str, Any], user: dict[str, Any] = Depends(current_
     video = find_video(directory)
     if not video:
         raise HTTPException(404, "视频文件不存在，请重新上传")
-    result_file = directory / RESULT_FILE_NAME
-    if result_file.exists():
-        try:
-            meta = json.loads((directory / "media.json").read_text(encoding="utf-8")) if (directory / "media.json").is_file() else {}
-        except Exception:
-            meta = {}
-        info = rewind_tracking_results(result_file, video, start_frame, meta)
-    else:
-        info = {
-            "cutoffFrame": start_frame,
-            "keptRows": 0,
-            "removedRows": 0,
-            "deletedFutureSeedFiles": 0,
-            "overlayRegenerated": False,
-        }
+    from .tracking_restart import rewind as rewind_branch
+    info = rewind_branch(directory, start_frame, uid=int(user['uid']))
     return {"ok": True, "mediaId": media_id, **info}
 
 

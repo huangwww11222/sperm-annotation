@@ -193,6 +193,7 @@ def _clean_history_before_seed(
 def _load_latest_manual_baselines(
     seed_path: Path,
     seed_source_frame: int,
+    *, include_checkpoints: bool = True,
 ) -> dict[int, ManualBaseline]:
     """Restore each object's latest manual bbox/checkpoint up to the seed frame.
 
@@ -263,6 +264,8 @@ def _load_latest_manual_baselines(
                 frame_index=frame_index,
                 name=item.get("name") or None,
             )
+    if not include_checkpoints:
+        return latest
     # An explicit whole-frame inspection replaces the effective baseline, but
     # remains a separate human decision instead of forging source=manual data.
     checkpoints: dict[int, dict[str, Any]] = {}
@@ -278,7 +281,7 @@ def _load_latest_manual_baselines(
         if event.get('decision') == 'corrected':
             checkpoints.pop(oid, None)
             continue
-        if event.get('scope') == 'frame' and event.get('decision') == 'normal':
+        if event.get('decision') == 'normal' and isinstance(event.get('geometryReference'), dict) and event['geometryReference'].get('checkpoint') is True:
             if type(oid) is not int or oid <= 0:
                 raise ValueError('人工检查点损坏，未继续追踪')
             prior = checkpoints.get(oid)
@@ -301,6 +304,52 @@ def _load_latest_manual_baselines(
         area = ref.get('maskArea')
         area = area if type(area) in (int, float) and math.isfinite(area) and area > 0 else None
         latest[oid] = ManualBaseline(bbox, frame, ref.get('name'), 'confirmed-normal', area)
+    return latest
+
+
+def _load_identity_references(workspace, seed_source_frame, manual_baselines):
+    """Identity state has independent provenance; old v1 peaks are never trust.
+
+    Reset/correction, deleted objects, future events and a newer real manual
+    edit invalidate a compact optical identity. Shape-only normal acceptance
+    does not erase its reliable original subject.
+    """
+    latest = {}
+    generation = workspace.get('generationId')
+    retired = set(workspace.get('_retiredTrackingRelationshipEventIds', []))
+    for event in workspace.get('trackingFeedbackEvents', []):
+        if not isinstance(event,dict):
+            continue
+        if event.get('id') in retired:
+            continue
+        oid,frame = event.get('objectId'),event.get('frameIndex')
+        if type(oid) is not int or oid <= 0:
+            continue
+        if event.get('decision') == 'reset':
+            latest.pop(oid,None); continue
+        if type(frame) is not int or not 0 <= frame <= seed_source_frame:
+            continue
+        if event.get('decision') == 'corrected':
+            latest.pop(oid,None); continue
+        value = event.get('identityReference')
+        if event.get('decision') != 'normal' or not isinstance(value,dict) or value.get('version') != 2 or value.get('status') != 'reliable' or value.get('objectId') != oid or value.get('frameIndex') != frame:
+            continue
+        if generation is not None and value.get('generationId') != generation:
+            continue
+        epochs = workspace.get('_overlapReferenceEpochs') or {}
+        current_epoch = epochs.get(str(oid),0) if isinstance(epochs,dict) else None
+        if type(current_epoch) is not int or value.get('objectEpoch',0) != current_epoch:
+            continue
+        manual = manual_baselines.get(oid)
+        if manual and manual.source == 'manual' and manual.frame_index > frame:
+            continue
+        if manual and manual.source == 'manual' and manual.frame_index == frame and _valid_reference_bbox(value.get('bbox')) != list(manual.bbox):
+            continue
+        if is_deleted(workspace,frame,oid) or is_deleted(workspace,seed_source_frame,oid):
+            continue
+        previous = latest.get(oid)
+        if previous is None or value['frameIndex'] >= previous['frameIndex']:
+            latest[oid] = value
     return latest
 
 
@@ -381,10 +430,17 @@ def _load_confirmed_overlap_references(
     that object's pairs, while future approvals cannot affect earlier frames.
     """
     from .services.anomaly_detector import OverlapReference
+    from .annotation_state import _pair_snapshot
+
+    events_by_id = {event.get('id'): event for event in workspace.get('trackingFeedbackEvents', [])
+                    if isinstance(event,dict) and isinstance(event.get('id'),str)}
+    retired = set(workspace.get('_retiredTrackingRelationshipEventIds', []))
 
     references: dict[tuple[int, int], OverlapReference] = {}
     for event in workspace.get("trackingFeedbackEvents", []):
         if not isinstance(event, dict):
+            continue
+        if event.get('id') in retired:
             continue
         oid = event.get("objectId")
         if type(oid) is not int or oid <= 0:
@@ -410,6 +466,26 @@ def _load_confirmed_overlap_references(
                     or any(type(value) is not int or value <= 0 for value in ids)
                     or ids[0] == ids[1] or oid not in ids):
                 continue
+            if entry.get('approvalVersion') == 2:
+                approved_ids, event_ids = entry.get('confirmedObjectIds'), entry.get('confirmedEventIds')
+                if (entry.get('generationId') != workspace.get('generationId') or approved_ids != sorted(ids)
+                        or not isinstance(event_ids,list) or len(event_ids)!=2 or len(set(event_ids))!=2
+                        or not isinstance(entry.get('pauseId'),str) or not entry['pauseId']):
+                    continue
+                epochs = workspace.get('_overlapReferenceEpochs') or {}
+                saved_epochs = entry.get('objectEpochs') or {}
+                if (not isinstance(epochs,dict) or not isinstance(saved_epochs,dict)
+                        or any(saved_epochs.get(str(identity),0) != epochs.get(str(identity),0) for identity in ids)):
+                    continue
+                owners = [events_by_id.get(event_id) for event_id in event_ids]
+                if any(event_id in retired for event_id in event_ids) or any(not isinstance(owner,dict) or owner.get('objectId') != object_id
+                       or owner.get('decision') != 'normal' or owner.get('frameIndex') != frame
+                       or owner.get('pauseId') != entry['pauseId']
+                       or owner.get('pairSnapshots',{}).get(str(other)) != entry.get('pairSnapshotId')
+                       for owner,object_id,other in zip(owners,approved_ids,reversed(approved_ids))):
+                    continue
+            elif any((workspace.get('_overlapReferenceEpochs') or {}).get(str(identity),0) != 0 for identity in ids):
+                continue
             if any(is_deleted(workspace, fi, identity) for identity in ids for fi in (frame, seed_source_frame)):
                 continue
             if any(identity in manual_baselines and (manual_baselines[identity].frame_index > frame or
@@ -420,6 +496,9 @@ def _load_confirmed_overlap_references(
                 continue
             valid_boxes = [_valid_reference_bbox(box) for box in boxes]
             if any(box is None for box in valid_boxes):
+                continue
+            if entry.get('approvalVersion') == 2 and entry.get('pairSnapshotId') != _pair_snapshot(
+                    workspace,frame,entry['pauseId'],ids,valid_boxes):
                 continue
             pair = tuple(sorted(ids))
             prior = references.get(pair)
@@ -447,6 +526,13 @@ def rewind_tracking_results(
     cutoff = int(cutoff_frame)
     if cutoff < 0:
         raise ValueError("cutoff_frame must be >= 0")
+
+    if path.name == 'tracker_results.json' and (path.parent / WORKSPACE_STATE_FILE_NAME).is_file():
+        # Source relationships and discarded output must move together. The
+        # normal endpoint preserves the workspace revision; its journal still
+        # guarantees that a failed publication restores both old files.
+        from .tracking_restart import rewind
+        return rewind(path.parent, cutoff)
 
     rows = _read_jsonl(path)
     kept: list[dict[str, Any]] = []
@@ -557,13 +643,19 @@ def track_video(
     active_object_ids = {int(o["object_id"]) for o in objects}
     manual_baselines = {
         object_id: baseline
-        for object_id, baseline in _load_latest_manual_baselines(Path(annotation_json), seed_source_frame).items()
+        for object_id, baseline in _load_latest_manual_baselines(Path(annotation_json), seed_source_frame, include_checkpoints=False).items()
         if object_id in active_object_ids
     }
+    anomaly_config = AnomalyConfig()
+    observation_history = max(anomaly_config.MOTION_HISTORY_FRAMES,
+                              anomaly_config.GEOMETRY_PERSISTENCE_FRAMES,
+                              anomaly_config.OVERLAP_PERSISTENCE_FRAMES,
+                              anomaly_config.IMAGE_PERSISTENCE_FRAMES * 4,
+                              anomaly_config.SHARED_CORE_PERSISTENCE_FRAMES)
     history_rows = [row for row in _read_jsonl(Path(output_json))
-                    if max(0, seed_source_frame - 8) <= int(row.get("source_frame_index", row.get("frame_index", -1))) <= seed_source_frame]
+                    if max(0, seed_source_frame - observation_history) <= int(row.get("source_frame_index", row.get("frame_index", -1))) <= seed_source_frame]
     detector = AnomalyDetector(
-        config=AnomalyConfig(),
+        config=anomaly_config,
         fps=source_fps,
         frame_width=width,
         frame_height=height,
@@ -573,6 +665,13 @@ def track_video(
         geometry_references=_load_confirmed_geometry_references(workspace, seed_source_frame, manual_baselines),
         overlap_references=_load_confirmed_overlap_references(workspace, seed_source_frame, manual_baselines),
     )
+    # Source validation must precede historical observation replay. Otherwise
+    # valid native rows cannot restore their longer persistent-risk windows.
+    # Legacy engines still do not claim to have native image/Mask evidence.
+    decode_regions = getattr(engine, 'decode_tracker_output_regions', None)
+    if callable(decode_regions):
+        from .video_frames import source_signature
+        detector.image_source_signature = source_signature(video_file)
     from .tracking_pause_policy import require_confirmed_geometry
     try:
         require_confirmed_geometry(workspace, seed_source_frame, active_object_ids, manual_baselines,
@@ -642,7 +741,6 @@ def track_video(
     end_frame_exclusive = seed_frame + requested
     # Only the actual engine exposes native mask ROIs. Legacy/test engines
     # retain the existing BBox fallback without claiming image verification.
-    decode_regions = getattr(engine, 'decode_tracker_output_regions', None)
     from contextlib import nullcontext
     evidence_context = nullcontext(None)
     if callable(decode_regions):
@@ -654,7 +752,10 @@ def track_video(
                 if ref.frame_index <= seed_source_idx and (prior is None or ref.frame_index > prior.frame_index):
                     image_baselines[oid] = ManualBaseline(ref.bbox, ref.frame_index, source='confirmed-normal')
         evidence_context = NativeImageEvidence(video_file, fps=source_fps, width=width, height=height,
-                                              manual_baselines=image_baselines, seed_frame=seed_source_idx)
+                                              manual_baselines=image_baselines, seed_frame=seed_source_idx,
+                                              identity_baselines=_load_latest_manual_baselines(Path(annotation_json), seed_source_idx, include_checkpoints=False),
+                                              identity_references=_load_identity_references(workspace, seed_source_idx,
+                                                  _load_latest_manual_baselines(Path(annotation_json), seed_source_idx, include_checkpoints=False)))
     if progress: progress(stage='tracking', message='正在追踪', processedFrames=1, lastProcessedFrame=seed_source_idx)
     outputs = engine.propagate_manual(
         session,
@@ -686,7 +787,7 @@ def track_video(
                             # grants no support or geometry exemption.
                             item['maskArea'] = detection_areas.get(oid)
                     counts = {status: sum(item.get('status') == status for item in identity_evidence.values())
-                              for status in ('supported', 'risk', 'unknown')}
+                              for status in ('supported', 'warning', 'uncertain', 'risk', 'unknown')}
                     logging.getLogger('review.tracking').info(
                         'tracking.image_evidence media=%s frame=%s counts=%s risks=%s', video_file.parent.name, source_idx,
                         counts, {oid: item.get('reasons') for oid, item in identity_evidence.items() if item.get('status') == 'risk'})
@@ -782,7 +883,7 @@ def track_video(
 
                 # HARD 异常 → 在当前异常帧保存结果后立即暂停。
                 if should_pause:
-                    from .tracking_pause_policy import select_pause_evidence, summarize_warnings
+                    from .tracking_pause_policy import classify_pause_reason, select_pause_evidence, summarize_warnings
                     earlier = [row for row in history_rows if int(row.get("source_frame_index", row.get("frame_index", -1))) <= seed_source_idx]
                     source_idx, visible_anomalies, retained_rows = select_pause_evidence(anomaly_report, earlier + new_rows, source_idx)
                     # Own the first risk and all later rows, even when observation
@@ -804,24 +905,12 @@ def track_video(
                             area_ratio = details.get("area_ratio")
                             width_ratio = details.get("width_ratio")
                             height_ratio = details.get("height_ratio")
-                            size_hard = any(r.startswith(("manual_area_ratio=", "manual_width_ratio=", "manual_height_ratio=", "confirmed_mask_area_ratio=")) and r.endswith(" HARD") for r in af.reasons)
-                            is_shrink = size_hard and ((
-                                isinstance(area_ratio, (int, float)) and area_ratio < detector.config.MANUAL_AREA_RATIO_MIN_HARD
-                            ) or (
-                                isinstance(width_ratio, (int, float)) and width_ratio < detector.config.MANUAL_WIDTH_RATIO_MIN_HARD
-                            ) or (
-                                isinstance(height_ratio, (int, float)) and height_ratio < detector.config.MANUAL_HEIGHT_RATIO_MIN_HARD
-                            )) or any(r.startswith("confirmed_mask_area_ratio=") and float(details.get("mask_area_ratio", 1)) < 1 for r in af.reasons)
-                            pause_type = (
-                                "disappearance" if af.level == AnomalyLevel.DISAPPEARED
-                                else "coverage_loss" if any(r.startswith("image_tail") and r.endswith(" HARD") for r in af.reasons)
-                                else "identity_loss" if any(r.startswith("image_") and r.endswith(" HARD") for r in af.reasons)
-                                else "overlap" if any(r.startswith("bbox_overlap_with=") and r.endswith(" HARD") for r in af.reasons)
-                                else "size_shrink" if is_shrink
-                                else "size_growth" if size_hard
-                                else "shape_change" if any(r.startswith("manual_aspect_change=") and r.endswith(" HARD") for r in af.reasons)
-                                else "tracking_motion"
-                            )
+                            pause_type = classify_pause_reason(
+                                af.reasons, disappeared=af.level == AnomalyLevel.DISAPPEARED)
+                            logging.getLogger('review.tracking').info(
+                                'tracking.pause_reason media=%s frame=%s object=%s type=%s hard_reasons=%s',
+                                video_file.parent.name, source_idx, af.object_id, pause_type,
+                                [reason for reason in af.reasons if reason.endswith(' HARD')])
                             other_id = details.get("other_object_id")
                             display_name = object_names.get(int(af.object_id), f"object-{af.object_id}")
                             pause_objects.append({
@@ -842,6 +931,7 @@ def track_video(
                                     "widthRatio": width_ratio,
                                     "heightRatio": height_ratio,
                                     "aspectRatio": details.get("aspect_ratio_ratio"),
+                                    "diagonalRatio": details.get("diagonal_ratio"),
                                     "overlapCoverage": details.get("overlap_coverage"),
                                     "centerShift": details.get("center_shift"),
                                     "motionNormalized": details.get("motion_normalized"),

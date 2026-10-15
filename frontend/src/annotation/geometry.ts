@@ -18,3 +18,14 @@ export function hitHandle(px: number, py: number, b: Box, stageW: number, stageH
   const hit = corners.map(([h,x,y]) => ({ h, d: Math.hypot((px-x)*stageW/100, (py-y)*stageH/100) })).sort((a,b)=>a.d-b.d)[0]
   return hit && hit.d <= 9 ? hit.h : null
 }
+
+/** Reveal a screen-space rectangle with the least possible pan, without zooming. */
+export function revealBoxScroll(box: Box, viewport: Box, scroll: {left:number;top:number;maxLeft:number;maxTop:number}, margin=12): {left:number;top:number} {
+  const axis=(start:number,length:number,viewStart:number,viewLength:number,current:number,max:number)=>{
+    const inset=Math.min(margin,viewLength/4),low=viewStart+inset,high=viewStart+viewLength-inset
+    const delta=length>high-low ? start+length/2-(low+high)/2 : start<low ? start-low : start+length>high ? start+length-high : 0
+    return clamp(current+delta,0,Math.max(0,max))
+  }
+  if (![...Object.values(box),...Object.values(viewport),...Object.values(scroll)].every(Number.isFinite) || viewport.width<=0 || viewport.height<=0) return {left:scroll.left,top:scroll.top}
+  return {left:axis(box.x,box.width,viewport.x,viewport.width,scroll.left,scroll.maxLeft),top:axis(box.y,box.height,viewport.y,viewport.height,scroll.top,scroll.maxTop)}
+}

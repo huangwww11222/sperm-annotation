@@ -72,6 +72,37 @@ export async function trackingFocusChecks(page, {root, origin, api, poll, ready,
   check(true,'focus movement and corner resizing persist the intended object')
   await page.getByTestId('confirm-tracking-corrected').click();await complete()
 
+  await upload('focus-mixed-normal');await draw('audit-pause-one',1,[.2,.3,.12,.15]);await draw('audit-pause-two',2,[.65,.3,.12,.15]);await pause(2);await focus()
+  for(let index=0;index<12;index++)await button('放大画面').click()
+  await page.locator('.canvas-scroll').evaluate(element=>element.scrollTo(0,0))
+  const canvasPosition=()=>page.locator('.canvas-scroll').evaluate(element=>({left:element.scrollLeft,top:element.scrollTop}))
+  const targetVisible=()=>page.locator('.annotation-overlay g.selected .annotation-box').evaluate(element=>{const box=element.getBoundingClientRect(),view=document.querySelector('.canvas-scroll').getBoundingClientRect();return box.left>=view.left&&box.right<=view.right&&box.top>=view.top&&box.bottom<=view.bottom})
+  const zoomBefore=await page.locator('.canvas-zoom button[title]').innerText()
+  await chip(2).click();await poll(targetVisible,'offscreen feedback target brought into canvas')
+  check(await page.locator('.canvas-zoom button[title]').innerText()===zoomBefore,'object localization preserves the chosen zoom')
+  const located=await canvasPosition();await chip(2).click();await page.waitForTimeout(80)
+  check(JSON.stringify(await canvasPosition())===JSON.stringify(located),'selecting an already visible target does not move the view')
+  await screenshot('focus-object-revealed')
+  await chip(1).click();await poll(targetVisible,'first target localized')
+  const normalAttempts=[],normalFeedbackRoute='**/api/track/feedback/'+mid
+  let loseNormal=true
+  await page.route(normalFeedbackRoute,async route=>{
+    normalAttempts.push({key:route.request().headers()['idempotency-key'],body:route.request().postDataJSON()})
+    if(loseNormal){loseNormal=false;const response=await route.fetch();assert(response.ok(),await response.text());await route.abort('failed')}
+    else await route.continue()
+  })
+  const eventsBefore=((await work()).trackingFeedbackEvents ?? []).length
+  await page.getByTestId('confirm-tracking-object-normal').click();await page.getByTestId('retry-tracking-feedback').waitFor()
+  check((await work()).pausedAnomalies.length===1 && (await work()).pausedAnomalies[0].objectId===2,'single-object normal commits without accepting the other pending object')
+  check(normalAttempts[0].body.scope==='object','the single-object button sends explicit object scope')
+  await page.reload();await ready()
+  await poll(async()=>normalAttempts.length===2&&await page.getByTestId('confirm-tracking-object-normal').isVisible(),'object normal original-key replay recovered after refresh')
+  check(normalAttempts.length===2 && normalAttempts[0].key===normalAttempts[1].key && JSON.stringify(normalAttempts[0].body)===JSON.stringify(normalAttempts[1].body),'refresh retries the exact scope, body and idempotency key')
+  check(((await work()).trackingFeedbackEvents ?? []).length===eventsBefore+1 && (await work()).pausedAnomalies.length===1,'replay records one normal event and leaves the other item unresolved')
+  await page.unroute(normalFeedbackRoute)
+  check(await chip(2).count()===1,'the last remaining chip stays available after a single-object normal decision')
+  await button('适应画面').click();await chip(2).click();await nudge(2);await page.getByTestId('confirm-tracking-corrected').click();await complete()
+
   await upload('focus-initial-single');await draw('audit-pause-single',1,[.2,.3,.12,.15]);await pause(1)
   check(await chip(1).count()===1&&(await selected())?.endsWith('single 1'),'a one-object initial pause keeps the chip and selects the object')
   await page.locator('.annotation-toolbar .tool-btn').filter({hasText:'画框'}).click()
@@ -87,9 +118,9 @@ export async function trackingFocusChecks(page, {root, origin, api, poll, ready,
   await page.unroute(frameRoute);await button('重试读取').click();await ready()
   await poll(async()=>(await selected())?.endsWith('single 1')&&(await tool()).includes('选择'),'read retry selects target only after actual frame recovery')
   await focus();await jump(0);await page.locator('.annotation-toolbar .tool-btn').filter({hasText:'画框'}).click()
-  check(await chip(1).isDisabled(),'pause chips do not retarget objects while browsing an earlier frame')
+  check(await chip(1).isEnabled()&&await page.getByTestId('confirm-tracking-object-normal').isDisabled(),'earlier-frame chip can return while confirmation remains locked to the pause frame')
   check((await tool()).includes('画框'),'browsing an earlier frame preserves the user’s chosen tool')
-  await page.getByRole('button',{name:'返回第 2 帧',exact:true}).click();await ready()
+  await chip(1).click();await ready()
   await poll(async()=>(await selected())?.endsWith('single 1')&&(await tool()).includes('选择'),'returning to ready pause frame selects its target')
   await nudge(1)
   // Lose only the confirmation response after its actual server commit.
@@ -108,7 +139,12 @@ export async function trackingFocusChecks(page, {root, origin, api, poll, ready,
   await page.getByTestId('confirm-tracking-corrected').click();await poll(async()=>(await work()).pausedAnomalies.length===1,'unflagged inspection after corrected')
   check((await selected())?.endsWith('third 3'),'advancing feedback does not steal an explicitly inspected unflagged object')
   await chip(2).click();check((await selected())?.endsWith('two 2'),'explicit remaining chip restores selection after whole-frame inspection')
-  await page.getByTestId('confirm-tracking-normal').click();await complete()
+  const reverseAttempts=[],reverseFeedbackRoute='**/api/track/feedback/'+mid
+  await page.route(reverseFeedbackRoute,async route=>{reverseAttempts.push(route.request().postDataJSON());await route.continue()})
+  await page.getByTestId('confirm-tracking-object-normal').click();await complete();await page.unroute(reverseFeedbackRoute)
+  const reverseEvents=(await work()).trackingFeedbackEvents
+  check(reverseAttempts.length===1&&reverseAttempts[0].scope==='object'&&reverseAttempts[0].objectId===2,'normal after correction explicitly confirms only the remaining object')
+  check(reverseEvents.length===2&&reverseEvents[0].decision==='corrected'&&reverseEvents[0].objectId===1&&reverseEvents[1].decision==='normal'&&reverseEvents[1].objectId===2&&reverseEvents.every(event=>event.scope==='object'),'reverse mixed decisions preserve the correction and do not create an unflagged frame approval')
 
   await upload('focus-disappeared');await draw('audit-disappear-one',1,[.2,.3,.12,.15]);await draw('steady-two',2,[.65,.3,.12,.15]);await pause(1);await focus()
   const restore=page.getByTestId('restore-missing-tracking-object')

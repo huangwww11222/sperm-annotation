@@ -2,13 +2,16 @@
 // Uses real video frames, draft writes and C decisions. See docs/TESTING.md.
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import { reviewZoomChecks } from './review-zoom-checks.mjs'
+import { useLegacyBrowserAPIs } from './legacy-browser-profile.mjs'
 
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright')
 const confirmation = JSON.parse(fs.readFileSync('work/confirmation-browser-fixture.json'))
 const review = JSON.parse(fs.readFileSync('work/browser-fixture.json'))
 const origin = process.env.CONFIRMATION_ORIGIN || 'http://127.0.0.1:5373'
-const browser = await chromium.launch({ channel: process.env.CHROME_CHANNEL || 'chrome', headless: true })
+const browser = await chromium.launch({ channel: process.env.CHROME_CHANNEL || 'chrome', headless: true, ignoreDefaultArgs: ['--hide-scrollbars'] })
 const page = await browser.newPage({ viewport: { width: 1366, height: 768 } })
+if (process.env.LEGACY_BROWSER === '1') await useLegacyBrowserAPIs(page)
 const logs = [], errors = []
 let checks = 0
 page.on('console', message => logs.push({ type: message.type(), text: message.text() }))
@@ -29,7 +32,10 @@ const api = async (path, token) => {
 const frame = () => api(`/review/sessions/${review.sid}/frames/0`, review.token)
 const cSession = (sid = confirmation.main.sid) => api(`/confirmation/sessions/${sid}`, confirmation.token)
 const closeReviewDialog = async () => {
-  if (await page.getByRole('dialog').count()) await page.getByRole('dialog').getByRole('button', { name: '关闭', exact: true }).click()
+  if (await page.getByRole('dialog').count()) {
+    await page.getByRole('dialog').getByRole('button', { name: '关闭', exact: true }).click()
+    await page.getByRole('dialog').waitFor({ state: 'hidden' })
+  }
 }
 async function openReview(expectCollapsed = false) {
   await page.goto(origin + '/review')
@@ -106,6 +112,141 @@ async function assertGuideIsolation(stage, before, after, keys) {
   await page.keyboard.press('Escape')
   check(await button('使用说明').evaluate(element => document.activeElement === element), `${stage}: closing help restores focus to its launcher`)
 }
+const readablePixels = locator => locator.evaluate(svg => {
+  const view = svg.viewBox.baseVal, matrix = svg.getScreenCTM()
+  return { width: view.width * Math.hypot(matrix.a, matrix.b), height: view.height * Math.hypot(matrix.c, matrix.d) }
+})
+const inViewport = locator => locator.evaluate(element => {
+  const rect = element.getBoundingClientRect()
+  return rect.top >= 0 && rect.bottom <= innerHeight && rect.left >= 0 && rect.right <= innerWidth && rect.width > 0 && rect.height > 0 && element.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2))
+})
+async function narrowLibrary(stage, list, size, target) {
+  await page.setViewportSize(size)
+  const toggle = page.getByTestId('toggle-workbench-library')
+  if (await toggle.getAttribute('aria-expanded') === 'false') await toggle.click()
+  const listBox = await list.boundingBox()
+  check(listBox && listBox.height >= 64, `${stage} ${size.width}: expanded video library retains a usable scrollable list below its filters`)
+  const expandedTop = await page.locator('[data-workbench-region=canvas]').evaluate(element => element.getBoundingClientRect().top + scrollY)
+  await toggle.click()
+  const collapsedTop = await page.locator('[data-workbench-region=canvas]').evaluate(element => element.getBoundingClientRect().top + scrollY)
+  check(!await page.locator('.workbench-library-content').isVisible() && collapsedTop < expandedTop - 100,
+    `${stage} ${size.width}: collapsing the library returns vertical space to the image`)
+  await toggle.click()
+  check(await list.isVisible() && await toggle.getAttribute('aria-expanded') === 'true', `${stage} ${size.width}: expanding restores video navigation`)
+  await target.scrollIntoViewIfNeeded()
+  check(await target.evaluate(element => {
+    const rect = element.getBoundingClientRect(), list = element.closest('.asset-list,.review-videos,.c-video-list').getBoundingClientRect()
+    const x = rect.x + rect.width / 2, y = rect.y + rect.height / 2
+    return rect.width > 40 && rect.height >= 32 && x > Math.max(0, list.left) && x < Math.min(innerWidth, list.right) && y > Math.max(0, list.top) && y < Math.min(innerHeight, list.bottom) && element.contains(document.elementFromPoint(x, y))
+  }), `${stage} ${size.width}: an actual video entry is visible and hit-testable inside the list`)
+  check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${stage} ${size.width}: header and workbench do not cause horizontal page overflow`)
+}
+async function narrowGuide(stage, readState) {
+  for (const dark of [false, true]) {
+    await selectTheme(dark)
+    const before = JSON.stringify(await readState())
+    await button('使用说明').click()
+    const dialog = page.getByRole('dialog', { name: '使用说明', exact: true })
+    await dialog.waitFor()
+    const geometry = await dialog.evaluate(element => {
+      const box = element.getBoundingClientRect(), nav = element.querySelector('.user-guide-nav').getBoundingClientRect(), content = element.querySelector('.user-guide-content'), text = content.getBoundingClientRect()
+      return { contained: box.left >= 0 && box.right <= innerWidth && box.top >= 0 && box.bottom <= innerHeight, stacked: nav.bottom <= text.top + 2, textWidth: text.width, textHeight: text.height, font: parseFloat(getComputedStyle(content).fontSize), noTextOverflow: content.scrollWidth <= content.clientWidth + 1, focusWithin: element.contains(document.activeElement), focusCount: element.querySelectorAll('button:not(:disabled),input,[tabindex="0"]').length }
+    })
+    check(geometry.contained && geometry.stacked && geometry.textWidth >= 280 && geometry.textHeight >= 200 && geometry.font >= 12 && geometry.noTextOverflow, `${stage} 390 ${dark ? 'dark' : 'light'}: help is fully contained with readable body below its contents navigation`)
+    check(geometry.focusWithin, `${stage} 390: opening help places keyboard focus inside its modal`)
+    for (let count = 0; count < geometry.focusCount + 2; count++) {
+      await page.keyboard.press('Tab')
+      assert(await dialog.evaluate(element => element.contains(document.activeElement)), `${stage}: Tab escaped the help dialog`)
+    }
+    await page.locator('.user-guide-content').focus()
+    for (const key of ['a', 'b', 'Control+Enter', 'ArrowRight', 'Delete', 'f']) await page.keyboard.press(key)
+    check(JSON.stringify(await readState()) === before, `${stage} 390: help keyboard input cannot change frame, object, submission or decisions`)
+    await page.screenshot({ path: `output/playwright/workbench-help-${stage}-390-${dark ? 'dark' : 'light'}.png`, animations: 'disabled' })
+    await page.keyboard.press('Escape')
+    check(!await dialog.isVisible() && await button('使用说明').evaluate(element => element === document.activeElement), `${stage} 390: Escape closes help and restores its launcher focus`)
+  }
+  await selectTheme(false)
+}
+async function narrowWorkbenchChecks() {
+  const desktop = { width: 1366, height: 768 }
+  const sizes = [{ width: 760, height: 900 }, { width: 390, height: 844 }]
+  await page.setViewportSize(desktop)
+  await page.goto(origin + '/annotate')
+  await expandLibrary('annotation')
+  await page.locator('.asset-card').filter({ hasText: 'ux-video.avi' }).click()
+  await page.locator('.object-select').first().waitFor()
+  await page.waitForFunction(() => !document.querySelector('.canvas-status') && document.querySelector('.exact-media')?.complete)
+  const annotationFrame = await page.getByRole('spinbutton', { name: '跳转帧号' }).inputValue()
+  for (const size of sizes) {
+    const video = page.locator('.asset-card').filter({ hasText: 'ux-video.avi' })
+    await narrowLibrary('annotation', page.locator('.asset-list'), size, video)
+    await video.click()
+    await page.locator('.object-select').first().focus(); await page.keyboard.press('Enter')
+    check(await page.locator('.object-select').first().getAttribute('aria-pressed') === 'true', `annotation ${size.width}: keyboard selection remains available below the image`)
+    check(await page.locator('.object-select strong').first().evaluate(element => parseFloat(getComputedStyle(element).fontSize) >= 12), `annotation ${size.width}: object names keep a readable text size`)
+    if (size.width === 760) check((await page.locator('.annotation-stage').boundingBox()).width > 350, 'annotation 760: source image is wider than the former 327px canvas column')
+    await button('专注').click()
+    check((await page.locator('[data-workbench-region=canvas]').boundingBox()).width >= size.width - 24 && await inViewport(page.getByRole('button', { name: /退出专注/ })), `annotation ${size.width}: focus uses the window width and keeps its exit visible`)
+    await page.getByRole('button', { name: /退出专注/ }).click()
+    check(await page.getByRole('spinbutton', { name: '跳转帧号' }).inputValue() === annotationFrame && await page.locator('.object-select').first().getAttribute('aria-pressed') === 'true', `annotation ${size.width}: leaving focus restores the same frame and object`)
+    if (size.width === 390) await narrowGuide('annotation', async () => ({ frame: await page.getByRole('spinbutton', { name: '跳转帧号' }).inputValue(), selected: await page.locator('.object-select[aria-pressed=true]').getAttribute('aria-label'), focused: await page.locator('.annotation-page').evaluate(element => element.classList.contains('focused')) }))
+    await page.screenshot({ path: `output/playwright/workbench-annotation-narrow-${size.width}.png`, animations: 'disabled', fullPage: true })
+  }
+  await page.setViewportSize(desktop); await page.evaluate(() => scrollTo(0, 0))
+  check(await inView(button('AI Tracking')), 'annotation: desktop core action recovers after narrow layouts and focus')
+
+  await openReview()
+  const reviewBefore = await api(`/review/sessions/${review.sid}`, review.token)
+  for (const size of sizes) {
+    const video = page.locator(`[data-session-id="${review.sid}"]`)
+    await narrowLibrary('review', page.locator('.review-videos'), size, video)
+    await video.click(); await bIdle(); await closeReviewDialog()
+    await page.locator('[data-row="2"]').focus(); await page.keyboard.press('Enter')
+    check(await page.locator('[data-box="2"]').evaluate(element => element.classList.contains('chosen')), `review ${size.width}: keyboard list selection still locates the matching box`)
+    check(await page.locator('[data-row="2"] b').evaluate(element => parseFloat(getComputedStyle(element).fontSize) >= 12), `review ${size.width}: object IDs keep a readable text size`)
+    await button('适应窗口').click()
+    if (size.width === 760) check((await readablePixels(page.locator('.review-drawing'))).width > 350, 'review 760: actual source pixels are wider than the former 327px canvas column')
+    await button('下一帧').click(); await bIdle()
+    check(await page.getByRole('textbox', { name: '跳转帧号' }).inputValue() === '2', `review ${size.width}: image navigation reaches the next real frame`)
+    await button('上一帧').click(); await bIdle()
+    // The earlier real edit intentionally left a draft on frame 1. Returning
+    // normally presents its resume prompt; dismiss it without discarding or
+    // submitting before exercising the next responsive layout.
+    await closeReviewDialog()
+    check(await page.getByRole('textbox', { name: '跳转帧号' }).inputValue() === '1', `review ${size.width}: navigation returns to the original frame`)
+    check((await api(`/review/sessions/${review.sid}`, review.token)).progress.submittedFrames === reviewBefore.progress.submittedFrames, `review ${size.width}: resize, selection and navigation do not submit frames`)
+    if (size.width === 390) await narrowGuide('review', async () => ({ frame: await page.getByRole('textbox', { name: '跳转帧号' }).inputValue(), submitted: (await api(`/review/sessions/${review.sid}`, review.token)).progress.submittedFrames, objects: (await frame()).effectiveObjects }))
+    await page.screenshot({ path: `output/playwright/workbench-review-narrow-${size.width}.png`, animations: 'disabled', fullPage: true })
+  }
+  await page.setViewportSize(desktop); await page.evaluate(() => scrollTo(0, 0))
+  check(await inView(page.getByTestId('submit-frame')) && await inView(page.getByRole('region', { name: '视频审查进度' })), 'review: desktop progress and submission recover after narrow navigation')
+
+  await openConfirmation(confirmation.main.sid)
+  const decisionsBefore = JSON.stringify((await api(`/confirmation/sessions/${confirmation.main.sid}/changes`, confirmation.token)).items)
+  for (const size of sizes) {
+    const video = page.locator(`[data-session-id="${confirmation.main.sid}"]`)
+    await narrowLibrary('confirmation', page.locator('.c-video-list'), size, video)
+    await video.click(); await cIdle()
+    if (await button('留在上次位置').count()) await button('留在上次位置').click()
+    const full = await page.locator('.c-context').boundingBox(), local = await page.locator('.c-local-comparison').boundingBox()
+    const crops = await Promise.all((await page.locator('.c-crops figure').all()).map(figure => figure.boundingBox()))
+    check(full && local && full.y + full.height <= local.y + 2 && crops.length === 2 && Math.abs(crops[0].y - crops[1].y) <= 2 && crops[0].x + crops[0].width <= crops[1].x + 2,
+      `confirmation ${size.width}: complete frame sits above side-by-side A/B crops`)
+    if (size.width === 760) check((await readablePixels(page.locator('.c-context [data-variant=full]'))).width > 327, 'confirmation 760: actual full-frame pixels improve on the former 327px canvas column')
+    const object = page.locator('.c-context .context-boxes [data-object-id="2"]')
+    await object.focus(); await page.keyboard.press('Enter'); await cIdle()
+    check((await page.getByTestId('current-item').innerText()).includes('对象 #2'), `confirmation ${size.width}: keyboard full-frame selection links the same comparison object`)
+    const current = await page.getByRole('textbox', { name: '修改项序号' }).inputValue()
+    await button('下一修改项 →').click(); await cIdle(); await button('← 上一修改项').click(); await cIdle()
+    check(await page.getByRole('textbox', { name: '修改项序号' }).inputValue() === current, `confirmation ${size.width}: modification navigation returns to the same item`)
+    check(JSON.stringify((await api(`/confirmation/sessions/${confirmation.main.sid}/changes`, confirmation.token)).items) === decisionsBefore, `confirmation ${size.width}: responsive layout and keyboard browsing preserve all saved choices`)
+    check(await page.locator('.c-change-item').first().evaluate(element => parseFloat(getComputedStyle(element).fontSize) >= 12), `confirmation ${size.width}: modification names keep a readable text size`)
+    if (size.width === 390) await narrowGuide('confirmation', async () => ({ current: await page.getByTestId('current-item').innerText(), choices: (await api(`/confirmation/sessions/${confirmation.main.sid}/changes`, confirmation.token)).items }))
+    await page.screenshot({ path: `output/playwright/workbench-confirmation-narrow-${size.width}.png`, animations: 'disabled', fullPage: true })
+  }
+  await page.setViewportSize(desktop); await page.evaluate(() => scrollTo(0, 0))
+  check(await inView(page.getByTestId('choose-a')) && await inView(page.getByTestId('choose-b')) && await inView(page.getByRole('region', { name: '视频确认进度' })), 'confirmation: desktop comparison controls and progress recover after narrow browsing')
+}
 
 try {
   fs.mkdirSync('output/playwright', { recursive: true })
@@ -148,6 +289,7 @@ try {
   await page.getByTestId('toggle-workbench-library').click()
   check((await page.locator('[data-workbench-region=canvas]').boundingBox()).width > beforeCollapse.width, 'collapsing the library gives its space to the image workspace')
   await openReview(true)
+  await reviewZoomChecks({ page, fixture: review, origin, check, requireSessionSwitch: true })
   await layout('review', '视频审查进度', page.getByTestId('submit-frame'))
   check(await page.locator('[data-row]').count() === 2, 'review defaults to all current-frame objects')
   check(await page.locator('.stats-grid,.review-table').count() === 0, 'review no longer repeats a statistics card and full geometry table')
@@ -161,9 +303,26 @@ try {
   const crops = page.locator('.compare-pair svg')
   check(await crops.count() === 2 && await crops.nth(0).getAttribute('viewBox') === await crops.nth(1).getAttribute('viewBox'), 'expanded review A/B crops share the exact same source region')
   await page.locator('.review-object-details > summary').click()
-  const rect = await page.locator('[data-box="1"] rect').boundingBox()
+  // Use the existing real draft gesture at an enlarged manual scale. This
+  // protects pointer-to-source conversion as well as the display-only checks.
+  const sourceBeforeZoomDrag = await frame()
+  const getReviewScale = () => page.locator('.review-drawing').evaluate(svg => Number(svg.getAttribute('width')) / svg.viewBox.baseVal.width)
+  while (await getReviewScale() < 1.2) await button('放大').click()
+  await page.waitForTimeout(250)
+  const dragScale = await getReviewScale()
+  let rect = await page.locator('[data-box="1"] rect').boundingBox()
   await page.mouse.move(rect.x + rect.width / 2, rect.y + rect.height / 2)
   await page.mouse.down(); await page.mouse.move(rect.x + rect.width / 2 + 14, rect.y + rect.height / 2 + 4, { steps: 4 }); await page.mouse.up(); await bIdle()
+  const draggedFrame = await frame()
+  const beforeBox = sourceBeforeZoomDrag.effectiveObjects.find(object => object.objectId === 1).bbox
+  const afterBox = draggedFrame.effectiveObjects.find(object => object.objectId === 1).bbox
+  check(dragScale >= 1.2 && Math.abs(afterBox[0] - beforeBox[0] - 14 / dragScale) < .02 && Math.abs(afterBox[1] - beforeBox[1] - 4 / dragScale) < .02, 'manual enlargement preserves exact screen-to-source coordinates when saving a real review drag')
+  await button('↶ 撤销').click(); await bIdle()
+  check(JSON.stringify((await frame()).effectiveObjects) === JSON.stringify(sourceBeforeZoomDrag.effectiveObjects), 'undo after an enlarged review drag restores the real server geometry')
+  rect = await page.locator('[data-box="1"] rect').boundingBox()
+  await page.mouse.move(rect.x + rect.width / 2, rect.y + rect.height / 2)
+  await page.mouse.down(); await page.mouse.move(rect.x + rect.width / 2 + 14, rect.y + rect.height / 2 + 4, { steps: 4 }); await page.mouse.up(); await bIdle()
+  await button('适应窗口').click()
   check((await frame()).hasDraft && (await api(`/review/sessions/${review.sid}`, review.token)).progress.submittedFrames === 0, 'editing from the compact workbench saves a draft without submitting')
   await button('仅已调整').click()
   check(await page.locator('[data-row]').count() === 1 && await page.locator('[data-row="1"]').count() === 1, 'only-adjusted filter keeps the modified object')
@@ -289,6 +448,7 @@ try {
     await page.screenshot({ path: `output/playwright/workbench-confirmation-portrait-${size.width}.png`, animations: 'disabled' })
   }
   check(JSON.stringify((await api(`/confirmation/sessions/${confirmation.portrait.sid}/changes`, confirmation.token)).items) === portraitBefore, 'resizing a portrait view does not modify any choice or annotation')
+  await narrowWorkbenchChecks()
   check(errors.length === 0, 'shared workbench paths have no uncaught browser exceptions')
   console.log('SUCCESS', checks, 'checks')
 } catch (error) {

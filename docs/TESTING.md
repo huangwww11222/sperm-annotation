@@ -77,7 +77,30 @@ npm run build --prefix frontend
 
 原图/Mask 辅助政策专项：`test_tracking_evidence.py` 以独立合成图验证旋转与裁尾、背景厚块/多核、未知证据及对象共用主体；`test_tracking_identity_evidence_policy.py` 验证 25/30 对象轮流变形、真实主体跳跃与高 FPS 下稳定主体/变化框中心、独立图像风险、严重面积/Mask 损失、错误证据绑定与旧 BBox 回退；`test_tracking_image_evidence.py` 验证原始帧身份、显式引用、失败/恢复与读取释放；`test_tracking_native_evidence_integration.py` 验证真实编排/结果发表使用首次图像风险且释放 reader，模型/图像结果模拟；`test_tracking_evidence_feedback.py` 验证人工确认参考及主体/bbox 运动样本分离与准确重放；`test_tracking_image_pause_causes.py` 成对验证持续图像/几何风险不错误提升已恢复或未持续的另一原因。`test_video_frames.py` 比较标准全尺寸 Mask 与 ROI 框/面积/逐像素完全一致，并确认 ROI 不保留整帧 backing array；25 个整幅 4K 异常 Mask 保留几何但不分配不可用的大 ROI。真实视频须单列同 prompt 原图与真实 SAM3 结果重放；不能将合成支持证据当识别准确率。
 
-固定 `independent-integrity` 还调用 `tracking-focus-checks.mjs`：真实上传/画框/追踪进入暂停，验证初始单项、两项处理到最后一项、选择与选择工具联动、移动/缩放保存、主动检查其他框不抢选择、读帧失败/原位恢复、成功响应丢失的原键恢复、消失对象不能确认正常及同 ID 补框续追。两窗口浅深主题、专注/返回帧均验证。模拟只在专用 `audit-disappear` 模型输出中移除对象；不从测试 UI 导入 store，不绕过反馈/版本保护。旧源码编译成独立内存实例可作修复前失败证据，不覆写正在测试的当前文件。
+自然运动与重叠专项：`test_tracking_natural_motion_policy.py` 使用严格绑定的本帧原图/Mask核验标志验证正常旋转、身体范围未知、参考缺失、自然双框重叠与续追恢复不误停；坏源、坏帧/框/引用、空Mask和失效标志恢复旧兜底。`test_tracking_subject_boundary_policy.py` 从实际合成图像和二值Mask验证轻微边缘欠覆盖与真漏头分流、头完整但尾不可辨与明确自身大段漏尾分流；Mask完整但BBox截头也不能漏停。两者包含生产probe→detector组合测试，不能只手填一条supported摘要就声称原图判断修好。多对象验证要在正常形变/靠近中插入一个真丢失对象，既检查不误停，也检查没有一起被豁免。
+
+尾部归属、历史Mask面积和原因展示专项：`test_tracking_tail_attribution.py` 从真实合成原图/Mask验证弱桥接背景不冒充自身尾部、清晰自身漏尾仍暂停、近头光晕与邻居阻断、正常检查点后新风险及坏输入恢复；`test_tracking_mask_area_policy.py` 验证当前严格有效且头部可靠时面积骤减仅提示，真实head/tail/merge、空Mask、unknown、旧证据及坏绑定仍保守，实时与history prime一致，并覆盖30/60对象和稀疏INFO日志。`test_tracking_pause_reason_publication.py` 通过生产track_video发布验证对角线增长/缩小分类、新旧错误类型恢复、SOFT尺寸不盖过真运动、未知历史原因保留原分类以及不改变工作区版本/标注/反馈。固定tracking-policy浏览器场景同时验证新旧错误type、仅rawReasons记录和缩小/真运动的实际标题及依据，展示恢复不自动确认、不发反馈或改变标注；对角线原因不扩大运动学习资格。
+
+自然重叠的反向成对用例必须包含“一方有可靠参考，另一方真实prime因多核未建立参考，随后两Mask一起跟到唯一可见主体”。仅放宽BBox重叠会使这类真风险漏停；新 `singleCoreConflict` 用原图可见核数、双向真实Mask交叠和可靠partner逐帧核验，连续12帧仍停。测试同时覆盖双头可见（即使第二头不在Mask内）、独立Mask、未读取完整双方框范围、坏诊断/坏partner、短遮挡后恢复、换partner与帧间断重置、跨追踪历史恢复，不得把未知对象补成新可信头来通过。
+
+`test_tracking_native_history_resume.py` 经生产 `track_video` 恢复、检测及发布验证8+4、11+1两种窗口都在总第12帧暂停并返回首次风险帧；仅模拟模型/窗口IO，原图合成probe与Mask分析不替换。它同时防止源签名设在恢复之后、或历史仍只读8帧造成的漏停。坏metrics专项覆盖实时push与历史prime的拒绝/日志/健康恢复，不能只测直接构造的检测器正常输入。
+
+快速定位优先复用冻结观察，避免每次重跑SAM3到同一帧。`scripts/replay_tracking_pause_cases.py` 加载私有 `tracking-pause-replay-v1` manifest，真实执行检测器状态转移；记录输入/政策SHA与时间，只传原样框、面积和已有摘要，不补造Mask或 `observationVerified`。输入含frameWidth/frameHeight/fps及episodes；每项包含固定manualBaselines、可选geometryReferences/overlapReferences/seed/sourceSignature、逐帧observations和可选expectPause；`provenance` 必须注明真实连续输出、单帧保持的压力输入或人工构造条件，不能混称现场完整序列。通用CLI行为由 `test_tracking_pause_replay.py` 覆盖。
+
+```bash
+work/review-venv/bin/python scripts/replay_tracking_pause_cases.py work/replay-input.json --output work/replay-after.json
+work/review-venv/bin/python scripts/replay_tracking_pause_cases.py work/replay-input.json --policy-source work/frozen-code/anomaly_detector.py --output work/replay-before.json
+```
+
+原图光核可在CPU单独重算并对照日志点位和BBox核覆盖，旧Mask覆盖摘要必须标明沿用记录；这不能代替重新计算原Mask。若已保存真实模型的逐帧二值Mask/框/分数，则直接用原视频和生产 `NativeImageEvidence → tracker → 结果发布` 在隔离目录重放，无需加载模型；记录真实输出与最终源码SHA。若只有BBox/摘要、缺中间帧或Mask，明确报告缺口，不能把矩形填充Mask、重复同一帧或补填核验标志冒充真实连续推理。现场视频/Mask/工作区和私有manifest放work中，不纳入Git。真实短窗口补采需保留原视频、对象数量、prompt和逐帧Mask校验和，写明局部重新初始化与原首帧长程状态不同；只接纳完整写出的帧，采样进程错误或内存预算中止不得改记为计划全部完成。已有有效帧可独立核验并回放，原错误日志保留。完整浏览器回归仍需执行，快速回放不能替代保存、确认与续追流程验证。
+
+主体关联专项 `test_tracking_identity_association.py` 验证较暗的自己不会被更亮的邻居替换、两个框共同包含多个头时不按 ID 顺序强行分配、粘连期间冻结可靠参考而分离后恢复，以及两个对象真正共用单一主体和自己的主体丢失仍报风险。`test_tracking_identity_reference_lifecycle.py` 使用真实编码小视频检查压缩噪声、历史人工来源恢复、确认后的紧凑身份恢复及读取释放。v2 身份证据的原始主体来源与最新几何检查点分别绑定，旧 v1、错误帧/框/源签名、非有限值不能授予新的几何豁免；普通掩膜污染与少量尾部遗漏不能冒充明确的大段框外遗漏，极端坍缩和真实丢失仍须暂停。`test_tracking_evidence.py` 的重大覆盖用例成对检查：同样的大段自身框外遗漏不能因增加邻居光核而漏停；完整自身目标加邻居仍提示；经过邻居光核的续段不归给自己，但到达邻居前已经明确遗漏的自身支路仍保留风险。
+
+反馈范围专项 `test_tracking_object_feedback_scope.py` 验证单对象正常只清本项、正常/修正混合顺序、同次暂停双方分别正常才认可共同重叠、显式整帧确认、紧凑身份仅读取一次当前原帧、坏来源不重选亮暗峰、读取失败保持原状态并原键恢复。修改/删除/撤销后的关系 epoch、同帧新人工来源、换伙伴、重置和新 generation 必须使旧认可失效；历史决定和幂等回执仍保留。确认相关缺失读取保护要覆盖真实使用的加载路径，不能只模拟已经不再参与该流程的旧 helper。
+
+真实模型验收使用相同视频与首帧 JSON 的校验和，记录实际设备、dtype、代码校验和、每次暂停的首次风险帧/决定帧/原因、人工实验确认范围、主体位置与掩膜。先对保存的真实掩膜和原图复核关联，再重新运行 SAM3 到约定帧；两者分别报告。若现场工作区多加了对象或修过框，作为第二组输入说明，不能称其与原始首帧完全相同。零暂停本身不证明修复：必须同时确认主体没有换到邻居，并通过真实丢失、合并和严重覆盖遗漏的负向用例。Apple MPS、本机浏览器的模拟模型与医院 CUDA 分别记录，不互相替代。
+
+固定 `independent-integrity` 还调用 `tracking-focus-checks.mjs`：真实上传/画框/追踪进入暂停，验证初始单项、两项处理到最后一项、object 与 frame 的明确范围、正常/修正混合顺序、选择与选择工具联动、视野外框保持缩放并最小平移/视野内不移动、错帧先加载再定位、移动/缩放保存、主动检查其他框不抢选择、读帧失败/原位恢复、成功响应丢失刷新后原键原正文恢复、消失对象不能确认正常及同 ID 补框续追。两窗口浅深主题、专注/返回帧均验证。模型输出模拟；不从测试 UI 导入 store，不绕过反馈/版本保护。修复前失败截图与断言必须单独保留，不能被修复后复测覆盖。
 
 | 修改面 | 后端/单元 | 浏览器 |
 | --- | --- | --- |
@@ -94,7 +117,7 @@ npm run build --prefix frontend
 | C 选择/恢复/最终版本 | `test_confirmation_workflow.py`、`test:confirmation` | `confirmation-browser.mjs`（40）、`confirmation-failure-browser.mjs`（34） |
 | 训练导出/门禁/版本 | `test_training_export.py`、`test_quality_audit.py`、`test_export_audit_script.py` | `training-export-browser.mjs`（29） |
 | 全窗口专注、视频进度 | 上述对应页面回归、构建 | `workspace-layout-browser.mjs`（49） |
-| 三页工作台一致性、紧凑对象导航 | 上述对应页面回归、构建 | `workbench-consistency-browser.mjs`（124）；包含两尺寸浅深主题、跨页收起、专注、原生折叠、对象/修改项导航与保存 |
+| 三页工作台一致性、紧凑对象导航、审查缩放 | 上述对应页面回归、构建 | `workbench-consistency-browser.mjs`（含 `review-zoom-checks.mjs`）；包含两尺寸浅深主题、跨页收起、专注、原生折叠、对象/修改项导航与保存、手动倍率保持与自动适应 |
 | 数据库查询/升级、Docker 发布 | `test_annotation_result_dedupe.py`、`test_deployment_preflight.py`、`test_docker_deployment_contract.py`、`test_model_distribution.py` | 下方容器验收；不是只运行前端构建 |
 | 完整离线包、旧版识别、备份升级与回滚 | `test_offline_update.py`、`scripts/test_build_offline.ps1` | 下方离线升级验收；模拟 Docker 不代替真实导入和数据恢复 |
 | 核心操作优先级、用户说明 | 上述 B/C/导出回归、构建 | `workspace-priority-browser.mjs`（36） |
@@ -151,6 +174,16 @@ node frontend/tests/workspace-layout-browser.mjs
 `node frontend/tests/workspace-priority-browser.mjs` 同样需要 B/C/UX 夹具；检查 1366×768、1180×760 的顶部进度和右上提交可见性、C 首屏操作与完成后导出顺序、说明章节/搜索/深色主题/Markdown 原文下载，以及说明窗口中的键盘隔离、焦点循环、退出滚动恢复和章节滚动重置。它会完成 C main，运行其他 C 正常测试前需重新生成夹具。
 
 `node frontend/tests/workbench-consistency-browser.mjs` 使用同一套 B/C/UX 夹具；`CONFIRMATION_ORIGIN` 可指定前端地址。检查三页在 1366×768、1180×760 及浅深主题下的共用区域、核心操作、列表独立滚动、跨页视频库收起和专注全宽、A/B 折叠详情的键盘行为、B 筛选定位与真实草稿、C 分组导航/回访、长文件名、45 项分页定位、说明隔离及零修改显式完成。C 完整帧还检查横竖源图四角与等比例显示、主图及局部图首屏大小、图上鼠标/键盘选择联动且不产生决定、未修改对象非交互、弹窗内图像读取和位置保存失败的分别重试。会写 B 草稿、消费 C main/zero，并浏览 many/portrait；后续 B/C 正常或故障脚本前必须重新生成对应夹具，不能并行重置同一批任务。
+
+该套件还覆盖 760×900、390×844：视频库搜索/筛选与列表分区，条目在实际裁剪区内可命中并真实切换，收起/展开后释放纵向空间，三页无页面横向溢出；字号、选框、帧/修改项往返、专注退出和桌面恢复均检查真实状态。C 窄屏完整帧在上、A/B 局部图在下且等比例显示。390 浅深主题的使用说明检查正文可读宽高、目录位置、Tab 焦点循环、业务快捷键隔离及 Esc 回焦点；不能只测容器存在、一次截图或 CSS 字符串。短高专注窗口额外检查 390×480、320×480 的暂停/未暂停 × 增强/无增强组合：实际滚动到确认、修正、帧跳转和退出并验证中心命中，不能让 `overflow:hidden` 裁掉核心操作；1366×768 对照不能出现新增的多余滚动。登录和标注记录的视觉复核还需含登录错误、记录空态/密集列表、查询筛选、表格自身横滚及分页，模拟记录要与真实API夹具明确区分。
+
+该固定套件同时执行 `review-zoom-checks.mjs`，验证审查页的自动适应与手动缩放：连续放大、缩小后再放大超过初始倍率；手动倍率在换帧、滚动条出现、收起视频列表及窗口变化后保留；显式“适应窗口”恢复自动模式，随后窗口变化继续自适应；切换视频重新适应。缩放不得改变框的原图坐标、草稿或提交进度。占位式滚动条会改变 viewport 的可用尺寸，必须与不占位滚动条的正常场景成对测试；仅在默认无占位的无头浏览器里点击一次放大不能替代。固定用例关闭无头浏览器默认的隐藏滚动条选项，只在测试页面设置 15 px 占位滚动条，并断言真实占位宽度，不模拟 ResizeObserver 或缩放状态。`REVIEW_ZOOM_NATIVE_SCROLLBARS=1` 可省略测试样式，作为系统原生环境对照。真实可见 Chrome 中按相同步骤复测，保存操作前后截图与倍率、SVG/viewport 尺寸记录，保留修复前失败证据。固定套件还检查至少 120% 手动倍率下真实拖框的原图坐标换算、保存与撤销。旧 API 配置与 macOS 可见 Chrome 验证不等于医院真实 Windows / Chrome 93 引擎验收。
+
+同套隔离 B 夹具也可单独运行缩放复现入口；`REVIEW_FIXTURE` 指向该批审查夹具 JSON，`REVIEW_ORIGIN` 指向自己的测试前端。需要观察实际窗口时使用 `REVIEW_ZOOM_HEADED=1`，并用 `LEGACY_BROWSER=1` 检查缺失新 API 的配置；不得指向用户正在编辑的业务任务。
+
+```bash
+REVIEW_ZOOM_HEADED=1 LEGACY_BROWSER=1 REVIEW_ORIGIN=http://127.0.0.1:5373 node frontend/tests/review-zoom-browser.mjs
+```
 
 其他脚本按上表选择 `node frontend/tests/<脚本>.mjs`：
 

@@ -1,5 +1,5 @@
 """Explicit earlier-frame restarts, with recoverable file publication and receipts."""
-from contextlib import closing
+from contextlib import closing, nullcontext
 import hashlib
 import json
 import logging
@@ -53,6 +53,24 @@ def _publish_file(staged, target):
     _sync_directory(target.parent)
 
 
+def _invalidate_old_preview(directory, fingerprint):
+    if fingerprint is None:
+        return
+    path = directory / 'tracker_overlay.mp4'
+    try:
+        if not path.is_file():
+            return
+        stat = path.stat()
+        if [stat.st_size, stat.st_mtime_ns, stat.st_ino] == fingerprint:
+            path.unlink()
+            _sync_directory(directory)
+    except OSError:
+        # Results are already committed. Cached preview reads still validate
+        # their result signature and must regenerate or fail, never serve this
+        # obsolete file. Do not turn cache cleanup into a failed source edit.
+        log.exception('tracking.preview_cleanup_pending media=%s', directory.name)
+
+
 @source_write
 def recover(root, media_id=None):
     journals = Path(root) / JOURNAL_ROOT
@@ -76,9 +94,15 @@ def recover(root, media_id=None):
         if media_id is not None and mid != media_id:
             continue
         directory = Path(root) / mid
-        with closing(connect()) as c:
-            receipt = c.execute("SELECT request_hash FROM review_write_receipts WHERE user_id=? AND request_key=?", (data["uid"], data["key"])).fetchone()
-        committed = receipt is not None and receipt["request_hash"] == data["hash"]
+        if data.get('commitMode') == 'file':
+            marker = folder / 'committed.json'
+            committed = marker.is_file() and json.loads(marker.read_text(encoding='utf-8')).get('hash') == data['hash']
+        elif data.get('commitMode', 'sql') == 'sql':
+            with closing(connect()) as c:
+                receipt = c.execute("SELECT request_hash FROM review_write_receipts WHERE user_id=? AND request_key=?", (data["uid"], data["key"])).fetchone()
+            committed = receipt is not None and receipt["request_hash"] == data["hash"]
+        else:
+            raise RuntimeError('Invalid tracking restart commit mode')
         if not committed and not data.get("rolledBack"):
             for name, existed in data["files"].items():
                 if existed:
@@ -93,6 +117,8 @@ def recover(root, media_id=None):
             _write(folder / "journal.tmp", packed(data).encode())
             (folder / "journal.tmp").replace(journal)
             _sync_directory(folder)
+        if committed:
+            _invalidate_old_preview(directory, data.get('previewFingerprint'))
         # A committed operation must never overwrite a later workspace or run.
         try:
             shutil.rmtree(folder)
@@ -113,6 +139,107 @@ def recover_directory(directory):
 
 def _object_id(item):
     return item.get("objectId", item.get("object_id")) if isinstance(item, dict) else None
+
+
+def _stage_branch_files(directory, rows, workspace_bytes, *, uid, key, digest, commit_mode='sql', folder=None, invalidate_preview=False):
+    folder = folder or directory.parent / JOURNAL_ROOT / uuid.uuid4().hex
+    folder.mkdir(parents=True, mode=0o700)
+    existed = {}
+    for name in FILES:
+        path = directory / name
+        existed[name] = path.is_file()
+        if existed[name]:
+            shutil.copyfile(path, folder / (name + '.old'))
+            with (folder / (name + '.old')).open('r+b') as stream:
+                os.fsync(stream.fileno())
+    with (folder / (FILES[0] + '.new')).open('wb') as stream:
+        for row in rows:
+            stream.write((packed(row) + '\n').encode())
+        stream.flush()
+        os.fsync(stream.fileno())
+    if workspace_bytes is not None:
+        _write(folder / (FILES[1] + '.new'), workspace_bytes)
+    fingerprint = None
+    preview = directory / 'tracker_overlay.mp4'
+    if invalidate_preview and preview.is_file():
+        stat = preview.stat()
+        fingerprint = [stat.st_size, stat.st_mtime_ns, stat.st_ino]
+    _write(folder / 'journal.tmp', packed(dict(format='tracking-restart-v1', mediaId=directory.name,
+           uid=uid, key=key, hash=digest, files=existed, commitMode=commit_mode,
+           previewFingerprint=fingerprint)).encode())
+    (folder / 'journal.tmp').replace(folder / 'journal.json')
+    _sync_directory(folder)
+    _sync_directory(folder.parent)
+    _sync_directory(directory.parent)
+    return folder
+
+
+@source_write
+def rewind(directory, cutoff, *, uid=None, request_key=None):
+    """Trim future rows and retire their relationships in one recoverable edit.
+
+    HTTP callers use their real user's SQL receipt as the commit point. Direct
+    standalone tracking has no user account, so the same journal uses a durable
+    local commit marker. Neither path advances the editor workspace revision.
+    """
+    directory = Path(directory)
+    if type(cutoff) is not int or cutoff < 0:
+        raise HTTPException(422, '追踪回退帧无效')
+    key = request_key or 'rewind-internal-' + uuid.uuid4().hex
+    if not isinstance(key, str) or not key.strip() or len(key) > 128:
+        raise HTTPException(428, '追踪回退需要有效的重试标识')
+    recover_directory(directory)
+    state = annotation_state.read_state(directory)
+    digest = hashlib.sha256(packed(['tracking-rewind', directory.name, cutoff, state.get('generationId')]).encode()).hexdigest()
+    folder = None
+    try:
+        with (closing(connect()) if uid is not None else nullcontext(None)) as c:
+            if c is not None:
+                c.execute('BEGIN IMMEDIATE')
+                prior = c.execute('SELECT request_hash,response_json FROM review_write_receipts WHERE user_id=? AND request_key=?', (uid, key)).fetchone()
+                if prior:
+                    if prior['request_hash'] != digest:
+                        raise HTTPException(409, '同一重试标识不能用于不同追踪回退')
+                    log.info('tracking.rewind_replay media=%s actor=%s key=%s', directory.name, uid, key)
+                    return json.loads(prior['response_json'])
+            rows = annotation_state.read_rows(directory, validate_geometry=True)
+            kept = [row for row in rows if row['source_frame_index'] <= cutoff]
+            clean = annotation_state.retire_future_relationships(state, cutoff)
+            response = dict(cutoffFrame=cutoff, keptRows=len(kept), removedRows=len(rows)-len(kept),
+                            deletedFutureSeedFiles=0, overlayRegenerated=False)
+            if response['removedRows'] or clean != state:
+                # An absent legacy workspace must stay absent: publishing an
+                # empty file would hide its durable manual seed annotations.
+                workspace_bytes = packed(clean).encode() if (directory / annotation_state.FILE_NAME).is_file() or clean else None
+                if workspace_bytes is not None and len(workspace_bytes) > 64 * 1024 * 1024:
+                    raise HTTPException(413, '工作区状态超过 64 MiB')
+                folder = directory.parent / JOURNAL_ROOT / uuid.uuid4().hex
+                _stage_branch_files(directory, kept, workspace_bytes, uid=uid, key=key,
+                                    digest=digest, commit_mode='sql' if c is not None else 'file', folder=folder,
+                                    invalidate_preview=response['removedRows'] > 0)
+                for name in FILES:
+                    if name == annotation_state.FILE_NAME and workspace_bytes is None:
+                        continue
+                    _publish_file(folder / (name + '.new'), directory / name)
+            if c is not None:
+                c.execute('INSERT INTO review_write_receipts VALUES (?,?,?,?,?)', (uid, key, digest, packed(response), now()))
+                c.commit()
+            elif folder is not None:
+                _write(folder / 'commit.tmp', packed({'hash': digest}).encode())
+                (folder / 'commit.tmp').replace(folder / 'committed.json')
+                _sync_directory(folder)
+        retired_count = len(clean.get('_retiredTrackingRelationshipEventIds', [])) - len(state.get('_retiredTrackingRelationshipEventIds', []))
+        log.info('tracking.rewind media=%s cutoff=%s kept=%s removed=%s retired_relationships=%s revision=%s key=%s',
+                 directory.name, cutoff, response['keptRows'], response['removedRows'], retired_count, state.get('revision', 0), key)
+        return response
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.exception('tracking.rewind_failed media=%s cutoff=%s key=%s', directory.name, cutoff, key)
+        raise HTTPException(503, '追踪回退保存失败，旧结果和判断已保留，请重试') from exc
+    finally:
+        if folder is not None:
+            recover_directory(directory)
 
 
 def restart(directory, uid, key, body, info, tracking_busy):
@@ -169,7 +296,7 @@ def restart(directory, uid, key, body, info, tracking_busy):
             if not any(not annotation_state.is_deleted(state, start, _object_id(obj)) for obj in [*manual, *ai]):
                 raise HTTPException(422, "重建起点没有有效的框，请先修正并保存人工框")
             kept = [row for row in rows if row["source_frame_index"] <= start]
-            clean = {**state, "revision": revision + 1, "updatedBy": uid, "pausedAnomalies": [], "lastPausedContext": None,
+            clean = {**annotation_state.retire_future_relationships(state, start), "revision": revision + 1, "updatedBy": uid, "pausedAnomalies": [], "lastPausedContext": None,
                      "_pauseCandidates": [], "_pauseContext": None,
                      "anomalyFrames": [item for item in state.get("anomalyFrames", []) if isinstance(item, dict) and type(item.get("frame_index")) is int and item["frame_index"] <= start]}
             response = dict(ok=True, mediaId=media_id, revision=revision + 1, pausedAnomalies=[], lastPausedContext=None,
@@ -178,26 +305,8 @@ def restart(directory, uid, key, body, info, tracking_busy):
             if len(workspace_bytes) > 64 * 1024 * 1024:
                 raise HTTPException(413, "工作区状态超过 64 MiB")
             folder = directory.parent / JOURNAL_ROOT / uuid.uuid4().hex
-            folder.mkdir(parents=True, mode=0o700)
-            existed = {}
-            for name in FILES:
-                path = directory / name
-                existed[name] = path.is_file()
-                if existed[name]:
-                    shutil.copyfile(path, folder / (name + ".old"))
-                    with (folder / (name + ".old")).open("r+b") as stream:
-                        os.fsync(stream.fileno())
-            with (folder / (FILES[0] + ".new")).open("wb") as stream:
-                for row in kept:
-                    stream.write((packed(row) + "\n").encode())
-                stream.flush()
-                os.fsync(stream.fileno())
-            _write(folder / (FILES[1] + ".new"), workspace_bytes)
-            _write(folder / "journal.tmp", packed(dict(format="tracking-restart-v1", mediaId=media_id, uid=uid, key=key, hash=h, files=existed)).encode())
-            (folder / "journal.tmp").replace(folder / "journal.json")
-            _sync_directory(folder)
-            _sync_directory(folder.parent)
-            _sync_directory(directory.parent)
+            _stage_branch_files(directory, kept, workspace_bytes, uid=uid, key=key, digest=h, folder=folder,
+                                invalidate_preview=response['removedRows'] > 0)
             for name in FILES:
                 _publish_file(folder / (name + ".new"), directory / name)
             c.execute("INSERT INTO review_write_receipts VALUES (?,?,?,?,?)", (uid, key, h, packed(response), now()))

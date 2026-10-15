@@ -26,9 +26,14 @@ def test_anomaly_panel_contract_keeps_markers_and_uses_real_names() -> None:
     assert "查看前几帧是否已经偏移" in panel
     # Per-object feedback remains bound to the pause frame, while an explicit
     # earlier-frame restart is a separate action (covered by browser checks).
-    assert "请返回暂停帧确认" in panel
-    assert "从本帧修正并重新追踪" in panel and "旧暂停不视为“无异常”" in panel
-    assert "currentFrame!==pausedFrame" in panel
+    # These are wiring guards, not a replacement for tracking-focus-checks:
+    # that browser test returns via the chip, waits for a successful frame read,
+    # and proves confirmation remains disabled on the earlier frame.
+    assert '@select="selectFeedbackObject"' in page
+    assert "frameInput.value=trackingPausedFrame.value;await seekToInputFrame()" in page
+    assert 'data-testid="tracking-restart-open"' in panel and "$emit('restart')" in panel
+    object_confirmation = panel[panel.index('data-testid="confirm-tracking-object-normal"'):panel.index('data-testid="confirm-tracking-corrected"')]
+    assert "currentFrame!==pausedFrame" in object_confirmation
 
 
 def test_tracking_requires_explicit_per_object_feedback_before_resume() -> None:
@@ -41,8 +46,16 @@ def test_tracking_requires_explicit_per_object_feedback_before_resume() -> None:
     assert "const prepareTrackingFeedback" in store
     assert "const retryTrackingAnomalyFeedback" in store
     assert "submitFeedback" in api and "Idempotency-Key" in api
-    assert "所有对象确认后才继续追踪" in panel
-    assert "取消勾选不调整运动范围" in panel
+    # Exact scope and server-owned completion matter; punctuation and long
+    # resident descriptions do not. The fixed browser suite verifies mixed
+    # normal/corrected decisions, remaining items, and lost-response replay.
+    object_confirmation = panel[panel.index('data-testid="confirm-tracking-object-normal"'):panel.index('data-testid="confirm-tracking-corrected"')]
+    frame_confirmation = panel[panel.index('data-testid="confirm-tracking-normal"'):panel.index('data-testid="retry-tracking-feedback"')]
+    assert "$emit('confirm','normal','object')" in object_confirmation
+    assert "$emit('confirm','normal','frame')" in frame_confirmation
+    assert "!pausedAnomalies.value.some(item=>!item.resolved) && !response.lastPausedContext" in store
+    assert "workspaceWrites.write(intent.serverMediaId, 'feedback', intent.body, intent.key)" in store
+    assert "calibrate: decision === 'normal' && learn" in store
     assert "tracking-geometry-acceptance" in panel and "无需重画" in panel
 
 

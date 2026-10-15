@@ -76,13 +76,13 @@ def test_head_stable_but_tail_cropped_is_risk():
     assert report['head']['status']=='matched'
 
 
-def test_full_bbox_with_head_only_mask_does_not_hide_tail_loss():
+def test_full_bbox_with_head_only_mask_reports_segmentation_quality_warning():
     image,mask,box=_scene()
     probe=_probe();probe.prime(0,image,{1:box})
     truncated=np.zeros_like(mask);cv2.circle(truncated,(60,100),11,1,-1)
     report=probe.observe(1,image,{1:box},{1:_region(truncated)})[1]
-    assert report['status']=='risk'
-    assert report['coverage']['status']=='tail_loss'
+    assert report['status']=='warning'
+    assert report['coverage']['status']=='local_mask_coverage'
 
 
 def test_near_head_phase_fringe_is_not_a_major_tail_loss():
@@ -107,17 +107,17 @@ def test_thick_background_lobe_is_not_assumed_to_be_another_head():
     assert report['coverage']['metrics']['thicknessToHeadDistance']>20
 
 
-def test_mask_thickest_part_focused_on_other_gray_core_is_risk():
+def test_mask_focus_on_other_core_warns_when_own_subject_remains_in_bbox():
     reference,mask,box=_scene()
     probe=_probe();probe.prime(0,reference,{16:box})
     image,_,_=_scene(extra=((124,103),112,5))
     focused=mask.copy();cv2.circle(focused,(124,103),17,1,-1)
     ys,xs=np.nonzero(focused);newbox=[float(xs.min()),float(ys.min()),float(xs.max()+1),float(ys.max()+1)]
     report=probe.observe(1,image,{16:newbox},{16:_region(focused)})[16]
-    assert report['status']=='risk'
+    assert report['status']=='warning'
     assert report['head']['status']=='matched'
-    assert report['coverage']['status']=='foreign_core'
-    assert 'foreign_core_focus' in report['reasons']
+    assert report['coverage']['status']=='mask_contamination'
+    assert 'own_subject_retained_with_foreign_mask_focus' in report['reasons']
 
 
 def test_baseline_gray_core_is_ambiguous_context_not_new_risk_every_frame():
@@ -127,8 +127,8 @@ def test_baseline_gray_core_is_ambiguous_context_not_new_risk_every_frame():
     ys,xs=np.nonzero(focused);newbox=[float(xs.min()),float(ys.min()),float(xs.max()+1),float(ys.max()+1)]
     for frame in (1,2,3):
         report=probe.observe(frame,image,{16:newbox},{16:_region(focused)})[16]
-        assert report['status']=='unknown'
-        assert report['coverage']['status']=='unknown'
+        assert report['status']=='uncertain'
+        assert report['coverage']['status']=='subject_present_uncertain'
         assert report['coverage']['metrics']['baselineContextMatched'] is True
         assert 'accepted_core_context_ambiguous' in report['reasons']
 
@@ -166,14 +166,14 @@ def test_overlapping_rectangles_need_real_mask_iou_and_distinct_cores_for_indepe
     assert 2 in reports[1]['coverage']['metrics']['independentObjectIds']
 
 
-def test_two_strong_cores_inside_mask_are_merge_risk():
+def test_two_strong_cores_inside_mask_warn_if_reliable_own_subject_is_retained():
     image,mask,box=_scene()
     probe=_probe();probe.prime(0,image,{1:box})
     merged=image.copy();cv2.circle(merged,(116,100),8,(38,)*3,-1)
     multimask=mask.copy();cv2.circle(multimask,(116,100),11,1,-1)
     report=probe.observe(1,merged,{1:box},{1:_region(multimask)})[1]
-    assert report['status']=='risk'
-    assert report['coverage']['status']=='merge'
+    assert report['status']=='warning'
+    assert report['coverage']['status']=='mask_contamination'
 
 
 def test_ambiguous_first_reference_remains_unknown():
@@ -257,3 +257,55 @@ def test_invalid_bbox_is_json_safe_and_never_supported():
     report=probe.observe(1,image,{1:[float('nan'),0,30,20]},{1:_region(mask)})[1]
     assert report['status']=='unknown'
     json.dumps(report,allow_nan=False)
+
+
+@pytest.mark.parametrize('neighbor,tail_cropped,expected_pause', [(False,True,True),(True,True,True),(True,False,False)])
+def test_neighbor_mask_contamination_cannot_override_clear_own_structure_outside_bbox(neighbor,tail_cropped,expected_pause):
+    """Known synthetic tail geometry, not a claim about clinical sperm truth.
+
+    In the cropped pair, the BBox and Mask are identical. Adding only a distinct
+    neighboring optical core must not suppress the same major outside loss.
+    The complete-tail case keeps harmless contamination as a warning.
+    """
+    from app.services.anomaly_detector import AnomalyDetector, ManualBaseline
+    reference,fullmask,fullbox=_scene()
+    image=reference.copy()
+    mask=np.zeros_like(fullmask) if tail_cropped else fullmask.copy()
+    if tail_cropped:
+        cv2.circle(mask,(60,100),11,1,-1)
+    cv2.circle(mask,(83,80),11,1,-1)
+    if neighbor:
+        cv2.circle(image,(83,80),8,(38,)*3,-1)
+    ys,xs=np.nonzero(mask);box=[float(xs.min()),float(ys.min()),float(xs.max()+1),float(ys.max()+1)]
+    probe=_probe();probe.prime(0,reference,{7:fullbox})
+    detector=AnomalyDetector(frame_width=320,frame_height=240,fps=30,all_object_ids=[7],manual_baselines={7:ManualBaseline(fullbox,0)})
+    detector.initialize_seed(0,{7:fullbox})
+    decisions=[]
+    for frame in(1,2,3):
+        evidence=probe.observe(frame,image,{7:box},{7:_region(mask)})[7]
+        report=detector.push(frame,{7:box},mask_areas={7:int(mask.sum())},identity_evidence={7:evidence})
+        decisions.append(report.should_pause)
+    assert any(decisions)==expected_pause, 'clear own major loss must remain actionable even when a neighbor is also segmented'
+    if tail_cropped:
+        assert evidence['coverage']['status']=='tail_loss'
+        assert all(item['branch']['outsidePixels']>150 for item in evidence['coverage']['metrics']['tailScales'])
+    else:
+        assert evidence['status']=='warning' and evidence['coverage']['status']=='mask_contamination'
+
+
+def test_tail_continuation_past_a_neighbor_head_is_not_attributed_to_our_object():
+    reference,mask,box=_scene()
+    image=reference.copy()
+    # Our trusted full tail is unchanged. An added neighbor and bright
+    # continuation past its optical core create an apparent connected ridge
+    # outside our rectangle. It must stop supplying own-object loss evidence.
+    cv2.line(image,(68,100),(150,100),(180,)*3,3)
+    cv2.circle(image,(115,100),8,(38,)*3,-1)
+    mixed=mask.copy();cv2.circle(mixed,(115,100),11,1,-1)
+    probe=_probe();probe.prime(0,reference,{7:box})
+    for frame in(1,2,3):
+        report=probe.observe(frame,image,{7:box},{7:_region(mixed)})[7]
+        assert report['status']=='warning' and report['coverage']['status']=='mask_contamination'
+        metrics=report['coverage']['metrics']
+        assert metrics['tailAssociationAmbiguous'] is True
+        assert all(scale['branch']['outsidePixels']==0 for scale in metrics['tailScales'])

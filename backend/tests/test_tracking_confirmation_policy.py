@@ -68,7 +68,7 @@ def test_confirmation_captures_actual_mask_and_receipt_reference(tmp_path, caplo
     response = _save(tmp_path, body)
     event = response["trackingFeedbackEvents"][-1]
     assert event["geometryReference"] == {"objectId": 7, "frameIndex": 5, "bbox": box,
-                                          "maskArea": 217, "source": "confirmed-normal"}
+                                          "maskArea": 217, "source": "confirmed-normal", "checkpoint": True}
     assert response["confirmedReference"]["eventId"] == event["id"]
     assert response["confirmedReference"]["geometryReference"] == event["geometryReference"]
     assert _save(tmp_path, body) == response
@@ -146,28 +146,29 @@ def test_active_corrupt_confirmation_remains_an_error():
         require_confirmed_geometry(workspace, 3, {7}, {}, refs)
 
 
-def test_confirmed_overlap_captures_every_actual_pair_not_last_other_id(tmp_path):
+def test_frame_overlap_captures_every_actual_pair_not_last_other_id(tmp_path):
     _, body, _ = _approval(tmp_path,
                           reasons=["bbox_overlap_with=9 coverage=0.951 HARD", "bbox_overlap_with=12 coverage=0.990 HARD"],
                           details={"other_object_id": 12})
+    body = {**body, 'scope': 'frame'}
     result = _save(tmp_path, body)
-    references = result["trackingFeedbackEvents"][-1].get("overlapReferences")
+    references = result["trackingFeedbackEvents"][0].get("overlapReferences")
     assert [ref["objectIds"] for ref in references] == [[7, 9], [7, 12]]
     assert all(ref["frameIndex"] == 5 and ref["source"] == "confirmed-normal" for ref in references)
     actual = json.loads((tmp_path / "tracker_results.json").read_text())["objects"]
     boxes = {item["object_id"]: item["bbox"] for item in actual}
     assert [ref["bboxes"] for ref in references] == [[boxes[oid] for oid in ref["objectIds"]] for ref in references]
-    assert result["confirmedReference"]["overlapReferences"] == references
+    assert result["confirmedReference"]["overlapReferences"] == result['trackingFeedbackEvents'][-1]['overlapReferences']
     assert _save(tmp_path, body) == result
     loaded = _overlap_loader()(annotation_state.read_state(tmp_path), 5, {})
-    assert set(loaded) == {(7, 9), (7, 12)}
-    assert loaded[(7, 9)].event_id == result["trackingFeedbackEvents"][-1]["id"]
+    assert set(loaded) == {(7, 9), (7, 12), (9, 12)}
+    assert loaded[(7, 9)].event_id == result["trackingFeedbackEvents"][1]["id"]
 
 
 def test_structured_overlap_pairs_are_used_and_unrelated_pairs_rejected(tmp_path):
     _, body, _ = _approval(tmp_path, reasons=["bbox_overlap_with=9 coverage=0.980 HARD"],
                           details={"overlap_pairs": [{"object_ids": [7, 9]}, {"object_ids": [7, 12]}, {"object_ids": [9, 12]}]})
-    refs = _save(tmp_path, body)["trackingFeedbackEvents"][-1]["overlapReferences"]
+    refs = _save(tmp_path, {**body, 'scope': 'frame'})["trackingFeedbackEvents"][0]["overlapReferences"]
     assert [ref["objectIds"] for ref in refs] == [[7, 9], [7, 12]]
 
 

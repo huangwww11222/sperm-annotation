@@ -68,11 +68,26 @@ onUnmounted(restore)
 </template>
 
 <style scoped>
-.user-guide{width:min(940px,calc(100vw - 48px));max-width:none;height:min(720px,calc(100dvh - 64px));max-height:none;margin:auto;padding:0;border:1px solid var(--line);border-radius:16px;background:var(--surface);color:var(--text);box-shadow:0 24px 100px #0005;overflow:hidden}
+.user-guide{width:min(940px,calc(100vw - 48px));max-width:none;height:min(720px,calc(100vh - 64px));height:min(720px,calc(100dvh - 64px));max-height:none;margin:auto;padding:0;border:1px solid var(--line);border-radius:10px;background:var(--surface);color:var(--text);box-shadow:0 24px 100px #0005;overflow:hidden}
 .user-guide[open]{display:flex;flex-direction:column}.user-guide::backdrop{background:#0c203588;backdrop-filter:blur(3px)}
 .user-guide-header{display:flex;justify-content:space-between;align-items:center;padding:20px 24px;border-bottom:1px solid var(--line);flex-shrink:0}.user-guide-header h2{font-size:20px;font-weight:700}.user-guide-header p{font-size:12px;color:var(--muted);margin-top:5px}
-.user-guide-layout{display:grid;grid-template-columns:216px minmax(0,1fr);min-height:0;flex:1}.user-guide-nav{padding:18px 14px;background:var(--surface-subtle);border-right:1px solid var(--line);overflow:auto}.user-guide-nav input{width:100%;font-size:11px}.user-guide-nav nav{display:flex;flex-direction:column;gap:5px;margin-top:16px}.user-guide-nav button{text-align:left;padding:10px;border-radius:7px;font-size:13px}.user-guide-nav button:hover{background:var(--surface-hover)}.user-guide-nav button[aria-current]{background:var(--accent-soft);color:var(--accent);font-weight:600}.user-guide-nav p{font-size:12px;line-height:1.7;margin-top:16px;color:var(--muted)}
+.user-guide-layout{display:grid;grid-template-columns:216px minmax(0,1fr);min-height:0;flex:1}.user-guide-nav{padding:18px 14px;background:var(--surface-subtle);border-right:1px solid var(--line);overflow:auto}.user-guide-nav input{width:100%;font-size:12px}.user-guide-nav nav{display:flex;flex-direction:column;gap:5px;margin-top:16px}.user-guide-nav button{text-align:left;padding:10px;border-radius:7px;font-size:13px}.user-guide-nav button:hover{background:var(--surface-hover)}.user-guide-nav button[aria-current]{background:var(--accent-soft);color:var(--accent);font-weight:600}.user-guide-nav p{font-size:12px;line-height:1.7;margin-top:16px;color:var(--muted)}
 .user-guide-content{padding:24px 28px;overflow:auto;font-size:13px;line-height:1.85;overscroll-behavior:contain}.user-guide-content h3{font-size:21px;font-weight:650;margin-bottom:18px}.user-guide-content p,.user-guide-content ol,.user-guide-content ul,.user-guide-content table{margin-bottom:18px}.user-guide-content ol{list-style:decimal;padding-left:23px}.user-guide-content ul{list-style:disc;padding-left:20px}.user-guide-content li{margin:8px 0;padding-left:3px}.user-guide-content li::marker{color:var(--accent);font-weight:650}.user-guide-content table{border-collapse:collapse;width:100%;font-size:12px}.user-guide-content th,.user-guide-content td{padding:7px 9px;border:1px solid var(--line);text-align:left}.user-guide-content th{background:var(--surface-subtle)}
 .user-guide-footer{display:flex;gap:12px;align-items:center;justify-content:flex-end;padding:15px 20px;border-top:1px solid var(--line);flex-shrink:0}.user-guide-footer span{margin-right:auto;font-size:11px;color:var(--muted)}
 @media(max-width:950px){.user-guide-launcher{font-size:11px;padding:6px}.user-guide-launcher svg{display:none}.user-guide-layout{grid-template-columns:185px minmax(0,1fr)}.user-guide-content{padding:20px}.user-guide-footer span{display:none}}
+@media(max-width:600px){
+  .user-guide{width:calc(100vw - 24px);height:calc(100vh - 24px);height:calc(100dvh - 24px)}
+  .user-guide-header{padding:12px 14px}
+  .user-guide-header h2{font-size:18px}
+  .user-guide-layout{display:flex;flex-direction:column}
+  .user-guide-nav{padding:10px 12px;flex-shrink:0;max-height:160px;border-right:0;border-bottom:1px solid var(--line)}
+  .user-guide-nav nav{flex-direction:row;flex-wrap:wrap;gap:4px;margin-top:8px}
+  .user-guide-nav button{font-size:12px;padding:7px 8px}
+  .user-guide-content{padding:16px;min-height:0;flex:1}
+  .user-guide-content h3{font-size:18px}
+  .user-guide-content table{font-size:11px;table-layout:fixed;overflow-wrap:anywhere}
+  .user-guide-content th,.user-guide-content td{padding:6px 5px}
+  .user-guide-footer{padding:10px 12px;gap:8px;flex-wrap:wrap}
+  .user-guide-footer button{font-size:12px;padding:7px 9px;flex:1}
+}
 </style>

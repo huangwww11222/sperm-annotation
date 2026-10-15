@@ -10,6 +10,45 @@ from typing import Any
 from .services.anomaly_detector import AnomalyFrame, AnomalyLevel, AnomalyReport
 
 
+def classify_pause_reason(reasons: list[str], *, disappeared: bool = False,
+                          fallback: str = 'tracking_motion') -> str:
+    """Describe hard evidence only; advisory ratios cannot rename a pause.
+
+    Used by tracker publication and saved-pause presentation. This function
+    neither decides whether to pause nor grants a feedback/calibration scope.
+    """
+    hard = [reason for reason in reasons if isinstance(reason, str) and reason.endswith(' HARD')]
+    if disappeared or any('disappearance' in reason for reason in hard):
+        return 'disappearance'
+    if any(reason.startswith('image_tail') for reason in hard):
+        return 'coverage_loss'
+    if any(reason.startswith('image_') for reason in hard):
+        return 'identity_loss'
+    if any(reason.startswith('bbox_overlap_with=') for reason in hard):
+        return 'overlap'
+    sizes = []
+    for reason in hard:
+        key, _, value = reason.partition('=')
+        if key not in {f'{prefix}_{metric}' for prefix in ('manual', 'geometry')
+                       for metric in ('area_ratio', 'width_ratio', 'height_ratio', 'diagonal_ratio')} \
+                and key != 'confirmed_mask_area_ratio':
+            continue
+        try:
+            ratio = float(value.split()[0])
+        except (ValueError, IndexError):
+            continue
+        if math.isfinite(ratio):
+            sizes.append(ratio)
+    if sizes:
+        return 'size_shrink' if any(value < 1 for value in sizes) else 'size_growth'
+    if any(reason.startswith(('manual_aspect_change=', 'geometry_aspect_change=')) for reason in hard):
+        return 'shape_change'
+    if any(reason.startswith(('adjacent_center_shift=', 'motion_')) for reason in hard):
+        return 'tracking_motion'
+    # Unknown historic/custom diagnostics do not establish a new motion cause.
+    return fallback
+
+
 def require_confirmed_geometry(workspace: dict[str, Any], seed_frame: int, active_ids: set[int],
                                manual_baselines: dict[int, Any], references: dict[int, Any]) -> None:
     """Never silently continue without the newest applicable human approval.

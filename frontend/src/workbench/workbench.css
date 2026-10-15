@@ -1,13 +1,12 @@
-/* Shared spatial contract for annotation, review, and confirmation. Page CSS
-   styles its content; column widths, collapse behavior and viewport height live here. */
-.workbench-page{height:calc(100vh - 104px);min-height:620px;display:flex;flex-direction:column;gap:10px;min-width:0;color:var(--text);background:var(--app-bg)}
+/* Shared spatial contract: page CSS owns content, this file owns columns and height. */
+.workbench-page{height:calc(100vh - var(--app-header-height) - 2 * var(--page-gutter));min-height:560px;display:flex;flex-direction:column;gap:10px;min-width:0;color:var(--text);background:var(--app-bg)}
 .workbench-layout{display:grid;grid-template-columns:210px minmax(0,1fr) 288px;gap:12px;flex:1;min-width:0;min-height:0}
 .workbench-library,.workbench-canvas,.workbench-inspector{min-width:0;min-height:0;display:flex;flex-direction:column}
 .workbench-library{gap:6px}
 .workbench-library-content{flex:1;min-height:0;display:flex;flex-direction:column}
 .workbench-library-content>*{flex:1;min-height:0;max-height:none!important;position:static!important}
 .workbench-canvas>*,.workbench-inspector>*{flex:1;min-height:0}
-.workbench-library-toggle{display:flex;align-items:center;gap:8px;width:100%;border:1px solid var(--line);border-radius:7px;padding:6px 9px;background:var(--surface);color:var(--muted);font-size:11px;line-height:16px;flex-shrink:0}
+.workbench-library-toggle{display:flex;align-items:center;gap:8px;width:100%;min-height:32px;border:1px solid var(--line);border-radius:6px;padding:6px 9px;background:var(--surface);color:var(--muted);font-size:12px;line-height:18px;flex-shrink:0}
 .workbench-library-toggle:hover{background:var(--surface-hover);color:var(--accent)}
 .workbench-library-arrow{margin-left:auto;transform:rotate(180deg)}
 .workbench-layout.library-collapsed{grid-template-columns:38px minmax(0,1fr) 288px}
@@ -18,8 +17,25 @@
 .workbench-page details>summary{cursor:pointer;user-select:none}
 .workbench-page details>summary:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
 .workbench-page .workflow-progress{position:relative;top:auto;z-index:2}
-@media(max-width:1200px){.workbench-layout{grid-template-columns:184px minmax(0,1fr) 264px;gap:10px}.workbench-layout.library-collapsed{grid-template-columns:36px minmax(0,1fr) 264px}.workbench-page{height:calc(100vh - 96px);gap:8px}}
-@media(max-width:950px){.workbench-layout{grid-template-columns:154px minmax(0,1fr) 238px;gap:8px}.workbench-layout.library-collapsed{grid-template-columns:34px minmax(0,1fr) 238px}.workbench-heading p{display:none}}
-@media(max-height:720px){.workbench-page{min-height:600px}}
-/* Focus mode must win over both responsive and remembered collapsed columns. */
-.workbench-layout.immersive{grid-template-columns:minmax(0,1fr);gap:0}
+@media(max-width:1200px){
+  .workbench-layout{grid-template-columns:184px minmax(0,1fr) 264px;gap:10px}
+  .workbench-layout.library-collapsed{grid-template-columns:36px minmax(0,1fr) 264px}
+  .workbench-page{gap:8px}
+}
+@media(max-width:960px){
+  .workbench-page{height:auto;min-height:calc(100vh - var(--app-header-height) - 2 * var(--page-gutter))}
+  .workbench-layout,.workbench-layout.library-collapsed{grid-template-columns:minmax(0,1fr) 264px;grid-template-rows:auto minmax(560px,auto);align-items:stretch}
+  .workbench-library{grid-column:1/-1}
+  .workbench-library-content{height:230px;flex:none}
+  .library-collapsed .workbench-library-toggle{height:auto;padding:6px 9px;flex-direction:row;justify-content:flex-start;gap:8px}
+  .library-collapsed .workbench-library-toggle span{writing-mode:horizontal-tb;letter-spacing:normal}
+  .library-collapsed .workbench-library-arrow{margin-left:auto;transform:none}
+  .workbench-heading p{display:none}
+}
+@media(max-width:700px){
+  .workbench-layout,.workbench-layout.library-collapsed{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(540px,auto) auto}
+  .workbench-inspector{min-height:500px}
+  .workbench-library-content{height:230px}
+}
+/* Focus must win over responsive and remembered collapsed columns. */
+.workbench-layout.immersive{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr);gap:0}
