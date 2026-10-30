@@ -187,6 +187,8 @@ def combine_tracks(rows,reverse,matches,candidates,*,width,height,manual=None,ex
             evidence['findings'].append(dict(objectId=oid,kind='joint_uncertain',message='自动标注仍有不确定性，请结合前后画面核对头部与身份',bbox=paths[oid].get(fi,('',None,0))[1]))
         evidence['jointCheck']=dict(state='checked',policy=POLICY,uncertainObjectIds=sorted(uncertain))
         review_count+=len(uncertain)
+    from .track_lifecycle import protect_boundary_exits
+    drafts=protect_boundary_exits(drafts,width=width,height=height,manual=manual,trajectory=rows)
     for row,draft in zip(rows,drafts):row.clear();row.update(draft)
     report=dict(version=1,policy=POLICY,state='checked',checkedFrames=len(rows),changedObjects=changed,recoveredObjects=recovered,reviewCount=review_count)
     log.info('tracking.joint_completed frames=%s changed=%s recovered=%s review=%s selections=%s',len(rows),changed,recovered,review_count,selection_counts)
@@ -220,7 +222,7 @@ def synthesize_video(video,rows,reverse,endpoint,workspace,progress=None):
         excluded={r['source_frame_index']:{oid for oid in scope if is_deleted(workspace,r['source_frame_index'],oid)} for r in rows}
         result=combine_tracks(rows,reverse,endpoint['matches'],observed,width=width,height=height,manual=manual,excluded=excluded)
         from .endpoint_tracking import project_endpoints
-        projected=project_endpoints(rows)
+        projected=project_endpoints(rows,width=width,height=height)
         for row,draft in zip(rows,projected):
             if row is not draft:row.clear();row.update(draft)
         return result

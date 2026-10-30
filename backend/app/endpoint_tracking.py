@@ -127,7 +127,7 @@ def verify_endpoints(video,engine,rows,tail,window_size=16,progress=None,reverse
                 competing=sorted((s,t) for (t,f),s in averages.items() if f==fid and t!=tid)
                 if competing and score-competing[-1][0]<.15:continue
                 report['matches'][str(tid)]=fid
-            if joint_mode:report['matches']=extend_matches(rows,reverse,report['matches'])
+            if joint_mode:report['matches']=reconcile_matches(rows,reverse,report['matches'])
             report.update(state='checked',checkedFrames=len(reverse),unmatchedTailIds=[t for t in reverse[end] if str(t) not in report['matches']])
             if reverse_observations is not None:reverse_observations.update(reverse)
     except Exception as exc:
@@ -216,7 +216,51 @@ def extend_matches(rows, reverse, matches):
     return result
 
 
-def project_endpoints(rows):
+def _padded_alignment(a, b):
+    """Containment plus close centres tolerates padding, not neighbouring heads."""
+    if not valid_box(a) or not valid_box(b):return False
+    areas=[(v[2]-v[0])*(v[3]-v[1]) for v in (a,b)]
+    if max(areas)/min(areas)>6.7:return False
+    inter=max(0,min(a[2],b[2])-max(a[0],b[0]))*max(0,min(a[3],b[3])-max(a[1],b[1]))
+    short=min(a[2]-a[0],a[3]-a[1],b[2]-b[0],b[3]-b[1])
+    distance=math.hypot((a[0]+a[2]-b[0]-b[2])/2,(a[1]+a[3]-b[1]-b[3])/2)
+    return inter/min(areas)>=.8 and distance<=max(2.,.75*short)
+
+
+def reconcile_matches(rows, reverse, matches, *, log_changes=True):
+    """A later identity collapse must not outweigh an independent first anchor.
+
+    Require a unique first-frame return AND contiguous multi-frame support.
+    An ambiguous/missing return leaves existing evidence alone, not a new guess.
+    """
+    result=dict(matches);frames={r['source_frame_index']:r for r in rows}
+    if not frames:return result
+    first=min(frames);proposals={}
+    for tid,box in reverse.get(first,{}).items():
+        heads=[o['object_id'] for o in frames[first]['objects'] if _padded_alignment(o['bbox'],box)]
+        if len(heads)!=1:continue
+        fid=heads[0];run=longest=0;last=None
+        for fi in sorted(reverse):
+            own=next((o['bbox'] for o in frames.get(fi,{}).get('objects',[]) if o['object_id']==fid),None)
+            if tid in reverse[fi] and _padded_alignment(own,reverse[fi][tid]):
+                run=run+1 if last is not None and fi==last+1 else 1
+                longest=max(longest,run);last=fi
+            else:run=0;last=None
+        if longest>=min(3,len(frames)):proposals[str(tid)]=fid
+    for tid,fid in proposals.items():
+        if list(proposals.values()).count(fid)!=1:continue
+        # Do not displace another already first-anchor-supported tail.
+        owners=[t for t,f in result.items() if f==fid and t!=tid]
+        if any(proposals.get(t)==fid for t in owners):continue
+        previous=result.get(tid)
+        for t in owners:del result[t]
+        result[tid]=fid
+        if previous is not None and previous!=fid:
+            (log.warning if log_changes else log.debug)('tracking.endpoint_identity_corrected tail=%s previous=%s object=%s evidence=first-anchor-and-contiguous-return',tid,previous,fid)
+    return extend_matches(rows,reverse,result)
+
+
+def project_endpoints(rows, *, width=None, height=None):
     """Pure, shared read projection for saved joint runs and newly generated rows.
 
     Source files and human originals remain untouched. The confirmed complete
@@ -236,14 +280,22 @@ def project_endpoints(rows):
         if type(oid) is not int or oid<=0 or oid in originals or not valid_box(box):raise ValueError('人工尾帧身份或坐标无效')
         originals[oid]=obj
     reverse={end:{oid:list(o['bbox']) for oid,o in originals.items()}}
+    forward=copy.deepcopy(rows)
     # Saved unmatched observations are real reverse boxes, not inferred motion.
-    for row in rows:
+    for row in forward:
         fi=row['source_frame_index'];boxes=reverse.setdefault(fi,{})
-        for finding in (row.get('reviewEvidence') or {}).get('findings',[]):
+        evidence=row.get('reviewEvidence') or {}
+        for finding in evidence.get('findings',[])+(evidence.get('boundaryExit') or {}).get('findings',[]):
             tid=finding.get('tailObjectId')
             if fi!=end and tid in originals and finding.get('kind')=='endpoint_identity_uncertain' and valid_box(finding.get('bbox')):
                 boxes[tid]=finding['bbox']
-    matches=extend_matches(rows,reverse,check.get('matches',{}))
+            if fi!=end and tid in originals and finding.get('kind')=='endpoint_disagreement' and valid_box(finding.get('reverseBox')):
+                boxes[tid]=finding['reverseBox']
+                # The saved final box may already be the incorrectly borrowed
+                # reverse candidate. Reassociate using the recorded forward box.
+                for obj in row['objects']:
+                    if obj['object_id']==finding.get('objectId') and valid_box(finding.get('bbox')):obj['bbox']=finding['bbox']
+    matches=reconcile_matches(forward,reverse,check.get('matches',{}),log_changes=False)
     aliases=dict(matches);unmatched_aliases={};assigned=set(matches.values())
     reserved={o['object_id'] for row in rows for o in row['objects']}|set(originals)|assigned
     for tid in originals:
@@ -258,7 +310,21 @@ def project_endpoints(rows):
         evidence=row.setdefault('reviewEvidence',{})
         updated=evidence.get('endpointCheck')
         if updated is not None:
-            updated.update(matches=matches,unmatchedTailIds=[tid for tid in originals if str(tid) not in matches],unmatchedAliases=unmatched_aliases,associationPolicy='head-centre-v1')
+            updated.update(matches=matches,unmatchedTailIds=[tid for tid in originals if str(tid) not in matches],unmatchedAliases=unmatched_aliases,associationPolicy='first-anchor-v2')
         if row['source_frame_index']==end:
             row['objects']=[dict(object_id=aliases[str(tid)],bbox=list(o['bbox']),name=o.get('name','rare sperm'),source='manual_endpoint',score=None,mask_area=None) for tid,o in originals.items()]
+    if width and height:
+        from .track_lifecycle import protect_boundary_exits
+        result=protect_boundary_exits(result,width=width,height=height,trajectory=forward,log_changes=False)
     return result
+
+
+def projection_dimensions(directory):
+    """Optional dimensions cannot turn unreadable metadata into guessed bounds."""
+    try:
+        info=json.loads((directory/'media.json').read_text(encoding='utf-8'))
+        dimensions={key:info.get(key) for key in ('width','height')}
+        if not all(type(v) in (int,float) and math.isfinite(v) and v>0 for v in dimensions.values()):return {}
+        return dimensions
+    except (OSError,ValueError,AttributeError):
+        return {}

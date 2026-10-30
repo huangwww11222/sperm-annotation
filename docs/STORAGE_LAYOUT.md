@@ -141,6 +141,8 @@ A/B/F 不随浏览、缩放、草稿、重新确认或退回重审而改写。F 
 
 首尾双向追踪没有新增业务数据库或独立可变模型标签文件。尾帧人工框保留在 workspace_state.json 的 manualAnnotations 中，唯一对应后统一 objectId，另存 endpointOriginalObjectId / endpointAnchorHash 以保留原局部编号并防止重复转换。本次首尾请求快照由原追踪幂等正文固定。JSONL 行 reviewEvidence.endpointCheck 保存状态、策略/端点哈希、一对一身份对应及末帧 terminalAnnotations 原始快照；反向框仅在差异疑点中保存，不替换正向对象数组。送审时将原始尾帧快照复制到集中审查 evidence_json，后续重追不抹除历史。A 来源合并兼容尚未完成客户端编号统一的尾框，已转换框不再次应用映射；未确定对应不强制合并。
 
+首帧回归纠错保留原锚点哈希与 endpointOriginalObjectId，同一哈希下明确映射更新仍从原编号应用，不能把旧 canonical ID 当原编号。`reviewEvidence.boundaryExit` 记录已退出的AI身份及归档诊断；历史读取投影只改变返回结果，不覆写源JSONL或删除墓碑。原始人工框及审查历史保留，无数据库/离线存储契约变更。训练来源摘要包含当前投影策略，避免继续把旧错配版本当作当前来源。
+
 `concentrated_reviews` 保存 session/source_hash/不可变 evidence_json 和当前 final_version_id；`concentrated_reopens` 保存重开帧、原最终版本、操作者与时间。Tracking 行 `reviewEvidence` 包含 findings、检查状态、反向核验状态、expectedObjectIds；同一原子发布保护。送审固定证据不再依赖可变工作区。
 
 为复用既有 F 外键与导出校验，新流程内部仍有 confirmation 记录，但决定 note 为 `review-acceptance:explicit-video-completion`，不是 C 人工点击。新审查完成与 F 在同一 SQL 事务；重开立即使旧导出无效，再完成只准当前最终指针。旧任务不迁移、不改原历史。此次为兼容新增表，离线 contract 仍为 1；回滚须恢复同批数据库/存储，不能只回退源码。

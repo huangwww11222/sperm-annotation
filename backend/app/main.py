@@ -1150,8 +1150,8 @@ def tracking_result(media_id: str, frameIndex: int | None = Query(default=None),
     if not directory.is_dir() or not find_video(directory):
         raise HTTPException(404, {'code':'MEDIA_NOT_FOUND', 'message':'原视频不存在，请核对素材库或联系管理员'})
     file = directory / RESULT_FILE_NAME
-    from .endpoint_tracking import project_endpoints
-    rows = project_endpoints(annotation_state.read_rows(directory, validate_geometry=True))
+    from .endpoint_tracking import project_endpoints, projection_dimensions
+    rows = project_endpoints(annotation_state.read_rows(directory, validate_geometry=True),**projection_dimensions(directory))
     if not file.is_file():
         if required is True:
             logging.getLogger('review.tracking').error('tracking.expected_result_missing media=%s', media_id)
@@ -1200,8 +1200,8 @@ def tracking_result_file(media_id: str, required: bool = Query(default=False), u
     if not directory.is_dir() or not find_video(directory):
         raise HTTPException(404, {'code':'MEDIA_NOT_FOUND', 'message':'原视频不存在，请核对素材库或联系管理员'})
     file = directory / RESULT_FILE_NAME
-    from .endpoint_tracking import project_endpoints
-    rows = project_endpoints(annotation_state.read_rows(directory, validate_geometry=True))
+    from .endpoint_tracking import project_endpoints, projection_dimensions
+    rows = project_endpoints(annotation_state.read_rows(directory, validate_geometry=True),**projection_dimensions(directory))
     if not file.is_file():
         if required is True:
             logging.getLogger('review.tracking').error('tracking.expected_result_missing media=%s operation=result_file', media_id)

@@ -69,8 +69,9 @@ def source(directory, uid, info):
                 else data.get("frames", data.get("results", [data]))
             )
         from .endpoint_tracking import project_endpoints
-        rows = project_endpoints([normalize_tracking_row(r) for r in rows])
-        if any((r.get('reviewEvidence') or {}).get('endpointCheck',{}).get('associationPolicy')=='head-centre-v1' for r in rows):manifest['endpointProjectionPolicy']='head-centre-v1'
+        rows = project_endpoints([normalize_tracking_row(r) for r in rows],width=info['width'],height=info['height'])
+        policies=sorted({(r.get('reviewEvidence') or {}).get('endpointCheck',{}).get('associationPolicy') for r in rows} - {None})
+        if policies:manifest['endpointProjectionPolicy']=policies
         frames = {}
         terminal_maps = {}
         terminal_checks = {}
@@ -123,7 +124,9 @@ def source(directory, uid, info):
                 y + box["height"] * info["height"] / 100,
             ]
             check = terminal_checks.get(fi, {})
-            canonical = oid if obj.get('endpointAnchorHash') == check.get('anchorHash') and obj.get('endpointAnchorHash') else terminal_maps.get(fi, {}).get(oid, oid)
+            same_anchor=bool(obj.get('endpointAnchorHash')) and obj.get('endpointAnchorHash')==check.get('anchorHash')
+            original_id=obj.get('endpointOriginalObjectId',oid) if same_anchor else oid
+            canonical = terminal_maps.get(fi, {}).get(original_id, oid)
             if not is_deleted(workspace, fi, canonical):
                 frames.setdefault(fi, {})[canonical] = make_object(obj, canonical, b, info)
         # Tail annotation IDs are independent local anchors. Keep originals in

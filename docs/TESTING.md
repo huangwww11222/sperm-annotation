@@ -382,4 +382,6 @@ interop 夹具生成真实 YOLO/COCO/双格式、多视频及重新确认前后�
 
 首尾重框回归：test_endpoint_duplicate_output.py 覆盖紧人工框/松AI框导致低IoU、连续时序恢复、自然双头竞争不合并、仅单帧重叠拒绝匹配、尾ID撞号、明确空尾帧、失败/历史策略保护，以及结果API/JSONL/导出/删除的一致性。实际冻结观察仅放 work/endpoint-duplicate-fix，标注为真实结果回放，不称为新模型推理或标注精度验收。
 
+出画身份专项：`test_boundary_exit_identity.py` 覆盖四边退出、部分头仍可见、连续裁切运动后借到邻居、普通画内遮挡/重叠、转向、缺图像风险、缺帧、人工重锚与已匹配尾帧保护；旧错误尾对应的纠正、读取幂等/源文件不变及 API/JSONL/导出一致性。运行时使用独立 APP_DATA_DIR/APP_DB_FILE/APP_STORAGE_DIR 与 PYTHONPATH=backend，再运行 pytest 的该文件及 endpoint_tracking、endpoint_duplicate_output、joint_tracking 三个专项。`tracking-result.test.mjs` 验证同一哈希下按原始尾编号纠错而不移动人工框；固定十组中的 endpoint-tracking-browser 新增保存过旧 canonical ID 后的真实刷新、写回、再次刷新与一框显示。服务器真实输出回放在隔离目录执行，保留原始文件SHA及第11–14帧相关对象前后框；不能称为重新执行SAM3或完整医院验收。
+
 检测权重交付：test_bundled_head_detector.py 校验默认资源存在、尺寸 / SHA256 与固定清单一致、Git LFS 指针 / 损坏文件被拒绝、自定义路径优先、四个检测入口共享解析。校验只读字节，不在本机运行模型推理。新 Git checkout 和 Docker COPY 打包验证须核对实际权重字节，不把路径存在当作完整模型。

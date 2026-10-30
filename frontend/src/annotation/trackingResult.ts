@@ -54,8 +54,9 @@ export function validateTrackingResult(value: unknown): asserts value is Trackin
 export function reconcileTerminalIdentities(objects:AnnotationObject[], terminal:TrackingResultEnvelope['terminalIdentity']):AnnotationObject[]{
   if(!terminal)return objects
   return objects.map(o=>{
-    if(o.source!=='manual'||o.frameIndex!==terminal.frameIndex||o.endpointAnchorHash===terminal.anchorHash||o.objectId==null)return o
-    const canonical=terminal.matches[String(o.objectId)]
-    return canonical==null?o:{...o,objectId:canonical,endpointOriginalObjectId:o.objectId,endpointAnchorHash:terminal.anchorHash}
+    if(o.source!=='manual'||o.frameIndex!==terminal.frameIndex||o.objectId==null)return o
+    const original=o.endpointAnchorHash===terminal.anchorHash?(o.endpointOriginalObjectId??o.objectId):o.objectId
+    const canonical=terminal.matches[String(original)]
+    return canonical==null||canonical===o.objectId&&o.endpointAnchorHash===terminal.anchorHash?o:{...o,objectId:canonical,endpointOriginalObjectId:original,endpointAnchorHash:terminal.anchorHash}
   })
 }

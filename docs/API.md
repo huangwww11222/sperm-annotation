@@ -17,7 +17,8 @@
 - `POST /api/track` 可选 `terminalAnnotations: object[] | null`：省略/null 保留当前帧单向追踪；数组（含明确空数组）启动人工首尾核验，要求 `startFrame=0`、`reviewMode=true`。对象使用原图像素 bbox、正整数 object_id、source=manual，frameIndex 若提供必须为真实尾帧。首尾快照必须与已保存 manualAnnotations 完整一致；来源/几何/帧/重复身份错误返回422。尾帧ID是独立端点编号，不必等于首帧ID；不得依据相同编号推断对应。参数包含在原请求哈希和幂等重放中。
 - 任务状态的 `checking` 覆盖反向/综合阶段；`message` 显示处理进度。完成时可附 `endpointVerification`：state=checked/failed/insufficient、anchorKind、anchorFrame、anchorHash、matches（尾帧局部ID字符串→正向ID）、unmatchedTailIds、checkedFrames、策略与阈值。checked表示执行完比较，不能作为自动验收。旧仅核验请求可保留正向成功与反向失败证据；新综合请求不能把反向执行失败报告成综合成功，审查完成规则不变。
 - JSONL `reviewEvidence.endpointCheck` 保存证据，末帧另保存 terminalAnnotations 原始人工快照。审查 evidence 接口可返回 `endpointVerification`；疑点新增 endpoint_disagreement / endpoint_identity_uncertain，供原有片段队列展示。结果显示接口抑制已被人工尾框替代的匹配 AI 框；旧仅核验请求保留正向几何，新综合请求保存唯一综合几何，A 合并时按唯一对应采用人工几何。
-- 全量结果 envelope 可带 `terminalIdentity={frameIndex,anchorHash,matches}`。前端严格校验其帧号/哈希/一对一正整数映射后，只对对应尾帧人工框统一身份，保留 endpointOriginalObjectId / endpointAnchorHash；同一哈希不重复转换。该人工工作区修改沿用原保存队列/版本校验，不改原始几何。冻结审查证据保留原始 terminalAnnotations，不依赖后续可变工作区。
+- 全量结果 envelope 可带 `terminalIdentity={frameIndex,anchorHash,matches}`。前端严格校验其帧号/哈希/一对一正整数映射后，只对对应尾帧人工框统一身份，保留 endpointOriginalObjectId / endpointAnchorHash；同一哈希按原始尾编号应用当前对应，结果相同不重复转换，明确错配纠正后可更新 canonical ID。该人工工作区修改沿用原保存队列/版本校验，不改原始几何。冻结审查证据保留原始 terminalAnnotations，不依赖后续可变工作区。
+- 综合输出可附 `reviewEvidence.boundaryExit={policy:'boundary-exit-v1',exitedObjectIds,findings}`：已确认边界退出的AI身份停止出框，原相关诊断归档于 findings，不继续作为当前活动风险；不写工作区删除或正常确认。历史读取、JSONL下载、训练来源共用该只读投影，缺少有效原图尺寸不推测边界。身份重关联策略记录为 associationPolicy=first-anchor-v2，无新增客户端写入权限或数据库迁移。
 
 - `POST /api/track` 新增 `reviewMode`（默认 false 兼容旧客户端，新页面发送 true）。true 时质量疑点不暂停，按原单段上限自动续跑；状态新增 `checking`。模型/持久化错误仍 failed。
 - `POST /api/review/media/{id}/complete` 新增 `concentratedReview`。新页面在建立幂等请求时固定 true；旧持久请求不注入新字段，以保持旧回执哈希。新任务冻结 Tracking 疑点及 sourceRevision；不自动迁移已有三阶段任务。

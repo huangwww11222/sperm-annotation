@@ -36,6 +36,17 @@ test('malformed endpoint identity mappings cannot silently change human object I
   validateTrackingResult({...result,terminalIdentity:{frameIndex:2,anchorHash:hash,matches:{91:1}}})
 })
 
+test('corrected same-run association reuses the original tail ID without moving the human box',()=>{
+  const hash='a'.repeat(64),box={x:10,y:20,width:3,height:4}
+  const objects=[{id:'tail',source:'manual',objectId:17,endpointOriginalObjectId:37,endpointAnchorHash:hash,frameIndex:25,bbox:box}]
+  const fixed=reconcileTerminalIdentities(objects,{frameIndex:25,anchorHash:hash,matches:{37:18}})
+  assert.equal(fixed[0].objectId,18)
+  assert.equal(fixed[0].endpointOriginalObjectId,37)
+  assert.equal(fixed[0].bbox,box)
+  assert.equal(objects[0].objectId,17)
+  assert.deepEqual(reconcileTerminalIdentities(fixed,{frameIndex:25,anchorHash:hash,matches:{37:18}}),fixed)
+})
+
 test('synthesis status cannot claim complete when frame coverage is partial',()=>{
   validateTrackingResult({...result,jointTracking:{state:'checked',checkedFrames:1}})
   validateTrackingResult({...result,jointTracking:{state:'failed',checkedFrames:0}})
