@@ -1,0 +1,42 @@
+"""Developer checkout contains the real pinned artifact; never runs inference."""
+import hashlib
+import json
+from pathlib import Path
+import pytest
+from app import head_click
+
+ASSETS=Path(head_click.__file__).parent/'model_assets'
+
+
+def test_default_weight_is_in_checkout_and_matches_manifest(monkeypatch):
+    monkeypatch.delenv('HEAD_DETECTOR_MODEL',raising=False)
+    assert head_click.model_path()==ASSETS/'head-detector.pt'
+    manifest=json.loads((ASSETS/'head-detector.json').read_text())
+    path=head_click.model_path()
+    assert path.stat().st_size==manifest['size']
+    assert hashlib.sha256(path.read_bytes()).hexdigest()==manifest['sha256']
+    head_click.verify_bundled_weight(path)
+
+
+def test_explicit_custom_model_path_still_takes_priority(tmp_path,monkeypatch):
+    path=tmp_path/'custom.pt';path.write_bytes(b'custom')
+    monkeypatch.setenv('HEAD_DETECTOR_MODEL',str(path))
+    assert head_click.model_path()==path
+    head_click.verify_bundled_weight(path)  # Custom artifacts are not relabelled as our model.
+
+
+def test_corrupt_default_is_rejected_before_model_loading(tmp_path,monkeypatch):
+    assets=tmp_path/'assets';assets.mkdir();weight=assets/'head-detector.pt';weight.write_bytes(b'version https://git-lfs.github.com/spec/v1')
+    (assets/'head-detector.json').write_text(json.dumps({'size':123,'sha256':'0'*64}))
+    monkeypatch.setattr(head_click,'BUNDLED_MODEL',weight)
+    with pytest.raises(head_click.ProposalError,match='校验'):
+        head_click.verify_bundled_weight(weight)
+
+
+def test_all_detector_entry_points_use_shared_resolution(tmp_path,monkeypatch):
+    import numpy as np
+    path=tmp_path/'missing.pt'
+    monkeypatch.setattr(head_click,'model_path',lambda:path)
+    image=np.zeros((32,32,3),dtype=np.uint8)
+    for call in [lambda:head_click.propose(image,10,10),lambda:head_click.detect_frame(image),lambda:head_click.detect_edges(image),lambda:head_click.detect_regions(image,[[5,5,10,10]])]:
+        with pytest.raises(head_click.ProposalError):call()

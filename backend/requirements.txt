@@ -14,3 +14,6 @@ opencv-python>=4.8,<5
 # only requirement specifiers and options.
 python-dotenv>=1.0,<2
 PyYAML>=6,<7
+
+# Bundled sperm-head detector used by click, edge-entry and joint tracking.
+ultralytics==8.4.183

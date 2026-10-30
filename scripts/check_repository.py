@@ -1,5 +1,7 @@
 """Fast release guard. Run from a Git checkout; never reads runtime file contents."""
 from pathlib import Path
+import hashlib
+import json
 import ast
 import collections
 import re
@@ -14,6 +16,14 @@ for name in filter(None, paths):
         errors.append(f'运行数据/本机配置不应跟踪：{name}')
         continue
     full = root / path
+    if path.suffix in {'.pt', '.pth', '.safetensors'}:
+        if name != 'backend/app/model_assets/head-detector.pt':
+            errors.append(f'未批准的模型权重不应跟踪：{name}')
+        else:
+            record = json.loads(full.with_suffix('.json').read_text())
+            if not full.is_file() or full.stat().st_size != record['size'] or hashlib.sha256(full.read_bytes()).hexdigest() != record['sha256']:
+                errors.append(f'内置检测权重大小或 SHA256 校验失败：{name}')
+        continue
     if not full.exists() or full.suffix not in {'.py', '.ts', '.vue', '.yaml', '.yml', '.json', '.sh', '.ps1'}:
         continue
     text = full.read_text(encoding='utf-8-sig')

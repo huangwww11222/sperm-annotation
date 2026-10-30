@@ -80,6 +80,7 @@ npm run build --prefix frontend
 
 - 后端配置集中在 `backend/app/config.py`，读取 `backend/.env`；模板 `backend/.env.example`。
 - `APP_DATA_DIR`：数据库默认目录及日志；`APP_DB_FILE`：数据库文件；`APP_STORAGE_DIR`：媒体和训练 ZIP。覆盖其中一个不自动迁移其他路径。
+- 自训练检测器随普通 Git 提供：`backend/app/model_assets/head-detector.pt` + 清单 / 许可；`HEAD_DETECTOR_MODEL` 仅用于显式覆盖。正常安装 `backend/requirements.txt` 已包含 Ultralytics；默认文件初次加载校验 SHA256。
 - `SAM3_MODEL_ID`：默认 `backend/track_modul/facebook--sam3/snapshots/master`；模型随仓库 Release 提供，默认部署先用 `scripts/prepare_model.py` 自动准备；Git 仅保存 `model-distribution/` 中的清单和许可。
 - `SAM3_DEVICE` / `SAM3_DTYPE` 默认 `cuda` / `bfloat16`；真实 GPU 可用性需单独验收。
 - `SAM3_TRACK_FRAMES` 当前代码默认 **120**，包含 seed 帧；环境变量可覆盖。异常参数见 `services/anomaly_detector.py`，不要在 UI 写死单轮帧数。

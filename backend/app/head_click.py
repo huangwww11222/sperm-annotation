@@ -1,4 +1,6 @@
 """On-demand, click-constrained head proposals. No annotation writes or downloads."""
+import hashlib
+import json
 import logging
 import math
 import os
@@ -9,6 +11,30 @@ log = logging.getLogger('review.annotation.head_click')
 _lock = Lock()
 _model = None
 _model_path = None
+BUNDLED_MODEL = Path(__file__).resolve().parent / 'model_assets' / 'head-detector.pt'
+
+
+def model_path():
+    configured = os.getenv('HEAD_DETECTOR_MODEL', '').strip()
+    return Path(configured) if configured else BUNDLED_MODEL
+
+
+def verify_bundled_weight(path):
+    if path.resolve() != BUNDLED_MODEL.resolve():
+        return
+    try:
+        record = json.loads(BUNDLED_MODEL.with_suffix('.json').read_text(encoding='utf-8'))
+        if path.stat().st_size != record['size']:
+            raise ValueError('size mismatch')
+        checksum = hashlib.sha256()
+        with path.open('rb') as stream:
+            for block in iter(lambda: stream.read(1024*1024), b''):
+                checksum.update(block)
+        if checksum.hexdigest() != record['sha256']:
+            raise ValueError('sha256 mismatch')
+    except (OSError, ValueError, KeyError) as exc:
+        raise ProposalError('默认头部检测权重校验失败，请重新获取完整仓库文件；原标注未修改。', 503) from exc
+
 
 
 class ProposalError(ValueError):
@@ -49,9 +75,9 @@ def choose(rows, x, y, width, height):
 
 def propose(image, x, y):
     global _model, _model_path
-    path = Path(os.getenv('HEAD_DETECTOR_MODEL') or str(Path(__file__).resolve().parents[1]/'track_modul'/'head-detector.pt'))
+    path = model_path()
     if not path.is_file():
-        raise ProposalError('头部检测模型未配置，请管理员配置 HEAD_DETECTOR_MODEL；仍可手动画框。',503)
+        raise ProposalError('头部检测权重缺失，请获取完整仓库文件或检查自定义模型路径；仍可手动画框。',503)
     if not _lock.acquire(blocking=False):
         raise ProposalError('头部检测正在处理其他请求，请稍后重试。',503)
     try:
@@ -72,21 +98,23 @@ def propose(image, x, y):
 def _get_model(path):
     global _model, _model_path
     if _model is None or _model_path != str(path.resolve()):
+        verify_bundled_weight(path)
         try:
             os.environ.setdefault('YOLO_AUTOINSTALL', 'false')
             from ultralytics import YOLO
         except ImportError as exc:
-            raise ProposalError('头部检测依赖未安装，请管理员安装 backend/requirements-head-detector.txt。',503) from exc
+            raise ProposalError('头部检测依赖未安装，请按 backend/requirements.txt 安装依赖。',503) from exc
         _model = YOLO(str(path),task='detect')
         _model_path = str(path.resolve())
+        log.info('annotation.head_detector_loaded path=%s bundled=%s', path, path.resolve()==BUNDLED_MODEL.resolve())
     return _model
 
 
 def detect_edges(image):
     """Native-resolution overlapping perimeter tiles, one shared model lock."""
-    path = Path(os.getenv('HEAD_DETECTOR_MODEL') or str(Path(__file__).resolve().parents[1]/'track_modul'/'head-detector.pt'))
+    path = model_path()
     if not path.is_file():
-        raise ProposalError('边缘识别需要配置 HEAD_DETECTOR_MODEL，请安装模型或关闭边缘识别。', 503)
+        raise ProposalError('边缘识别权重缺失，请获取完整仓库文件或检查自定义模型路径。', 503)
     if not _lock.acquire(blocking=False):
         raise ProposalError('头部检测器忙，请稍后重试。', 503)
     try:
@@ -109,9 +137,9 @@ def detect_edges(image):
 
 def detect_frame(image):
     """Full native-resolution image, overlapping tiles; candidates are not labels."""
-    path = Path(os.getenv('HEAD_DETECTOR_MODEL') or str(Path(__file__).resolve().parents[1]/'track_modul'/'head-detector.pt'))
+    path = model_path()
     if not path.is_file():
-        raise ProposalError('头部检测模型未配置，自动核验未完成。', 503)
+        raise ProposalError('头部检测权重缺失，自动核验未完成，请检查仓库文件或自定义路径。', 503)
     if not _lock.acquire(blocking=False):
         raise ProposalError('头部检测器忙，自动核验未完成。', 503)
     try:
@@ -144,8 +172,8 @@ def detect_frame(image):
 def detect_regions(image, boxes):
     """Bounded native tiles around tracked heads, never a new-object discoverer."""
     if not boxes:return []
-    path=Path(os.getenv('HEAD_DETECTOR_MODEL') or str(Path(__file__).resolve().parents[1]/'track_modul'/'head-detector.pt'))
-    if not path.is_file():raise ProposalError('综合标注需要头部检测模型，请管理员配置 HEAD_DETECTOR_MODEL。',503)
+    path=model_path()
+    if not path.is_file():raise ProposalError('综合标注的头部检测权重缺失，请获取完整仓库文件或检查自定义路径。',503)
     if not _lock.acquire(timeout=30):raise ProposalError('头部检测器忙，综合标注未完成，请重试。',503)
     try:
         model=_get_model(path);h,w=image.shape[:2];tiles=set()

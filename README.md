@@ -1,5 +1,7 @@
 # 微流控标注工作台
 
+自训练头部检测权重已随源码提供（约 19.4 MiB，普通 Git 文件）。开发者正常 `git clone` / `git pull --ff-only` 即可获得；执行 `python -m pip install -r backend/requirements.txt` 安装依赖，重启后端即可使用默认检测器，无需另行下载或配置 `HEAD_DETECTOR_MODEL`。模型位于 `backend/app/model_assets/head-detector.pt`，保留自定义路径覆盖。模型来源、校验值和许可见[模型说明](backend/app/model_assets/README.md)。SAM3 大模型仍使用原有 Release 准备流程。
+
 当前标注流程：首尾帧标头框 → 首尾双向追踪（默认识别边缘入画）→ 检查微调 → 标注页直接导出 YOLO / COCO 数据集。新标注暂不送审；历史审查及确认任务保留。
 
 用于视频人工标注、SAM3 辅助追踪、疑点集中审查及 YOLO / COCO 训练数据集导出。浏览器即可操作；数据保存在部署方自己的服务器。
