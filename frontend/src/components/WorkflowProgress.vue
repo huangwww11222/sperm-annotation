@@ -15,7 +15,7 @@ defineProps<{ label: string; percent: number; summary: string; detail: string; s
 </template>
 
 <style scoped>
-.workflow-progress{position:sticky;top:var(--app-header-height);z-index:30;display:flex;align-items:center;gap:16px;flex-shrink:0;padding:9px 14px;border:1px solid var(--line);border-radius:8px;background:var(--surface);box-shadow:var(--shadow);min-width:0}
+.workflow-progress{position:relative;top:auto;z-index:2;display:flex;align-items:center;gap:16px;flex-shrink:0;padding:9px 14px;border:1px solid var(--line);border-radius:8px;background:var(--surface);box-shadow:var(--shadow);min-width:0}
 .workflow-progress-title{display:flex;gap:14px;align-items:center;flex-shrink:0}
 .workflow-progress-title h2{font-size:13px;font-weight:600;margin:0;color:var(--text)}
 .workflow-progress-title strong{font-size:24px;line-height:1.2;letter-spacing:-.04em;color:var(--accent);font-variant-numeric:tabular-nums}

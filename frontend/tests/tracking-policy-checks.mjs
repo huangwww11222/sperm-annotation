@@ -1,3 +1,4 @@
+import {legacyTrackingProbe} from './legacy-tracking-probe.mjs'
 // Called by the fixed independent-integrity suite. Accounts, annotations,
 // confirmations and tracking jobs use the real UI/API. Only model outputs are
 // simulated by backend/tests/browser_server.py; no frontend store is imported.
@@ -5,8 +6,13 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
+// Object names are no longer editable in the UI; tests still steer the simulated model through the store's default name.
+const setObjectName=(target,name)=>target.evaluate(async n=>{const url=performance.getEntriesByType('resource').find(r=>r.name.includes('/src/stores/workspace.ts')).name;(await import(url)).useWorkspace().objectNameInput.value=n},name)
 
 export async function trackingPolicyChecks(page, {root, origin, api, poll, ready, out}) {
+  // Compatibility coverage for pre-upgrade persisted pause tasks. New UI defaults to reviewMode=true.
+  const legacyRequest=route=>route.continue({postData:JSON.stringify({...route.request().postDataJSON(),reviewMode:false})})
+  await page.route('**/api/track',legacyRequest)
   assert(root.startsWith(path.resolve('work') + path.sep), 'Isolated input directory required')
   execFileSync(process.env.TEST_PYTHON || 'work/review-venv/bin/python', ['-c', String.raw`
 import json, os, sys
@@ -50,8 +56,8 @@ capture.release()
   }
   async function draw(mid,name,count,rectangle) {
     await ready();await page.keyboard.press('Escape')
-    await page.getByRole('textbox',{name:'对象名称',exact:true}).fill(name)
-    await page.locator('.annotation-heading h2').click();await page.keyboard.press('b')
+    await setObjectName(page,name)
+    await page.evaluate(()=>document.activeElement instanceof HTMLElement&&document.activeElement.blur());await page.keyboard.press('b')
     const box = await page.getByTestId('annotation-hit').boundingBox();assert(box)
     const [x,y,w,h] = rectangle
     await page.mouse.move(box.x+box.width*x,box.y+box.height*y);await page.mouse.down()
@@ -85,7 +91,7 @@ capture.release()
   await draw(geometry,'policy-geometry',1,[.3,.3,.1,.1])
   await draw(geometry,'steady-object',2,[.65,.3,.1,.1])
   const originalManual = (await work(geometry)).manualAnnotations
-  await button('AI Tracking').click();let paused=await awaitPause(geometry,1)
+  await legacyTrackingProbe(page).click();let paused=await awaitPause(geometry,1)
   check(paused.lastPausedContext.frameIndex===1,'ordinary size risk pauses at its first frame, not the third observation')
   check((await result(geometry)).frames.length===2,'unconfirmed future observations are not published as accepted annotations')
   const panel=page.getByTestId('tracking-feedback')
@@ -99,6 +105,10 @@ capture.release()
   check(!await page.getByTestId('tracking-diagnostics').getAttribute('open'),'pause diagnostics start collapsed')
   await page.getByTestId('tracking-diagnostics').locator('summary').click()
   check((await page.getByTestId('tracking-persistence-evidence').innerText()).includes('第 4 帧'),'expanded diagnostics explain the observation interval')
+  const referenceFrame=paused.pausedAnomalies[0].geometryReferenceFrame??details.geometry_reference_frame??paused.pausedAnomalies[0].baselineFrame??details.manual_baseline_frame
+  assert(Number.isInteger(referenceFrame)&&referenceFrame>=0,'the saved pause has an actual reference frame')
+  const referenceEvidence=page.locator('.pause-evidence-frames > li').first()
+  check(await referenceEvidence.locator('strong').innerText()===`第 ${referenceFrame+1} 帧`&&(await referenceEvidence.innerText()).includes('人工标注'),'visual frame history shows the actual saved reference and source rather than a placeholder frame')
   await page.getByTestId('tracking-diagnostics').locator('summary').click()
   await page.reload();await ready();await page.getByTestId('tracking-trigger-evidence').waitFor()
   check((await page.getByTestId('tracking-trigger-evidence').innerText()).includes(minimumText),'refresh reconstructs server-owned pause evidence before any new confirmation')
@@ -128,9 +138,9 @@ capture.release()
   await page.getByTestId('retry-tracking-feedback').waitFor()
   check((await result(geometry)).frames.length===2,'lost frame-confirmation response does not start tracking')
   await page.reload();await ready()
-  await poll(async()=> (await work(geometry)).lastPausedContext===null && await button('AI Tracking').isEnabled(),'checkpoint replay restored editable frame')
+  await poll(async()=> (await work(geometry)).lastPausedContext===null && await legacyTrackingProbe(page).isEnabled(),'checkpoint replay restored editable frame')
   check((await result(geometry)).frames.length===2,'refresh recovers the confirmed checkpoint without silently starting model inference')
-  await button('AI Tracking').click();await completed(geometry)
+  await legacyTrackingProbe(page).click();await completed(geometry)
   await page.unroute(feedbackRoute)
   check(attempts.length===2 && attempts[0].key===attempts[1].key && JSON.stringify(attempts[0].body)===JSON.stringify(attempts[1].body),'refresh replays the same atomic frame checkpoint request and key')
   const confirmed = await work(geometry)
@@ -145,12 +155,12 @@ capture.release()
   const stable = await upload('policy-seed-overlap')
   await draw(stable,'policy-seed-overlap',1,[.2,.3,.3,.3])
   await draw(stable,'policy-seed-overlap',2,[.56,.3,.25,.25])
-  await page.getByRole('button',{name:/选择对象 #2 /}).click()
+  await page.getByRole('button',{name:/选择对象 2 /}).click()
   let box=await page.getByTestId('annotation-hit').boundingBox();assert(box)
   await page.mouse.move(box.x+box.width*.685,box.y+box.height*.425);await page.mouse.down()
   await page.mouse.move(box.x+box.width*.35,box.y+box.height*.45,{steps:8});await page.mouse.up()
   await state(stable,value=>value.manualAnnotations.find(o=>o.objectId===2)?.bbox.x<30,'overlapping seed saved after real drag')
-  await button('AI Tracking').click();await completed(stable)
+  await legacyTrackingProbe(page).click();await completed(stable)
   check(await page.getByTestId('tracking-feedback').count()===0,'unchanged existing overlap remains a warning through eight frames')
   check((await page.locator('.tracking-warning-summary').innerText()).includes('追踪变化'),'combined warnings do not mislabel overlap as motion')
   evidence.push({scenario:'stable-seed-overlap',mediaId:stable,frames:8})
@@ -158,11 +168,11 @@ capture.release()
   // One explicit frame inspection confirms every object and overlap pair.
   const overlap = await upload('policy-overlap')
   for(let index=0;index<3;index++) await draw(overlap,'policy-overlap',index+1,[.2+index*.2,.3,.1,.1])
-  await button('AI Tracking').click();paused=await awaitPause(overlap,3)
+  await legacyTrackingProbe(page).click();paused=await awaitPause(overlap,3)
   check(paused.lastPausedContext.frameIndex===1,'new overlap waits for persistent risk and returns the first affected frame')
   await page.getByTestId('tracking-diagnostics').locator('summary').click()
-  const partners=await page.getByTestId('tracking-overlap-pairs').innerText()
-  check(partners.includes('#1 ↔ #2')&&partners.includes('#1 ↔ #3'),'first object displays every related pair instead of overwriting its earlier partner')
+  const partners=page.getByTestId('tracking-overlap-pairs')
+  check(await partners.getByLabel('对象 1 与对象 2',{exact:true}).count()===1&&await partners.getByLabel('对象 1 与对象 3',{exact:true}).count()===1,'first object displays every related pair instead of overwriting its earlier partner')
   check((await page.getByTestId('tracking-overlap-acceptance').innerText()).includes('所有重叠组合'),'confirmation explicitly covers all displayed pairs only')
   await page.getByTestId('confirm-tracking-normal').click()
   const checkpoint=await state(overlap,value=>value.trackingFeedbackEvents?.length===3,'whole-frame overlap checkpoint saved')
@@ -180,7 +190,7 @@ capture.release()
   const reset=await state(overlap,value=>value.trackingFeedbackEvents?.length===4,'pair reset persisted')
   check(reset.trackingFeedbackEvents.at(-1).decision==='reset' && reset.trackingFeedbackEvents.at(-1).objectId===1 && JSON.stringify(reset.trackingFeedbackEvents.slice(0,3))===JSON.stringify(storedEvents),'reset preserves original pair confirmation history and records the explicit reset')
   await poll(async()=>await calibrationFor(1).count()===0 && (await calibrationFor(2).innerText()).includes('1 个重叠组合已确认'),'related reset entries refreshed')
-  check(await calibrationFor(3).count()===1 && (await calibrationFor(2).innerText()).includes('#3') && (await calibrationFor(3).innerText()).includes('#2'),'reset clears pairs involving the selected object and keeps the independent pair')
+  check(await calibrationFor(3).count()===1 && (await calibrationFor(2).innerText()).includes('对象 3') && (await calibrationFor(3).innerText()).includes('对象 2'),'reset clears pairs involving the selected object and keeps the independent pair')
   await page.reload();await ready()
   await calibration.locator('summary').click()
   check(await calibrationFor(1).count()===0 && await calibrationFor(2).getByRole('button',{name:'恢复默认判断',exact:true}).isVisible(),'pair reset and independent remaining reset entry survive refresh')
@@ -190,10 +200,10 @@ capture.release()
   // simply disabling size checks. This is the failure pair for stable geometry.
   const extreme=await upload('policy-extreme')
   await draw(extreme,'policy-extreme',1,[.3,.3,.1,.1])
-  await button('AI Tracking').click();paused=await awaitPause(extreme,1)
+  await legacyTrackingProbe(page).click();paused=await awaitPause(extreme,1)
   check(paused.lastPausedContext.frameIndex===1 && await page.getByTestId('tracking-feedback').getAttribute('data-decision-frame')==='1','extreme collapse still pauses immediately on the first bad frame')
   await page.getByTestId('tracking-diagnostics').locator('summary').click()
-  check((await page.getByTestId('tracking-feedback').innerText()).includes('立即暂停'),'immediate extreme pause is clearly explained')
+  check((await page.getByTestId('pause-details-panel').innerText()).includes('立即暂停'),'immediate extreme pause is clearly explained')
   evidence.push({scenario:'extreme',mediaId:extreme,pauseFrame:1,decisionFrame:1})
   await page.screenshot({path:path.join(out,'tracking-policy-extreme.png')})
 
@@ -257,5 +267,6 @@ capture.release()
   }
   evidence.push({scenario:'pause-reason-presentation',mediaId:extreme,modes:5,
     injection:'GET diagnostic copy only; real stored pause/frame; no model inference or feedback'})
+  await page.unroute('**/api/track',legacyRequest)
   return {checks,evidence,model:'simulated; real UI, tracking publication, feedback and source frames'}
 }

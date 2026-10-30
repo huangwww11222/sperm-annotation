@@ -16,3 +16,28 @@ test('successful malformed JSON cannot be interpreted as empty annotations',()=>
     {...result,frames:[{...frame,annotations:[{...object,bbox:[1,2,0,5]}]}]},
     {...result,frames:[{...frame,annotations:[{...object,bbox:[1,2,NaN,5]}]}]}]) assert.throws(()=>validateTrackingResult(value))
 })
+
+import { reconcileTerminalIdentities } from '../../work/annotation-validation/annotation/trackingResult.js'
+test('terminal-local IDs reconcile once and preserve source identity for retry / refresh',()=>{
+  const hash='a'.repeat(64), objects=[{id:'head',source:'manual',objectId:1,frameIndex:0},{id:'tail',source:'manual',objectId:91,frameIndex:5}]
+  const terminal={frameIndex:5,anchorHash:hash,matches:{91:1}}
+  const result=reconcileTerminalIdentities(objects,terminal)
+  assert.equal(result[0],objects[0]);assert.equal(result[1].objectId,1);assert.equal(result[1].endpointOriginalObjectId,91)
+  assert.equal(objects[1].objectId,91)
+  assert.deepEqual(reconcileTerminalIdentities(result,terminal),result)
+  assert.deepEqual(reconcileTerminalIdentities(objects,undefined),objects)
+})
+
+test('malformed endpoint identity mappings cannot silently change human object IDs',()=>{
+  const hash='a'.repeat(64)
+  for(const terminalIdentity of [{frameIndex:2,anchorHash:hash,matches:{91:-1}},{frameIndex:2,anchorHash:hash,matches:{91:1,92:1}},{frameIndex:2,anchorHash:'bad',matches:{91:1}}]){
+    assert.throws(()=>validateTrackingResult({...result,terminalIdentity}))
+  }
+  validateTrackingResult({...result,terminalIdentity:{frameIndex:2,anchorHash:hash,matches:{91:1}}})
+})
+
+test('synthesis status cannot claim complete when frame coverage is partial',()=>{
+  validateTrackingResult({...result,jointTracking:{state:'checked',checkedFrames:1}})
+  validateTrackingResult({...result,jointTracking:{state:'failed',checkedFrames:0}})
+  for(const jointTracking of [{state:'checked',checkedFrames:0},{state:'checked',checkedFrames:2},{state:'failed',checkedFrames:NaN},{state:'unknown',checkedFrames:1}])assert.throws(()=>validateTrackingResult({...result,jointTracking}))
+})

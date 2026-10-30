@@ -4,7 +4,7 @@ import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { useAuth } from '../stores/auth'
 import { trainingExportApi as api, type ExportJob, type ExportSettings, type ExportSummary } from '../api/trainingExportApi'
 
-const props = defineProps<{ finalVersionId: string; mediaName: string; disabled?: boolean }>()
+const props = defineProps<{ finalVersionId: string; mediaName: string; disabled?: boolean; hideTrigger?:boolean; annotationOnly?:boolean }>()
 const emit = defineEmits<{ open: [value: boolean]; busy: [value: boolean] }>()
 const opened = ref(false), busy = ref(false), error = ref('')
 const summary = ref<ExportSummary | null>(null), job = ref<ExportJob | null>(null)
@@ -112,7 +112,7 @@ async function download() {
   try {
     const blob = await api.download(job.value.exportId)
     const url = URL.createObjectURL(blob), link = document.createElement('a')
-    link.href = url; link.download = `${props.mediaName}-已确认训练数据集-${job.value.exportId}.zip`
+    link.href = url; link.download = `${props.mediaName}-训练数据集-${job.value.exportId}.zip`
     link.click(); setTimeout(() => URL.revokeObjectURL(url), 2000)
   } catch (e) { fail(e, 'download') }
   finally { busy.value = false }
@@ -134,20 +134,21 @@ function keys(e: KeyboardEvent) {
     else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus() }
   }
 }
+defineExpose({open})
 window.addEventListener('keydown', keys)
 onUnmounted(() => { alive = false; stopPolling(); emit('open', false); emit('busy', false); window.removeEventListener('keydown', keys) })
 </script>
 
 <template>
-  <button class="c-primary c-wide" data-testid="export-training" :disabled="disabled || busy" @click="open">
+  <button v-if="!hideTrigger" class="c-primary c-wide" data-testid="export-training" :disabled="disabled || busy" @click="open">
     {{ working ? '查看数据集导出进度' : '导出训练数据集' }}
   </button>
   <Teleport to="body">
     <div v-if="opened" class="confirmation-page training-export-host">
       <div class="c-modal-mask" @click.self="close">
         <section ref="dialog" class="c-modal training-export-dialog" role="dialog" aria-modal="true" aria-labelledby="training-export-title">
-          <h2 id="training-export-title">导出已确认训练数据集</h2>
-          <p>{{ mediaName }} · 仅使用当前已完成审查与对比确认的最终版本。</p>
+          <h2 id="training-export-title">{{ annotationOnly?'导出训练数据集':'导出已确认训练数据集' }}</h2>
+          <p>{{ mediaName }} · {{ annotationOnly?'使用当前已保存并确认导出的标注快照。':'仅使用当前已完成审查与对比确认的最终版本。' }}</p>
           <div v-if="summary" class="training-export-summary">
             <span><b>{{ summary.frameCount }}</b>全部帧</span>
             <span><b>{{ summary.objectCount }}</b>最终标注框</span>

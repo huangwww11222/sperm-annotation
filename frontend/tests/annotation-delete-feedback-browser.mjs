@@ -4,6 +4,8 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright')
+// The media list is a drawer that stays closed while a video is open.
+const openAsset=async(target,locator)=>{const toggle=target.getByTestId('toggle-workbench-library');for(let i=0;i<40;i++){if(await locator.isVisible()){try{await locator.click({timeout:1500});return}catch{}}else if(await toggle.isVisible())await toggle.click();await target.waitForTimeout(250)}await locator.click()}
 const fixture = JSON.parse(fs.readFileSync(process.env.ANNOTATION_CONTROLS_FIXTURE || 'work/annotation-controls-browser-fixture.json', 'utf8'))
 const origin = process.env.ANNOTATION_ORIGIN || process.env.CONFIRMATION_ORIGIN || 'http://127.0.0.1:5373'
 const browser = await chromium.launch({ channel: 'chrome', headless: true })
@@ -58,13 +60,13 @@ async function go(frame) {
   const input = page.getByRole('spinbutton', { name: '跳转帧号' })
   await input.fill(String(frame + 1)); await input.press('Enter')
   await page.waitForFunction(value => window.ws.currentFrame.value === value && !window.ws.exactFrameLoading.value, frame)
-  await page.getByTestId('workbench-heading').locator('h2').click()
+  await page.evaluate(()=>document.activeElement instanceof HTMLElement&&document.activeElement.blur())
 }
 async function media(mid) {
-  await page.locator('.asset-card').filter({ hasText: mid + '.avi' }).click()
+  await openAsset(page,page.locator('.asset-card').filter({ hasText: mid + '.avi' }))
   await page.waitForFunction(value => window.ws.selectedMedia.value?.serverMediaId === value && !window.ws.workspaceRestoring.value && !window.ws.exactFrameLoading.value, mid)
 }
-async function select(oid) { await page.getByRole('button', { name: new RegExp(`选择对象 #${oid} `) }).click() }
+async function select(oid) { await page.getByRole('button', { name: new RegExp(`选择对象 ${oid} `) }).click() }
 async function reload() { await saved(); await page.reload(); await attachStore(); await idle() }
 async function openDeletion(expectedFrames) {
   await page.getByTestId('delete-object-video').click()
@@ -121,7 +123,7 @@ try {
   await media('controls-delete'); await go(0)
   check(JSON.stringify(await ids()) === '[7,12]', 'same-name objects retain separate stable IDs in the real frame')
   await select(7)
-  check((await page.getByTestId('selected-object-actions').innerText()).includes('操作 #7'), 'object-list selection drives the action area')
+  check((await page.getByTestId('selected-object-actions').innerText()).includes('对象 7'), 'object-list selection drives the action area')
   await page.screenshot({ path: 'output/playwright/annotation-controls-objects.png', animations: 'disabled' })
   await page.getByTestId('delete-object-frame').click()
   check(JSON.stringify(await ids()) === '[12]', 'single-frame deletion removes only the selected object')
@@ -182,14 +184,14 @@ try {
   rows = await resultRows('controls-delete')
   check(countObject(rows, 7) === 23 && countObject(rows, 12) === 24, 'cross-frame undo restores the whole operation and preserves the earlier single-frame deletion')
   await go(0)
-  check(await page.getByRole('button', { name: /选择对象 #7 / }).getAttribute('aria-pressed') !== null, 'restored object remains selectable with its original stable ID')
+  check(await page.getByRole('button', { name: /选择对象 7 / }).getAttribute('aria-pressed') !== null, 'restored object remains selectable with its original stable ID')
   await select(7); await openDeletion(23); await page.getByTestId('confirm-delete-object-video').click()
   await page.locator('[data-object-delete-dialog][open]').waitFor({ state: 'hidden' }); await saved(); await reload(); await media('controls-delete'); await go(10)
   check(JSON.stringify(await ids()) === '[12]', 'whole-video deletion survives browser refresh and tracking reload')
   await page.locator('.object-deletion-feedback').getByRole('button', { name: '撤销', exact: true }).click(); await saved()
   await waitApi(async()=> (await ids()).includes(7) && countObject(await resultRows('controls-delete'),7)===23)
   check((await ids()).includes(7) && countObject(await resultRows('controls-delete'), 7) === 23, 'whole-video undo survives same-tab refresh and still preserves preexisting single-frame deletion')
-  await select(7); await page.getByTestId('workbench-heading').locator('h2').click()
+  await select(7); await page.evaluate(()=>document.activeElement instanceof HTMLElement&&document.activeElement.blur())
   const restoredX = await page.evaluate(() => window.ws.selectedObject.value.bbox.x)
   await page.keyboard.press('Alt+ArrowRight'); await saved()
   const editedX = await page.evaluate(() => window.ws.selectedObject.value.bbox.x)
@@ -205,7 +207,7 @@ try {
   await page.locator('.object-deletion-feedback').getByRole('button', { name: '撤销', exact: true }).click(); await saved()
   await page.getByTestId('tracking-feedback').waitFor()
   check((await ids()).includes(7) && (await workspace('controls-feedback')).pausedAnomalies.some(item => item.objectId === 7), 'undoing deletion restores the original pending anomaly and its object')
-  check(await button('AI Tracking').isDisabled(), 'normal AI-start action cannot silently accept an unresolved anomaly')
+  check(await button('首尾双向追踪').isDisabled(), 'normal AI-start action cannot silently accept an unresolved anomaly')
   await page.screenshot({ path: 'output/playwright/annotation-controls-feedback.png', animations: 'disabled' })
   for (const viewport of [{ width: 1366, height: 768 }, { width: 1180, height: 760 }]) {
     await page.setViewportSize(viewport); await page.waitForTimeout(180)
@@ -229,11 +231,11 @@ try {
   check(durable.normalMotionSamples[0].features.motionNormalized > 1, 'server derives the normal motion sample from its saved tracking evidence')
   check(trackStarts.length === beforeNormal + 1, 'AI resumes only after explicit normal feedback is saved')
   await page.locator('.tracking-calibration summary').click()
-  check((await page.locator('.tracking-calibration').innerText()).includes('#7 · 1 次正常运动确认'), 'calibration panel explains the affected object and sample count')
+  check((await page.locator('.tracking-calibration').innerText()).includes('对象 7 · 1 次正常运动确认'), 'calibration panel explains the affected object and sample count')
   check((await page.locator('.tracking-calibration').innerText()).includes('异常检测持续开启'), 'UI makes continued anomaly detection explicit')
   await saved(); await reload(); await media('controls-feedback')
   await page.locator('.tracking-calibration summary').click()
-  check((await page.locator('.tracking-calibration').innerText()).includes('#7 · 1 次正常运动确认'), 'calibration survives reopening the actual saved workspace')
+  check((await page.locator('.tracking-calibration').innerText()).includes('对象 7 · 1 次正常运动确认'), 'calibration survives reopening the actual saved workspace')
   await page.locator('[data-calibration-object-id="7"]').getByRole('button',{name:'恢复默认判断',exact:true}).click()
   await waitApi(async () => (await workspace('controls-feedback')).normalMotionSamples.length === 0)
   check((await workspace('controls-feedback')).trackingFeedbackEvents.some(event => event.decision === 'reset'), 'reset clears samples while preserving the audit event')
@@ -294,7 +296,7 @@ try {
   check(durable.normalMotionSamples.length === 1 && durable.trackingFeedbackEvents.filter(event => event.decision === 'normal').length === 2, 'lost-response replay does not duplicate samples or whole-frame audit events')
 
   await media('controls-feedback-corrected'); await go(3); await select(7)
-  await page.getByTestId('workbench-heading').locator('h2').click(); await page.keyboard.press('Alt+ArrowRight'); await saved()
+  await page.evaluate(()=>document.activeElement instanceof HTMLElement&&document.activeElement.blur()); await page.keyboard.press('Alt+ArrowRight'); await saved()
   await page.getByTestId('confirm-tracking-corrected').click()
   await waitApi(async () => (await workspace('controls-feedback-corrected')).trackingFeedbackEvents.length === 1)
   await idle()

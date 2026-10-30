@@ -61,9 +61,13 @@ with zipfile.ZipFile(sys.argv[1]) as z:
  assert all(isinstance(f['objects_json'],list) for f in frames)
  versions=list(csv.DictReader(io.StringIO(z.read('final_versions.csv').decode('utf-8-sig'))))
  assert any(v['is_current']=='1' for v in versions) and any(v['is_current']=='0' for v in versions)
- print(json.dumps({'files':len(m['files']),'frames':len(frames),'exportId':m['exportId']}))
+ required={'users.csv','media_revisions.csv','annotation_baselines.csv','baseline_frames.jsonl','review_sessions.csv','review_versions.csv','review_version_frames.jsonl','review_changes.csv','confirmation_sessions.csv','decision_heads.csv','decision_events.csv','final_versions.csv','final_version_frames.jsonl','final_frame_objects.csv','confirmation_final_records.jsonl','confirmation_actions.csv','confirmation_reopen_events.csv','review_withdrawals.csv','review_return_events.csv','confirmation_decision_carries.csv','review_object_catalog.csv','review_object_allocators.csv','review_annotation_returns.csv','concentrated_reviews.jsonl','concentrated_reopens.csv'}
+ assert {e['name'] for e in m['files']}==required
+ for line in z.read('concentrated_reviews.jsonl').decode().splitlines():
+  assert isinstance(json.loads(line)['evidence_json'],dict)
+ print(json.dumps({'files':len(m['files']),'completeHistory':True,'frames':len(frames),'exportId':m['exportId']}))
 `, 'output/playwright/statistics-data.zip'], {encoding:'utf8'}))
-  check(inspected.files === 17 && inspected.exportId === firstId, 'real ZIP checksums, A/B/C/F, empty frames, version history and excluded credentials verified')
+  check(inspected.completeHistory && inspected.files === 25 && inspected.exportId === firstId, 'real ZIP checksums, A/B/C/F, empty frames, version history and excluded credentials verified')
   check((await page.request.get(`${origin}/api/statistics/exports/${firstId}/download`)).status() === 401, 'anonymous archive access denied')
   check((await page.request.get(`${origin}/api/statistics/exports/${firstId}`, {headers:{Authorization:`Bearer ${fixture.authorToken}`}})).status() === 404, 'another account cannot access the generated task')
   let lost = true, createdId, keys = []

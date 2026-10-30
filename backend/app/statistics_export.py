@@ -143,6 +143,14 @@ EXPORT_SPECS: tuple[ExportSpec, ...] = (
         required=False,
         order_by="confirmation_id, created_at, rowid",
     ),
+    ExportSpec("review_withdrawals", "review_withdrawals.csv", required=False, order_by="session_id, created_at, rowid"),
+    ExportSpec("review_return_events", "review_return_events.csv", required=False, order_by="session_id, created_at, rowid"),
+    ExportSpec("confirmation_decision_carries", "confirmation_decision_carries.csv", required=False, order_by="rowid"),
+    ExportSpec("review_object_catalog", "review_object_catalog.csv", required=False, order_by="session_id, object_id"),
+    ExportSpec("review_object_allocators", "review_object_allocators.csv", required=False, order_by="session_id"),
+    ExportSpec("concentrated_reviews", "concentrated_reviews.jsonl", file_format="jsonl", json_columns=("evidence_json",), required=False, order_by="session_id"),
+    ExportSpec("concentrated_reopens", "concentrated_reopens.csv", required=False, order_by="session_id,created_at,rowid"),
+    ExportSpec("review_annotation_returns", "review_annotation_returns.csv", required=False, order_by="session_id, created_at, rowid"),
 )
 
 
@@ -397,6 +405,7 @@ def _export_statistics_snapshot_zip(
                     }
                 )
 
+            has_presence_changes = conn.execute("SELECT 1 FROM review_changes WHERE trim(before_bbox)='null' OR trim(after_bbox)='null' LIMIT 1").fetchone() is not None
             # Close the consistent read transaction before CPU-heavy compression;
             # rollback-journal deployments can then continue committing writes.
             conn.rollback()
@@ -420,9 +429,12 @@ def _export_statistics_snapshot_zip(
                 "semantics": {
                     "annotation_baselines.object_count": "所有帧中的框实例总数，不是去重 objectId 数",
                     "review_sessions.changed_count": "最终存在净修改的帧数",
-                    "review_changes": "固定 B 相对 A 的最终净几何变化",
+                    "review_changes": "固定 B 相对 A 的最终净调整、补标与删除；before_bbox/after_bbox 的 JSON null 表示该侧不存在，非零尺寸框",
+                    "review_changes.geometry": "补标与删除不计算 IoU、位移、尺寸变化；几何统计应排除不存在的一侧",
                     "decision_heads": "当前选择；decision_events 是历史事件",
                     "final_version_frames": "完整 F，包含空帧",
+                    "confirmation_final_records": "固定全部修改项和选择，包括确认删除、拒绝补标等最终不存在的对象；不能仅由 F 中存在框反推工作量",
+                    "review_annotation_returns": "审查员退回重新标注的不可变历史；原 A/B 与工作区不由导出改写",
                     "frameIndex": "数据库从 0 开始",
                     "bbox": "原图像素连续坐标 [x1,y1,x2,y2]",
                 },
@@ -433,6 +445,11 @@ def _export_statistics_snapshot_zip(
                     "原始视频",
                 ],
             }
+            if has_presence_changes:
+                manifest['requiredFeatures'] = ['review_presence_v1']
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE name='concentrated_reviews'").fetchone() and conn.execute('SELECT 1 FROM concentrated_reviews LIMIT 1').fetchone():
+                manifest.setdefault('requiredFeatures', []).append('concentrated_review_v1')
+                manifest['semantics']['concentrated_reviews'] = '审查直接最终接受；关联 C 记录仅为兼容存储，非第三人工作量。decision_events.note 标记 review-acceptance。'
             manifest_path = staging / "manifest.json"
             manifest_path.write_text(
                 json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",

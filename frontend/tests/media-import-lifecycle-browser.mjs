@@ -35,7 +35,7 @@ const ready = async () => {
   assert.equal(await page.getByTestId('workspace-save-error').count(), 0, 'Unexpected workspace error')
 }
 const draw = async () => {
-  await ready(); await page.locator('.annotation-heading h2').click(); await page.keyboard.press('b')
+  await ready(); await page.evaluate(()=>document.activeElement instanceof HTMLElement&&document.activeElement.blur()); await page.keyboard.press('b')
   const box = await page.getByTestId('annotation-hit').boundingBox(); assert(box)
   await page.mouse.move(box.x+box.width*.35, box.y+box.height*.35); await page.mouse.down()
   await page.mouse.move(box.x+box.width*.45, box.y+box.height*.46, {steps:6}); await page.mouse.up()

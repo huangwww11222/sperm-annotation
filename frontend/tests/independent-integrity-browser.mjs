@@ -1,3 +1,4 @@
+import {legacyTrackingProbe} from './legacy-tracking-probe.mjs'
 // Independent audit: real login/upload/UI; only model inference is simulated.
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -6,6 +7,10 @@ import { createHash } from 'node:crypto'
 import { trackingPolicyChecks } from './tracking-policy-checks.mjs'
 import { trackingFocusChecks } from './tracking-focus-checks.mjs'
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright')
+// The media list is a drawer that stays closed while a video is open.
+const openAsset=async(target,locator)=>{const toggle=target.getByTestId('toggle-workbench-library');for(let i=0;i<40;i++){if(await locator.isVisible()){try{await locator.click({timeout:1500});return}catch{}}else if(await toggle.isVisible())await toggle.click();await target.waitForTimeout(250)}await locator.click()}
+// Object names are no longer editable in the UI; tests still steer the simulated model through the store's default name.
+const setObjectName=(target,name)=>target.evaluate(async n=>{const url=performance.getEntriesByType('resource').find(r=>r.name.includes('/src/stores/workspace.ts')).name;(await import(url)).useWorkspace().objectNameInput.value=n},name)
 const root = path.resolve(process.env.INDEPENDENT_AUDIT_ROOT || '')
 assert(root.startsWith(path.resolve('work') + path.sep) && /e2e-confirm-ux-(independent|regression)-/.test(path.basename(root)))
 const origin = process.env.INDEPENDENT_AUDIT_ORIGIN
@@ -46,7 +51,7 @@ async function upload(label, fourK=false) {
   const data=await r.json(); await ready(); return data.mediaId
 }
 async function draw(mid, count=1, dense=false) {
-  await ready(); await page.locator('.annotation-heading h2').click(); await page.keyboard.press('b')
+  await ready(); await page.evaluate(()=>document.activeElement instanceof HTMLElement&&document.activeElement.blur()); await page.keyboard.press('b')
   const box=await page.getByTestId('annotation-hit').boundingBox(); assert(box)
   const [x,y,w,h]=dense?[.92,.94,.04,.04]:count===1?[.3,.3,.08,.08]:count===2?[.75,.7,.08,.08]:[.5,.7,.08,.08]
   await page.mouse.move(box.x+box.width*x,box.y+box.height*y);await page.mouse.down()
@@ -77,7 +82,7 @@ try {
     const range=await page.request.get(url,{headers:{Range:'bytes=0-99'}})
     assert.equal(range.status(),206);assert.deepEqual(await range.body(),content.subarray(0,100))
     await page.reload();await ready()
-    await page.locator('.asset-card').filter({hasText:asset.videoName}).click();await ready()
+    await openAsset(page,page.locator('.asset-card').filter({hasText:asset.videoName}));await ready()
     await poll(async()=>await page.locator('video').first().evaluate(v=>v.readyState>=2 && v.videoWidth===640),'authenticated native video decoded')
     await button('播放').click()
     await poll(async()=>await page.locator('video').first().evaluate(v=>v.currentTime>0.3 && !v.paused),'native playback advances')
@@ -125,15 +130,17 @@ try {
     observations={fault,pendingPreserved:true,committedSaveReplayed:true,recoveredManualCount:3}
   })
 
-  await caseRun('first-tracking-pause-and-confirm',async()=>{
+  await caseRun('legacy-tracking-pause-and-confirm',async()=>{
+    const legacyRequest=route=>route.continue({postData:JSON.stringify({...route.request().postDataJSON(),reviewMode:false})})
+    await page.route('**/api/track',legacyRequest)
     const mid=await upload('first-pause')
-    await page.getByRole('textbox',{name:'对象名称',exact:true}).fill('audit-pause')
+    await setObjectName(page,'audit-pause')
     await draw(mid)
     // The second object is also named explicitly through the actual editor.
-    await page.locator('.annotation-heading h2').click();await page.keyboard.press('Escape')
-    await page.getByRole('textbox',{name:'对象名称',exact:true}).fill('audit-pause')
+    await page.evaluate(()=>document.activeElement instanceof HTMLElement&&document.activeElement.blur());await page.keyboard.press('Escape')
+    await setObjectName(page,'audit-pause')
     await draw(mid,2)
-    await button('AI Tracking').click()
+    await legacyTrackingProbe(page).click()
     await page.getByTestId('confirm-tracking-normal').waitFor()
     await poll(async()=>(await api('/track/workspace/'+mid)).pausedAnomalies?.length===2,'real paused context persisted')
     const paused=await api('/track/workspace/'+mid)
@@ -150,12 +157,13 @@ try {
     assert.deepEqual(resumed.pausedAnomalies,[])
     await page.reload();await ready()
     assert.equal(await page.locator('.object-select').count(),2)
+    await page.unroute('**/api/track',legacyRequest)
     observations={firstPauseOriginalFrame:1,confirmedObjects:2,resultFrames:3,reloadedObjects:2,model:'simulated size anomaly; real detector and publication'}
   })
 
   await caseRun('authoritative-tracking-reload',async()=>{
     const mid=await upload('authoritative');await draw(mid)
-    await button('AI Tracking').click()
+    await legacyTrackingProbe(page).click()
     await poll(async()=>(await api('/track/result/'+mid)).frames.length===3,'three tracking frames published')
     await ready();assert.equal(await page.locator('.object-select').count(),1)
     // Another tab cuts the old future branch. The SPA must use the new source.
@@ -177,7 +185,7 @@ try {
 
   await caseRun('malformed-success-response',async()=>{
     const mid=await upload('malformed-success');await draw(mid)
-    await button('AI Tracking').click()
+    await legacyTrackingProbe(page).click()
     await poll(async()=>(await api('/track/result/'+mid)).frames.length===3,'tracking result before malformed response')
     await ready();assert.equal(await page.locator('.object-select').count(),1)
     await poll(async()=>(await api('/track/workspace/'+mid)).currentFrame===2,'tracking end position saved before refresh')
@@ -216,8 +224,8 @@ try {
       if(fault)await route.fulfill({status:503,json:{detail:'injected late read failure for previous asset'}})
       else await route.continue()
     })
-    await page.locator('.asset-card').filter({hasText:labelA+'.avi'}).click();await seen
-    await page.locator('.asset-card').filter({hasText:labelB+'.avi'}).click();await ready()
+    await openAsset(page,page.locator('.asset-card').filter({hasText:labelA+'.avi'}));await seen
+    await openAsset(page,page.locator('.asset-card').filter({hasText:labelB+'.avi'}));await ready()
     release();await page.waitForTimeout(700)
     const blocked=await locked(),hasError=await page.getByTestId('workspace-save-error').count()>0
     const preserved=JSON.stringify((await api('/track/workspace/'+b)).manualAnnotations)===JSON.stringify(before)

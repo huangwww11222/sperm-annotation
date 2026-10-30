@@ -68,7 +68,13 @@ def source(directory, uid, info):
                 if isinstance(data, list)
                 else data.get("frames", data.get("results", [data]))
             )
+        from .endpoint_tracking import project_endpoints
+        rows = project_endpoints([normalize_tracking_row(r) for r in rows])
+        if any((r.get('reviewEvidence') or {}).get('endpointCheck',{}).get('associationPolicy')=='head-centre-v1' for r in rows):manifest['endpointProjectionPolicy']='head-centre-v1'
         frames = {}
+        terminal_maps = {}
+        terminal_checks = {}
+        from .endpoint_tracking import terminal_aliases
         for row in rows:
             row = normalize_tracking_row(row)
             fi = integer(
@@ -82,6 +88,8 @@ def source(directory, uid, info):
             if "objects" not in row or not isinstance(row["objects"], list):
                 raise ValueError("Tracking 对象列表缺失")
             objects = {}
+            terminal_maps[fi] = terminal_aliases(row)
+            terminal_checks[fi] = (row.get('reviewEvidence') or {}).get('endpointCheck') or {}
             for obj in row["objects"]:
                 oid = integer(
                     obj.get("object_id", obj.get("objectId")), "Tracking 对象 ID"
@@ -114,7 +122,16 @@ def source(directory, uid, info):
                 x + box["width"] * info["width"] / 100,
                 y + box["height"] * info["height"] / 100,
             ]
-            frames.setdefault(fi, {})[oid] = make_object(obj, oid, b, info)
+            check = terminal_checks.get(fi, {})
+            canonical = oid if obj.get('endpointAnchorHash') == check.get('anchorHash') and obj.get('endpointAnchorHash') else terminal_maps.get(fi, {}).get(oid, oid)
+            if not is_deleted(workspace, fi, canonical):
+                frames.setdefault(fi, {})[canonical] = make_object(obj, canonical, b, info)
+        # Tail annotation IDs are independent local anchors. Keep originals in
+        # the manifest, apply only unique trajectory aliases to the frozen A.
+        for fi, aliases in terminal_maps.items():
+            for tail_id, canonical in aliases.items():
+                if is_deleted(workspace, fi, tail_id):
+                    frames.get(fi, {}).pop(canonical, None)
         for fi in workspace.get("deletedAnnotationFrames", []):
             if integer(fi, "已删除标注帧号") >= info["frameCount"]:
                 raise ValueError("已删除标注帧号越界")
@@ -249,12 +266,21 @@ def complete(directory, video, media_id, uid, key, body, info):
         snapshot = w.digest(frozen)
         existing = c.execute(
             """SELECT s.id FROM review_sessions s JOIN annotation_baselines a ON a.id=s.baseline_id
-            WHERE a.media_revision_id=? AND a.submitted_by=? AND a.snapshot_hash=? AND s.state!='withdrawn' ORDER BY a.created_at DESC LIMIT 1""",
+            WHERE a.media_revision_id=? AND a.submitted_by=? AND a.snapshot_hash=? AND s.state NOT IN ('withdrawn','returned_to_annotation') ORDER BY a.created_at DESC LIMIT 1""",
             (mid, uid, snapshot),
         ).fetchone()
         if existing:
             sid = existing[0]
         else:
+            # A changed workspace must not silently create a parallel task while
+            # another reviewer is working. Withdrawal/explicit return retires the
+            # old task first; their immutable snapshots remain available.
+            active = c.execute('''SELECT s.id FROM review_sessions s
+                JOIN annotation_baselines a ON a.id=s.baseline_id
+                JOIN media_revisions m ON m.id=a.media_revision_id
+                WHERE m.media_id=? AND s.state NOT IN ('withdrawn','returned_to_annotation') LIMIT 1''', (media_id,)).fetchone()
+            if active:
+                raise w.ReviewError('MEDIA_ALREADY_SUBMITTED', '该视频已有送审任务，请先撤回送审或由当前审查员退回重新标注')
             bid = "abl_" + uuid.uuid4().hex
             sid = "rs_" + uuid.uuid4().hex
             c.execute(
@@ -289,6 +315,11 @@ def complete(directory, video, media_id, uid, key, body, info):
                 "INSERT INTO review_frames(session_id,frame_index) VALUES (?,?)",
                 [(sid, f["frameIndex"]) for f in frozen],
             )
+        if body.get('concentratedReview') and not existing:
+            from .concentrated_review import register
+            from .concentrated_review import read_rows
+            rows = read_rows(directory / 'tracker_results.json')
+            register(c, sid, rows, revision)
         result = {"session": w.session_data(c, w.session_row(c, sid), uid)}
         c.execute(
             "INSERT INTO review_write_receipts VALUES (?,?,?,?,?)",

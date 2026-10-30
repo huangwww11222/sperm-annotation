@@ -1,5 +1,5 @@
 export type MediaType = 'image' | 'video'
-export type AnnotationTool = 'select' | 'point' | 'bbox'
+export type AnnotationTool = 'select' | 'point' | 'bbox' | 'head'
 export type ObjectSource = 'manual' | 'ai'
 export type TaskStatus = 'queued' | 'running' | 'success' | 'failed'
 
@@ -39,6 +39,9 @@ export interface MediaAsset {
 }
 
 export interface AnnotationObject {
+  /** Independent terminal-local ID before unique trajectory reconciliation. */
+  endpointOriginalObjectId?: number
+  endpointAnchorHash?: string
   id: string
   objectId?: number
   name: string

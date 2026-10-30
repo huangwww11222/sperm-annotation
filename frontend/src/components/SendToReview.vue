@@ -3,11 +3,18 @@ import { createRequestId } from '../utils/browserCompat'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useWorkspace } from '../stores/workspace'
 import { useAuth } from '../stores/auth'
-import { addLeaveGuard } from '../router'
+import { addLeaveGuard, useRouter } from '../router'
 import { reviewWorkflowApi as api, type CompletionPreview, type Session } from '../api/reviewWorkflowApi'
+const props=defineProps<{historyOnly?:boolean}>()
 const {selectedMedia,currentMediaId,isAiBusy,editingBlocked,persistWorkspaceState,submissionLocks}=useWorkspace()
+const statusPop=ref<HTMLDetailsElement|null>(null)
+function closePop(e:MouseEvent){const el=statusPop.value;if(el?.open&&!el.contains(e.target as Node))el.open=false}
 const visible=ref(false),busy=ref(false),error=ref(''),success=ref(''),emptyRanges=ref(''),confirmed=ref(false),mode=ref<'send'|'withdraw'>('send')
 const preview=ref<CompletionPreview|null>(null),submitted=ref<Session[]>([]),loading=ref(false),statusError=ref('')
+const returnedHistory=ref<Session[]>([])
+const activeSession=computed(()=>submitted.value[0]||null)
+const latestReturn=computed(()=>returnedHistory.value[0]?.state==='returned_to_annotation'?returnedHistory.value[0]:null)
+const statusLabel=computed(()=>{const s=activeSession.value;if(!s)return '';return ({pending:s.reviewerId===null?'等待领取':'审查中',in_progress:'审查中',reviewed:'已完成审查'} as Record<string,string>)[s.state]||'已送审'})
 const withdrawable=computed(()=>submitted.value.find(s=>s.permissions.canWithdraw))
 const pending=ref<{kind:'send'|'withdraw';mediaId:string;sid?:string;revision?:number;body?:unknown;key:string}|null>(null)
 const lockId=createRequestId(),dialog=ref<HTMLElement|null>(null)
@@ -15,16 +22,16 @@ watch([visible,busy,pending],()=>{if(visible.value||busy.value||pending.value)su
 watch(visible,async value=>{if(value){await nextTick();dialog.value?.querySelector<HTMLElement>('button:not(:disabled)')?.focus()}})
 function dialogKeys(e:KeyboardEvent){if(e.key==='Escape'&&!busy.value&&!pending.value)visible.value=false;if(e.key==='Tab'){const nodes=Array.from(dialog.value?.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled)')||[]);if(nodes.length){e.preventDefault();const index=nodes.indexOf(document.activeElement as HTMLElement);nodes[(index+(e.shiftKey?-1:1)+nodes.length)%nodes.length]?.focus()}}}
 function beforeUnload(e:BeforeUnloadEvent){if(busy.value||pending.value){e.preventDefault();e.returnValue=''}}
-onMounted(()=>window.addEventListener('beforeunload',beforeUnload))
+onMounted(()=>{window.addEventListener('beforeunload',beforeUnload);document.addEventListener('click',closePop)})
 const journal=()=>`annotation-submission:${useAuth().user.value?.id}:${selectedMedia.value?.serverMediaId}`
 let serial=0
 function remember(){try{if(pending.value)sessionStorage.setItem(journal(),JSON.stringify(pending.value));else sessionStorage.removeItem(journal())}catch(e){console.warn('[review.submission_journal_failed]',e)}}
 async function refresh(){
   const id=selectedMedia.value?.serverMediaId,n=++serial
-  submitted.value=[];statusError.value=''
+  submitted.value=[];returnedHistory.value=[];statusError.value=''
   if(!id)return
   loading.value=true
-  try{const r=await api.submissionStatus(id);if(n===serial)submitted.value=r.items}
+  try{const r=await api.submissionStatus(id);if(n===serial){submitted.value=r.items;returnedHistory.value=r.history||[]}}
   catch(e:any){if(n===serial)statusError.value=e.message||'送审状态读取失败';console.error('[review.submission_status_failed]',e)}
   finally{if(n===serial)loading.value=false}
 }
@@ -41,6 +48,11 @@ async function open(){
   catch(e:any){error.value=e.message||'送审预览失败';console.error('[review.completion_preview_failed]',e)}finally{busy.value=false}
 }
 function openWithdraw(){mode.value='withdraw';visible.value=true;success.value='';error.value=''}
+function viewReview(){
+  if(!activeSession.value)return
+  try{sessionStorage.setItem('review-open-session',activeSession.value.id)}catch(e){console.warn('[review.navigation_target_failed]',e)}
+  void useRouter().push('/review')
+}
 function ranges(){
   if(!emptyRanges.value.trim())return []
   return emptyRanges.value.split(/[,，\s]+/).filter(Boolean).map(s=>{
@@ -60,7 +72,7 @@ async function submit(){
         if(!withdrawable.value)throw new Error('任务已开始审查或不属于当前送审者，不能撤回')
         pending.value={kind:'withdraw',mediaId,sid:withdrawable.value.id,revision:withdrawable.value.revision,key:createRequestId()}
       }else{
-        pending.value={kind:'send',mediaId,key:createRequestId(),body:{expectedSourceRevision:preview.value!.sourceRevision,confirmComplete:confirmed.value,explicitEmptyFrameRanges:ranges()}}
+        pending.value={kind:'send',mediaId,key:createRequestId(),body:{expectedSourceRevision:preview.value!.sourceRevision,confirmComplete:confirmed.value,concentratedReview:true,explicitEmptyFrameRanges:ranges()}}
       }
       remember()
     }
@@ -73,16 +85,27 @@ async function submit(){
   finally{busy.value=false}
 }
 const removeGuard=addLeaveGuard(async()=>!busy.value&&!pending.value)
-onUnmounted(()=>{removeGuard();submissionLocks.value.delete(lockId);window.removeEventListener('beforeunload',beforeUnload)})
+onUnmounted(()=>{removeGuard();submissionLocks.value.delete(lockId);window.removeEventListener('beforeunload',beforeUnload);document.removeEventListener('click',closePop)})
 </script>
 <template>
   <div class="submission-controls">
     <small v-if="statusError" role="alert">{{ statusError }} <button class="quiet-button" @click="refresh">重试</button></small>
-    <small v-else-if="submitted.length">已送审 · {{ submitted.some(s=>s.reviewerId!==null||s.state!=='pending')?'审查已开始':'等待领取' }}</small>
-    <button v-if="withdrawable" class="btn-secondary" data-testid="withdraw-submission" :disabled="busy||isAiBusy||editingBlocked||loading||!!pending" @click="openWithdraw">撤回送审</button>
+    <details v-else-if="activeSession" ref="statusPop" class="submission-pop">
+      <summary class="submission-pill" :class="activeSession.state" title="送审状态与操作">已送审 · {{ statusLabel }}</summary>
+      <div class="submission-pop-body">
+        <p>已送审 · {{ statusLabel }}<span v-if="activeSession.reviewerId!==null"> · 审查员 {{ activeSession.reviewerId }}</span></p>
+        <p v-if="!withdrawable" class="withdrawal-reason">{{ activeSession.withdrawalBlockedReason||'任务已领取，不能直接撤回；需要返工时请由当前审查员退回重新标注。' }}</p>
+        <div class="submission-pop-actions">
+          <button class="btn-secondary" data-testid="view-review-task" :disabled="busy||!!pending" @click="viewReview">查看审查任务</button>
+          <button class="btn-secondary" data-testid="withdraw-submission" :disabled="!withdrawable||busy||isAiBusy||editingBlocked||loading||!!pending" :title="activeSession.withdrawalBlockedReason||(!withdrawable?'任务已领取后不能直接撤回':'撤回后保留标注，可修改后重新送审')" @click="openWithdraw">撤回送审</button>
+          <button class="quiet-button" :disabled="busy" aria-label="刷新送审状态" @click="refresh">刷新</button>
+        </div>
+      </div>
+    </details>
+    <small v-else-if="latestReturn" class="returned-status" data-testid="annotation-return-status" :title="latestReturn.returnAnnotation?.reason||'请检查原标注后重新送审'">已退回：{{ latestReturn.returnAnnotation?.reason||'请检查原标注后重新送审' }}</small>
+    <small v-else-if="returnedHistory[0]?.state==='withdrawn'" title="已撤回送审，可继续标注后重新送审">已撤回</small>
     <button v-if="pending" class="btn-secondary" @click="visible=true">重试{{ pending.kind==='withdraw'?'撤回':'送审' }}</button>
-    <button v-else class="btn-primary" :disabled="busy||loading||!!statusError||submitted.length>0||isAiBusy||editingBlocked||!selectedMedia?.serverMediaId||selectedMedia.type!=='video'" @click="open">完成标注并送审</button>
-    <button v-if="submitted.length&&!withdrawable" class="quiet-button" :disabled="busy" aria-label="刷新送审状态" @click="refresh">↻</button>
+    <button v-else-if="!activeSession && !props.historyOnly" class="btn-primary" :disabled="busy||loading||!!statusError||isAiBusy||editingBlocked||!selectedMedia?.serverMediaId||selectedMedia.type!=='video'" @click="open">完成标注并送审</button>
   </div>
   <Teleport to="body"><div v-if="visible" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6" data-completion-dialog @keydown.esc="!busy&&!pending&&(visible=false)">
     <section ref="dialog" role="dialog" aria-modal="true" @keydown="dialogKeys" :aria-label="mode==='withdraw'?'撤回送审':'完成标注并送审'" class="app-dialog w-[560px]">
@@ -93,10 +116,23 @@ onUnmounted(()=>{removeGuard();submissionLocks.value.delete(lockId);window.remov
         <p>全视频 {{ preview.frameCount }} 帧：有对象 {{ preview.objectFrames }} 帧，已明确空帧 {{ preview.emptyFrames }} 帧，未知 {{ preview.unknownFrames }} 帧。</p>
         <p class="my-3 muted">送审读取已保存的人工修正和 Tracking 结果，保留完整 A 快照；未知帧不会自动视为空帧。</p>
         <template v-if="preview.unknownFrames"><p class="my-3">未知帧（从 1 开始）：{{ preview.unknownFrameRanges.map(r=>r.start===r.end?`${r.start+1}`:`${r.start+1}-${r.end+1}`).join(', ') }}</p><label class="block">已逐帧确认没有对象的帧号 / 范围<input v-model="emptyRanges" :disabled="busy||!!pending" class="input my-2 w-full" placeholder="例如 3, 8-10；其余未知帧请先完成标注" /></label></template>
-        <label class="my-4 flex gap-2"><input v-model="confirmed" :disabled="busy||!!pending" type="checkbox" />我已检查全视频，确认已有标注与上述空帧声明完整、准确。</label>
+        <label class="my-4 flex gap-2"><input v-model="confirmed" :disabled="busy||!!pending" type="checkbox" />我确认已生成全视频初稿；上述空帧声明经人工核对，标注准确性将在审查页检查。</label>
       </template>
       <div class="mt-5 flex justify-end gap-3"><button class="btn-secondary" :disabled="busy||!!pending" @click="visible=false">关闭</button><button v-if="!success&&mode==='send'" class="btn-secondary" :disabled="busy||!!pending" @click="open">重新预览</button><button v-if="!success" class="btn-primary" :disabled="busy||(!pending&&(mode==='send'?!preview||!confirmed:!withdrawable))" @click="submit">{{ pending?'重试原请求':mode==='withdraw'?'确认撤回':'确认送审' }}</button></div>
     </section>
   </div></Teleport>
 </template>
-<style scoped>.submission-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.submission-controls small{color:var(--text-muted);font-size:12px}</style>
+<style scoped>
+.submission-controls{display:flex;align-items:center;gap:8px;min-width:0}
+.submission-controls small{color:var(--muted);font-size:12px;white-space:nowrap}
+.submission-controls .returned-status{color:var(--warning);max-width:240px;overflow:hidden;text-overflow:ellipsis}
+.submission-pop{position:relative}
+.submission-pill{list-style:none;cursor:pointer;display:flex;align-items:center;height:30px;padding:0 10px;border-radius:15px;border:1px solid var(--line);background:var(--surface-subtle);font-size:12px;color:var(--text);white-space:nowrap}
+.submission-pill::-webkit-details-marker{display:none}
+.submission-pill::after{content:'';width:6px;height:6px;margin-left:7px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(45deg) translateY(-2px)}
+.submission-pill.reviewed{border-color:var(--success);color:var(--success);background:var(--success-soft)}
+.submission-pop-body{position:absolute;right:0;top:calc(100% + 6px);z-index:60;width:min(320px,calc(100vw - 24px));padding:12px 14px;border:1px solid var(--line);border-radius:9px;background:var(--surface);box-shadow:0 12px 34px #0003;font-size:12px;line-height:1.6;color:var(--text)}
+.submission-pop-body p{margin:0 0 6px}
+.submission-pop-body .withdrawal-reason{color:var(--muted)}
+.submission-pop-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+</style>

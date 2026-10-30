@@ -3,16 +3,21 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import { reviewZoomChecks } from './review-zoom-checks.mjs'
+import { workbenchShortcutsChecks } from './workbench-shortcuts-checks.mjs'
 import { useLegacyBrowserAPIs } from './legacy-browser-profile.mjs'
 
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright')
+// The task list is a drawer that stays closed while a task is open.
+const openTask=async(target,selector)=>{const card=target.locator(selector),toggle=target.getByTestId('toggle-workbench-library');for(let i=0;i<40;i++){if(await card.isVisible()){try{await card.click({timeout:1500});return}catch{}}else if(await toggle.isVisible())await toggle.click();await target.waitForTimeout(250)}await card.click()}
+// The media list is a drawer that stays closed while a video is open.
+const openAsset=async(target,locator)=>{const toggle=target.getByTestId('toggle-workbench-library');for(let i=0;i<40;i++){if(await locator.isVisible()){try{await locator.click({timeout:1500});return}catch{}}else if(await toggle.isVisible())await toggle.click();await target.waitForTimeout(250)}await locator.click()}
 const confirmation = JSON.parse(fs.readFileSync('work/confirmation-browser-fixture.json'))
 const review = JSON.parse(fs.readFileSync('work/browser-fixture.json'))
 const origin = process.env.CONFIRMATION_ORIGIN || 'http://127.0.0.1:5373'
 const browser = await chromium.launch({ channel: process.env.CHROME_CHANNEL || 'chrome', headless: true, ignoreDefaultArgs: ['--hide-scrollbars'] })
 const page = await browser.newPage({ viewport: { width: 1366, height: 768 } })
 if (process.env.LEGACY_BROWSER === '1') await useLegacyBrowserAPIs(page)
-const logs = [], errors = []
+const logs = [], errors = [], libraryHits = []
 let checks = 0
 page.on('console', message => logs.push({ type: message.type(), text: message.text() }))
 page.on('pageerror', error => errors.push(String(error)))
@@ -22,7 +27,8 @@ const cIdle = () => page.locator('.confirmation-page[data-busy="false"]').waitFo
 const bIdle = () => page.waitForFunction(() => !document.querySelector('[data-testid="submit-frame"]')?.textContent.includes('处理中'))
 const inView = locator => locator.evaluate(element => {
   const rect = element.getBoundingClientRect()
-  return rect.top >= 70 && rect.bottom <= innerHeight + 1 && rect.width > 0 && element.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2))
+  // The 48px header now carries page context; occlusion is checked by elementFromPoint.
+  return rect.top >= 0 && rect.bottom <= innerHeight + 1 && rect.width > 0 && element.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2))
 })
 const api = async (path, token) => {
   const response = await page.request.get(origin + '/api' + path, { headers: { Authorization: 'Bearer ' + token } })
@@ -40,7 +46,7 @@ const closeReviewDialog = async () => {
 async function openReview(expectCollapsed = false) {
   await page.goto(origin + '/review')
   await expandLibrary('review', expectCollapsed)
-  await page.locator(`[data-session-id="${review.sid}"]`).click()
+  await openTask(page,`[data-session-id="${review.sid}"]`)
   await page.locator('.review-drawing').waitFor()
   await bIdle()
   await closeReviewDialog()
@@ -49,14 +55,16 @@ async function openConfirmation(sid = confirmation.main.sid, expectCollapsed = f
   if (new URL(page.url()).pathname !== '/confirm') await page.goto(origin + '/confirm')
   await expandLibrary('confirmation', expectCollapsed)
   await cIdle()
-  await page.locator(`[data-session-id="${sid}"]`).click()
+  await openTask(page,`[data-session-id="${sid}"]`)
   await cIdle()
   if (await button('留在上次位置').count()) await button('留在上次位置').click()
 }
 async function expandLibrary(stage, expectCollapsed = false) {
   const toggle = page.getByTestId('toggle-workbench-library')
   await toggle.waitFor()
-  if (expectCollapsed) check(await toggle.getAttribute('aria-expanded') === 'false' && !await page.locator('.workbench-library-content').isVisible(), `${stage}: collapsed video library preference survives a page change`)
+  // Entering a stage with no task open shows its list so a task can be picked;
+  // the list closes again once a task opens (checked by the open helpers).
+  if (expectCollapsed) check(await toggle.getAttribute('aria-expanded') === 'true' && await page.locator('.shell-drawer').isVisible(), `${stage}: entering a stage without an open task shows its video list`)
   if (await toggle.getAttribute('aria-expanded') === 'false') await toggle.click()
 }
 async function selectTheme(dark) {
@@ -84,17 +92,17 @@ async function layout(stage, progress, core) {
     await page.setViewportSize(size)
     for (const dark of [false, true]) {
       await selectTheme(dark)
-      const library = await page.locator('[data-workbench-region=library]').boundingBox()
+      const rail = await page.locator('.shell-rail').boundingBox()
       const canvas = await page.locator('[data-workbench-region=canvas]').boundingBox()
       const inspector = await page.locator('[data-workbench-region=inspector]').boundingBox()
-      check(library && canvas && inspector && library.x + library.width <= canvas.x + 2 && canvas.x + canvas.width <= inspector.x + 2,
-        `${stage} ${size.width} ${dark ? 'dark' : 'light'}: library, image and operations keep the same left-to-right structure`)
+      check(rail && canvas && inspector && rail.x + rail.width <= canvas.x + 2 && canvas.x + canvas.width <= inspector.x + 2,
+        `${stage} ${size.width} ${dark ? 'dark' : 'light'}: list rail, image and operations keep the same left-to-right structure`)
       check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${stage}: no horizontal page overflow`)
       check(await inView(core), `${stage}: core operation is visible without scrolling`)
       if (progress) {
-        const summary = page.getByRole('region', { name: progress })
+        const summary = page.getByTestId('video-progress')
         const box = await summary.boundingBox()
-        check(await inView(summary) && box.y + box.height <= canvas.y + 2, `${stage}: progress stays prominent above the workspace`)
+        check(await inView(summary) && box.y + box.height <= canvas.y + 2 && (await summary.getAttribute('title') !== null || (await summary.innerText()).length > 0), `${stage}: ${progress} stays in the header above the workspace`)
       }
       if (stage === 'confirmation') await contextLayout(800, 450, `landscape ${size.width} ${dark ? 'dark' : 'light'}`)
       await page.screenshot({ path: `output/playwright/workbench-${stage}-${size.width}-${dark ? 'dark' : 'light'}.png`, animations: 'disabled' })
@@ -126,19 +134,23 @@ async function narrowLibrary(stage, list, size, target) {
   if (await toggle.getAttribute('aria-expanded') === 'false') await toggle.click()
   const listBox = await list.boundingBox()
   check(listBox && listBox.height >= 64, `${stage} ${size.width}: expanded video library retains a usable scrollable list below its filters`)
-  const expandedTop = await page.locator('[data-workbench-region=canvas]').evaluate(element => element.getBoundingClientRect().top + scrollY)
   await toggle.click()
-  const collapsedTop = await page.locator('[data-workbench-region=canvas]').evaluate(element => element.getBoundingClientRect().top + scrollY)
-  check(!await page.locator('.workbench-library-content').isVisible() && collapsedTop < expandedTop - 100,
-    `${stage} ${size.width}: collapsing the library returns vertical space to the image`)
+  check(!await page.locator('.shell-drawer').isVisible() && await page.locator('[data-workbench-region=canvas]').isVisible(),
+    `${stage} ${size.width}: collapsing the list returns the whole area to the image`)
   await toggle.click()
   check(await list.isVisible() && await toggle.getAttribute('aria-expanded') === 'true', `${stage} ${size.width}: expanding restores video navigation`)
+  const reorderedProgress=false
   await target.scrollIntoViewIfNeeded()
-  check(await target.evaluate(element => {
+  const hit=await target.evaluate(element => {
     const rect = element.getBoundingClientRect(), list = element.closest('.asset-list,.review-videos,.c-video-list').getBoundingClientRect()
     const x = rect.x + rect.width / 2, y = rect.y + rect.height / 2
-    return rect.width > 40 && rect.height >= 32 && x > Math.max(0, list.left) && x < Math.min(innerWidth, list.right) && y > Math.max(0, list.top) && y < Math.min(innerHeight, list.bottom) && element.contains(document.elementFromPoint(x, y))
-  }), `${stage} ${size.width}: an actual video entry is visible and hit-testable inside the list`)
+    const target=document.elementFromPoint(x,y),progress=document.querySelector('[data-testid=video-progress]'),pr=progress?.getBoundingClientRect(),box=r=>({x:r.x,y:r.y,width:r.width,height:r.height,bottom:r.bottom,right:r.right})
+    return {passed:rect.width > 40 && rect.height >= 32 && x > Math.max(0, list.left) && x < Math.min(innerWidth, list.right) && y > Math.max(0, list.top) && y < Math.min(innerHeight, list.bottom) && element.contains(target),
+      scrollY,target:box(rect),list:box(list),progress:pr?box(pr):null,progressPosition:progress?getComputedStyle(progress).position:null,
+      hit:target?{tag:target.tagName,text:target.textContent?.slice(0,100),inProgress:!!target.closest('[data-testid=video-progress]')}:null}
+  })
+  libraryHits.push({stage,width:size.width,reorderedProgress,...hit})
+  check(hit.passed, `${stage} ${size.width}: an actual video entry is visible and hit-testable inside the list`)
   check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${stage} ${size.width}: header and workbench do not cause horizontal page overflow`)
 }
 async function narrowGuide(stage, readState) {
@@ -173,7 +185,7 @@ async function narrowWorkbenchChecks() {
   await page.setViewportSize(desktop)
   await page.goto(origin + '/annotate')
   await expandLibrary('annotation')
-  await page.locator('.asset-card').filter({ hasText: 'ux-video.avi' }).click()
+  await openAsset(page,page.locator('.asset-card').filter({ hasText: 'ux-video.avi' }))
   await page.locator('.object-select').first().waitFor()
   await page.waitForFunction(() => !document.querySelector('.canvas-status') && document.querySelector('.exact-media')?.complete)
   const annotationFrame = await page.getByRole('spinbutton', { name: '跳转帧号' }).inputValue()
@@ -183,17 +195,17 @@ async function narrowWorkbenchChecks() {
     await video.click()
     await page.locator('.object-select').first().focus(); await page.keyboard.press('Enter')
     check(await page.locator('.object-select').first().getAttribute('aria-pressed') === 'true', `annotation ${size.width}: keyboard selection remains available below the image`)
-    check(await page.locator('.object-select strong').first().evaluate(element => parseFloat(getComputedStyle(element).fontSize) >= 12), `annotation ${size.width}: object names keep a readable text size`)
+    check(await page.locator('.object-select').first().evaluate(element => parseFloat(getComputedStyle(element).fontSize) >= 12), `annotation ${size.width}: object IDs keep a readable text size`)
     if (size.width === 760) check((await page.locator('.annotation-stage').boundingBox()).width > 350, 'annotation 760: source image is wider than the former 327px canvas column')
     await button('专注').click()
     check((await page.locator('[data-workbench-region=canvas]').boundingBox()).width >= size.width - 24 && await inViewport(page.getByRole('button', { name: /退出专注/ })), `annotation ${size.width}: focus uses the window width and keeps its exit visible`)
     await page.getByRole('button', { name: /退出专注/ }).click()
     check(await page.getByRole('spinbutton', { name: '跳转帧号' }).inputValue() === annotationFrame && await page.locator('.object-select').first().getAttribute('aria-pressed') === 'true', `annotation ${size.width}: leaving focus restores the same frame and object`)
-    if (size.width === 390) await narrowGuide('annotation', async () => ({ frame: await page.getByRole('spinbutton', { name: '跳转帧号' }).inputValue(), selected: await page.locator('.object-select[aria-pressed=true]').getAttribute('aria-label'), focused: await page.locator('.annotation-page').evaluate(element => element.classList.contains('focused')) }))
+    if (size.width === 390) await narrowGuide('annotation', async () => ({ frame: await page.getByRole('spinbutton', { name: '跳转帧号' }).inputValue(), selected: await page.locator('.object-select[aria-pressed=true]').getAttribute('aria-label'), focused: await page.locator('.shell-annotate').evaluate(element => element.classList.contains('is-focus')) }))
     await page.screenshot({ path: `output/playwright/workbench-annotation-narrow-${size.width}.png`, animations: 'disabled', fullPage: true })
   }
   await page.setViewportSize(desktop); await page.evaluate(() => scrollTo(0, 0))
-  check(await inView(button('AI Tracking')), 'annotation: desktop core action recovers after narrow layouts and focus')
+  check(await inView(button('首尾双向追踪')), 'annotation: desktop core action recovers after narrow layouts and focus')
 
   await openReview()
   const reviewBefore = await api(`/review/sessions/${review.sid}`, review.token)
@@ -204,7 +216,7 @@ async function narrowWorkbenchChecks() {
     await page.locator('[data-row="2"]').focus(); await page.keyboard.press('Enter')
     check(await page.locator('[data-box="2"]').evaluate(element => element.classList.contains('chosen')), `review ${size.width}: keyboard list selection still locates the matching box`)
     check(await page.locator('[data-row="2"] b').evaluate(element => parseFloat(getComputedStyle(element).fontSize) >= 12), `review ${size.width}: object IDs keep a readable text size`)
-    await button('适应窗口').click()
+    await button('适应画面').click()
     if (size.width === 760) check((await readablePixels(page.locator('.review-drawing'))).width > 350, 'review 760: actual source pixels are wider than the former 327px canvas column')
     await button('下一帧').click(); await bIdle()
     check(await page.getByRole('textbox', { name: '跳转帧号' }).inputValue() === '2', `review ${size.width}: image navigation reaches the next real frame`)
@@ -219,7 +231,7 @@ async function narrowWorkbenchChecks() {
     await page.screenshot({ path: `output/playwright/workbench-review-narrow-${size.width}.png`, animations: 'disabled', fullPage: true })
   }
   await page.setViewportSize(desktop); await page.evaluate(() => scrollTo(0, 0))
-  check(await inView(page.getByTestId('submit-frame')) && await inView(page.getByRole('region', { name: '视频审查进度' })), 'review: desktop progress and submission recover after narrow navigation')
+  check(await inView(page.getByTestId('submit-frame')) && await inView(page.getByTestId('video-progress')), 'review: desktop progress and submission recover after narrow navigation')
 
   await openConfirmation(confirmation.main.sid)
   const decisionsBefore = JSON.stringify((await api(`/confirmation/sessions/${confirmation.main.sid}/changes`, confirmation.token)).items)
@@ -235,8 +247,13 @@ async function narrowWorkbenchChecks() {
     if (size.width === 760) check((await readablePixels(page.locator('.c-context [data-variant=full]'))).width > 327, 'confirmation 760: actual full-frame pixels improve on the former 327px canvas column')
     const object = page.locator('.c-context .context-boxes [data-object-id="2"]')
     await object.focus(); await page.keyboard.press('Enter'); await cIdle()
-    check((await page.getByTestId('current-item').innerText()).includes('对象 #2'), `confirmation ${size.width}: keyboard full-frame selection links the same comparison object`)
+    check((await page.getByTestId('current-item').innerText()).includes('对象 2'), `confirmation ${size.width}: keyboard full-frame selection links the same comparison object`)
     const current = await page.getByRole('textbox', { name: '修改项序号' }).inputValue()
+    check(await page.locator('.shell-bottom .c-queue-nav').evaluate(element =>
+      [...element.querySelectorAll('button,input')].every(control => {
+        const rect = control.getBoundingClientRect()
+        return rect.width > 0 && rect.left >= 0 && rect.right <= innerWidth
+      })), `confirmation ${size.width}: all item navigation controls fit without horizontal scrolling`)
     await button('下一修改项 →').click(); await cIdle(); await button('← 上一修改项').click(); await cIdle()
     check(await page.getByRole('textbox', { name: '修改项序号' }).inputValue() === current, `confirmation ${size.width}: modification navigation returns to the same item`)
     check(JSON.stringify((await api(`/confirmation/sessions/${confirmation.main.sid}/changes`, confirmation.token)).items) === decisionsBefore, `confirmation ${size.width}: responsive layout and keyboard browsing preserve all saved choices`)
@@ -245,7 +262,7 @@ async function narrowWorkbenchChecks() {
     await page.screenshot({ path: `output/playwright/workbench-confirmation-narrow-${size.width}.png`, animations: 'disabled', fullPage: true })
   }
   await page.setViewportSize(desktop); await page.evaluate(() => scrollTo(0, 0))
-  check(await inView(page.getByTestId('choose-a')) && await inView(page.getByTestId('choose-b')) && await inView(page.getByRole('region', { name: '视频确认进度' })), 'confirmation: desktop comparison controls and progress recover after narrow browsing')
+  check(await inView(page.getByTestId('choose-a')) && await inView(page.getByTestId('choose-b')) && await inView(page.getByTestId('video-progress')), 'confirmation: desktop comparison controls and progress recover after narrow browsing')
 }
 
 try {
@@ -263,27 +280,26 @@ try {
 
   await page.goto(origin + '/annotate')
   await expandLibrary('annotation')
-  await page.locator('.asset-card').filter({ hasText: 'ux-video.avi' }).click()
+  await openAsset(page,page.locator('.asset-card').filter({ hasText: 'ux-video.avi' }))
   await page.evaluate(async () => {
     const url = performance.getEntriesByType('resource').find(resource => resource.name.includes('/src/stores/workspace.ts')).name
     window.ws = (await import(url)).useWorkspace()
   })
   await page.waitForFunction(() => window.ws && !window.ws.workspaceRestoring.value && !window.ws.exactFrameLoading.value && window.ws.currentObjects.value.length === 2)
-  await layout('annotation', null, button('AI Tracking'))
+  await layout('annotation', null, button('首尾双向追踪'))
   await page.locator('.object-select').first().click()
-  await page.locator('.annotation-object-details > summary').focus(); await page.keyboard.press(' ')
-  check(await page.locator('.annotation-object-details').evaluate(element => element.open), 'Space opens annotation object details using the native summary action')
-  await page.keyboard.press(' ')
+  await page.locator('.object-select').nth(1).focus(); await page.keyboard.press(' ')
+  check(await page.locator('.object-select').nth(1).getAttribute('aria-pressed') === 'true', 'Space activates an object chip like a native button')
   await page.setViewportSize({ width: 1180, height: 760 })
-  await page.getByTestId('toggle-workbench-library').click()
+  if (await page.getByTestId('toggle-workbench-library').getAttribute('aria-expanded') === 'true') await page.getByTestId('toggle-workbench-library').click()
   await button('专注').click()
   check((await page.locator('[data-workbench-region=canvas]').boundingBox()).width > 1100 && !await page.locator('[data-workbench-region=library]').isVisible() && !await page.locator('[data-workbench-region=inspector]').isVisible(), 'compact focus uses the whole width even when the library was collapsed')
   await page.getByRole('button', { name: /退出专注/ }).click()
   check(await page.getByTestId('toggle-workbench-library').getAttribute('aria-expanded') === 'false', 'leaving focus retains the collapsed library preference')
   await page.getByTestId('toggle-workbench-library').click()
   await page.setViewportSize({ width: 1366, height: 768 })
-  const annotationBefore = await page.evaluate(() => ({ frame: window.ws.currentFrame.value, count: window.ws.currentObjects.value.length, focused: !!document.querySelector('.annotation-page.focused') }))
-  await assertGuideIsolation('annotation', annotationBefore, () => page.evaluate(() => ({ frame: window.ws.currentFrame.value, count: window.ws.currentObjects.value.length, focused: !!document.querySelector('.annotation-page.focused') })), ['f', 'b', 'Delete'])
+  const annotationBefore = await page.evaluate(() => ({ frame: window.ws.currentFrame.value, count: window.ws.currentObjects.value.length, focused: !!document.querySelector('.shell-annotate.is-focus') }))
+  await assertGuideIsolation('annotation', annotationBefore, () => page.evaluate(() => ({ frame: window.ws.currentFrame.value, count: window.ws.currentObjects.value.length, focused: !!document.querySelector('.shell-annotate.is-focus') })), ['f', 'b', 'Delete'])
 
   const beforeCollapse = await page.locator('[data-workbench-region=canvas]').boundingBox()
   await page.getByTestId('toggle-workbench-library').click()
@@ -307,7 +323,7 @@ try {
   // protects pointer-to-source conversion as well as the display-only checks.
   const sourceBeforeZoomDrag = await frame()
   const getReviewScale = () => page.locator('.review-drawing').evaluate(svg => Number(svg.getAttribute('width')) / svg.viewBox.baseVal.width)
-  while (await getReviewScale() < 1.2) await button('放大').click()
+  while (await getReviewScale() < 1.2) await button('放大画面').click()
   await page.waitForTimeout(250)
   const dragScale = await getReviewScale()
   let rect = await page.locator('[data-box="1"] rect').boundingBox()
@@ -322,7 +338,7 @@ try {
   rect = await page.locator('[data-box="1"] rect').boundingBox()
   await page.mouse.move(rect.x + rect.width / 2, rect.y + rect.height / 2)
   await page.mouse.down(); await page.mouse.move(rect.x + rect.width / 2 + 14, rect.y + rect.height / 2 + 4, { steps: 4 }); await page.mouse.up(); await bIdle()
-  await button('适应窗口').click()
+  await button('适应画面').click()
   check((await frame()).hasDraft && (await api(`/review/sessions/${review.sid}`, review.token)).progress.submittedFrames === 0, 'editing from the compact workbench saves a draft without submitting')
   await button('仅已调整').click()
   check(await page.locator('[data-row]').count() === 1 && await page.locator('[data-row="1"]').count() === 1, 'only-adjusted filter keeps the modified object')
@@ -343,7 +359,7 @@ try {
   await openConfirmation(confirmation.main.sid, true)
   await button('领取并开始确认').click(); await cIdle()
   await layout('confirmation', '视频确认进度', page.getByTestId('choose-a'))
-  check(await page.getByTestId('workbench-heading').locator('p').getAttribute('title') === longName && await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'a long video name remains available in its tooltip without widening the workbench')
+  check(await page.locator('.shell-context strong').first().getAttribute('title') === longName && await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'a long video name remains available in its tooltip without widening the workbench')
   check(await inView(page.getByTestId('choose-b')), 'both A and B choices are visible on the first screen')
   check(await page.locator('.c-frame-table,.c-queue-items').count() === 0, 'confirmation has one unified change navigation instead of duplicate table and numbered queue')
   check(await page.locator('.c-details,.c-metrics').count() === 0 && await page.getByText('查看几何详情', { exact: false }).count() === 0, 'confirmation removes the unused numeric geometry panel and its launcher')
@@ -355,11 +371,11 @@ try {
   const expectedObject = decisionsBeforeContext.find(item => item.frameIndex === 0 && item.objectId === 2)
   const displayedPair = await page.locator('.c-crops svg').evaluateAll(svgs => svgs.map(svg => { const box = svg.querySelector('.confirm-box-a,.confirm-box-b'); return ['x', 'y', 'width', 'height'].map(key => Number(box.getAttribute(key))) }))
   const expectedPair = [expectedObject.beforeBbox, expectedObject.afterBbox].map(box => [box[0], box[1], box[2] - box[0], box[3] - box[1]])
-  check((await page.getByTestId('current-item').innerText()).includes('对象 #2') && (await page.locator('.c-change-item[aria-current=true]').innerText()).includes('对象 #2') && JSON.stringify(displayedPair) === JSON.stringify(expectedPair), 'clicking the main full frame links the same object to navigation and both A/B crops')
+  check((await page.getByTestId('current-item').innerText()).includes('对象 2') && (await page.locator('.c-change-item[aria-current=true]').innerText()).includes('对象 2') && JSON.stringify(displayedPair) === JSON.stringify(expectedPair), 'clicking the main full frame links the same object to navigation and both A/B crops')
   await contextObject(1).focus(); await page.keyboard.press('Enter'); await cIdle()
-  check((await page.getByTestId('current-item').innerText()).includes('对象 #1'), 'Enter on a selectable full-frame object locates it')
+  check((await page.getByTestId('current-item').innerText()).includes('对象 1'), 'Enter on a selectable full-frame object locates it')
   await contextObject(2).focus(); await page.keyboard.press(' '); await cIdle()
-  check((await page.getByTestId('current-item').innerText()).includes('对象 #2'), 'Space on a selectable full-frame object locates it')
+  check((await page.getByTestId('current-item').innerText()).includes('对象 2'), 'Space on a selectable full-frame object locates it')
   check(JSON.stringify((await api(`/confirmation/sessions/${confirmation.main.sid}/changes`, confirmation.token)).items) === JSON.stringify(decisionsBeforeContext), 'full-frame pointer and keyboard navigation never save a choice or geometry')
   await page.getByRole('textbox', { name: '修改项序号' }).fill('3'); await button('前往').click(); await cIdle()
   const unchanged = contextObject(2)
@@ -384,7 +400,7 @@ try {
   await cIdle()
   check(unavailableImageReads === 0 && !await contextDialog.getByRole('alert').count() && (await cSession()).progress.decided === 0, 'same-frame context reuses its loaded image during a frame endpoint outage without making decisions')
   await page.unroute('**/api/track/frame/*/0')
-  check(await contextDialog.locator('[data-variant=full]').count() === 1 && (await page.getByTestId('current-item').innerText()).includes('对象 #2'), 'cached modal navigation retains the actual selected object and full frame')
+  check(await contextDialog.locator('[data-variant=full]').count() === 1 && (await page.getByTestId('current-item').innerText()).includes('对象 2'), 'cached modal navigation retains the actual selected object and full frame')
   const cursorKeys = []
   await page.route('**/api/confirmation/sessions/*/cursor', async route => {
     cursorKeys.push(route.request().headers()['idempotency-key'])
@@ -413,7 +429,7 @@ try {
   await page.locator('.c-change-filters').getByRole('button', { name: /^全部 / }).click()
   check(await page.locator('.c-change-item').count() === 3, 'all decisions are available in the unified navigation')
   await page.locator('.c-change-item').nth(1).click(); await cIdle()
-  check((await page.getByTestId('current-item').innerText()).includes('对象 #2'), 'selecting grouped navigation opens the matching object')
+  check((await page.getByTestId('current-item').innerText()).includes('对象 2'), 'selecting grouped navigation opens the matching object')
   await page.locator('.c-change-item').first().click(); await cIdle()
   check((await cSession()).progress.decided === 1, 'browsing away and back does not alter saved choices')
   const confirmationState = async () => (await api(`/confirmation/sessions/${confirmation.main.sid}/changes`, confirmation.token)).items.map(item => ({ id: item.changeId, revision: item.decisionRevision, decision: item.decision }))
@@ -434,9 +450,9 @@ try {
   check(await page.locator('.c-change-item').count() === 40 && JSON.stringify(await page.evaluate(() => [scrollX, scrollY])) === JSON.stringify(beforeLocate) && await inView(page.getByTestId('choose-a')), 'locating the current item changes only the list page and preserves workspace position')
   await button('下一页修改项').click()
   await page.locator('.c-change-item').last().click(); await cIdle()
-  check((await page.getByTestId('current-item').innerText()).includes('对象 #45'), 'the last paginated change loads its matching source object')
+  check((await page.getByTestId('current-item').innerText()).includes('对象 45'), 'the last paginated change loads its matching source object')
   await button('上一页修改项').click(); await button('定位当前项').click()
-  check((await page.locator('.c-change-item[aria-current=true]').innerText()).includes('对象 #45') && await page.locator('.c-change-item[aria-current=true]').isVisible(), 'locate restores the selected item on the correct navigation page')
+  check((await page.locator('.c-change-item[aria-current=true]').innerText()).includes('对象 45') && await page.locator('.c-change-item[aria-current=true]').isVisible(), 'locate restores the selected item on the correct navigation page')
   check((await cSession(confirmation.many.sid)).progress.decided === 0, 'pagination and locating never create confirmation decisions')
   await openConfirmation(confirmation.portrait.sid)
   await button('领取并开始确认').click(); await cIdle()
@@ -449,12 +465,13 @@ try {
   }
   check(JSON.stringify((await api(`/confirmation/sessions/${confirmation.portrait.sid}/changes`, confirmation.token)).items) === portraitBefore, 'resizing a portrait view does not modify any choice or annotation')
   await narrowWorkbenchChecks()
+  await workbenchShortcutsChecks({ page, origin, review, confirmation, check })
   check(errors.length === 0, 'shared workbench paths have no uncaught browser exceptions')
   console.log('SUCCESS', checks, 'checks')
 } catch (error) {
   await page.screenshot({ path: 'output/playwright/workbench-consistency-failure.png', fullPage: true })
   throw error
 } finally {
-  fs.writeFileSync('output/playwright/workbench-consistency-console.json', JSON.stringify({ checks, logs, errors }, null, 2))
+  fs.writeFileSync('output/playwright/workbench-consistency-console.json', JSON.stringify({ checks, logs, errors, libraryHits }, null, 2))
   await browser.close()
 }

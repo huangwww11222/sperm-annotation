@@ -32,6 +32,10 @@ class TrackRequest(BaseModel):
     mediaHeight: float | None = None
     startFrame: int = Field(ge=0)
     maxFrames: int = Field(default=TRACK_FRAMES, ge=1)
+    edgeDiscovery: bool = False
+    reviewMode: bool = False
+    terminalAnnotations: list[dict[str, Any]] | None = None
+    combineResults: bool = False
     annotations: list[dict[str, Any]]
 
 

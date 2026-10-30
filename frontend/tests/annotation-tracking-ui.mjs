@@ -2,6 +2,8 @@
 import fs from 'node:fs'
 import assert from 'node:assert/strict'
 const {chromium}=await import(process.env.PLAYWRIGHT_MODULE||'playwright')
+// The media list is a drawer that stays closed while a video is open.
+const openAsset=async(target,locator)=>{const toggle=target.getByTestId('toggle-workbench-library');for(let i=0;i<40;i++){if(await locator.isVisible()){try{await locator.click({timeout:1500});return}catch{}}else if(await toggle.isVisible())await toggle.click();await target.waitForTimeout(250)}await locator.click()}
 const f=JSON.parse(fs.readFileSync('work/confirmation-browser-fixture.json'))
 const b=await chromium.launch({channel:'chrome',headless:true}),p=await b.newPage({viewport:{width:1440,height:900}})
 const origin=process.env.CONFIRMATION_ORIGIN||'http://127.0.0.1:5373'
@@ -19,7 +21,7 @@ try{
    await r.fulfill({json:mode==='success'?{status:'success',lastProcessedFrame:4,reachedVideoEnd:false}:{status:'paused',paused:true,pausedFrame:6,anomalyLevels:{1:'anomaly'},pausedObjects:[{object_id:1,name:'sperm',display_name:'sperm 1',type:'size_growth',reasons:['manual_area_ratio=1.800 HARD'],manualBaselineFrame:4,reviewStartFrame:3,reviewEndFrame:6,metrics:{areaRatio:1.8}}]}})
  })
  await p.goto(origin+'/annotate');await p.evaluate(async()=>{window.ws=(await import(performance.getEntriesByType('resource').find(r=>r.name.includes('/src/stores/workspace.ts')).name)).useWorkspace()})
- await p.locator('.asset-card').filter({hasText:'ux-video.avi'}).click();await p.waitForFunction(()=>!window.ws.editingBlocked.value&&window.ws.currentObjects.value.length===2)
+ await openAsset(p,p.locator('.asset-card').filter({hasText:'ux-video.avi'}));await p.waitForFunction(()=>!window.ws.editingBlocked.value&&window.ws.currentObjects.value.length===2)
  await p.evaluate(()=>window.ws.seekVideo(0));await p.getByRole('button',{name:'AI Tracking',exact:true}).click()
  await p.waitForFunction(()=>window.ws.isAiBusy.value);await p.waitForTimeout(150)
  check(await p.getByRole('button',{name:'下一帧',exact:true}).isDisabled(),'AI running locks user frame navigation')

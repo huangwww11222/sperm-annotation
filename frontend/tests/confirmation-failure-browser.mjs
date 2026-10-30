@@ -2,6 +2,8 @@ import { useLegacyBrowserAPIs } from './legacy-browser-profile.mjs'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 const {chromium}=await import(process.env.PLAYWRIGHT_MODULE||'playwright')
+// The task list is a drawer that stays closed while a task is open.
+const openTask=async(target,selector)=>{const card=target.locator(selector),toggle=target.getByTestId('toggle-workbench-library');for(let i=0;i<40;i++){if(await card.isVisible()){try{await card.click({timeout:1500});return}catch{}}else if(await toggle.isVisible())await toggle.click();await target.waitForTimeout(250)}await card.click()}
 const fixture=JSON.parse(fs.readFileSync('work/confirmation-browser-fixture.json'))
 const origin=process.env.CONFIRMATION_ORIGIN||'http://127.0.0.1:5373',sid=fixture.failure.sid
 const browser=await chromium.launch({channel:process.env.CHROME_CHANNEL || 'chrome',headless:true}),page=await browser.newPage({viewport:{width:1440,height:900}})
@@ -21,7 +23,7 @@ const go=async(n)=>{await page.getByRole('textbox',{name:'修改项序号'}).fil
 const decisionPattern='**/api/confirmation/sessions/*/changes/*/decision'
 try{
  await page.addInitScript(({token})=>{localStorage.setItem('rare-sperm-token',token);localStorage.setItem('rare-sperm-auth',JSON.stringify({id:'3',name:'confirm-C',role:'annotator'}))},fixture)
- await page.goto(origin+'/confirm');await idle();await page.locator(`[data-session-id="${sid}"]`).click();await idle();await button('领取并开始确认').click();await idle()
+ await page.goto(origin+'/confirm');await idle();await openTask(page,`[data-session-id="${sid}"]`);await idle();await button('领取并开始确认').click();await idle()
  await page.setViewportSize({width:1180,height:760})
  // A failed image must not allow choosing against a stale previous frame.
  await page.route('**/api/track/frame/*/1',route=>route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({message:'Injected image failure'})}))
@@ -106,7 +108,7 @@ try{
  await page.route(decisionPattern,route=>route.fulfill({status:401,contentType:'application/json',body:'{"message":"Injected expired session"}'}))
  await go(1);await choose('A');await button('保留操作并重新登录').click()
  await page.getByPlaceholder('请输入账号').fill('confirm-C');await page.getByPlaceholder('请输入密码').fill('confirmation-test');await button('登录').click()
- await button('对比确认').click();await idle();await page.getByRole('alert').waitFor()
+ await page.goto(origin+'/confirm') /* archived workflow route */;await idle();await page.getByRole('alert').waitFor()
  check(await page.getByRole('alert').count()===1,'reauthentication restores pending operation for the same account')
  await page.unroute(decisionPattern);await button('重试原请求').click();await idle()
  check((await changes())[0].decision.choice==='A','reauthenticated retry saves intended choice')

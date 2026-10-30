@@ -38,6 +38,9 @@ def migrate(c):
     """)
     c.commit()
     audit.migrate(c)
+    from .annotation_export import migrate as annotation_migrate
+    annotation_migrate(c)
+    c.commit()
 
 
 def recover_interrupted():
@@ -75,10 +78,22 @@ def eligible(c, ids):
     versions = []
     media_seen = set()
     for vid in ids:
+        if vid.startswith('annexp_'):
+            from .annotation_export import resolve
+            v = resolve(c, vid)
+            if v['media']['sha256'] in media_seen:
+                raise ReviewError('DUPLICATE_MEDIA', '同一视频不能重复导出', 422)
+            media_seen.add(v['media']['sha256'])
+            versions.append(v)
+            continue
         f = c.execute("SELECT * FROM final_versions WHERE id=?", (vid,)).fetchone()
         if not f:
             raise ReviewError("FINAL_VERSION_NOT_FOUND", "最终版本不存在", 404)
         s = confirmation.session_row(c, f["confirmation_id"])
+        from .concentrated_review import info as concentrated_info
+        direct = concentrated_info(c, s['review_session_id'])
+        if direct and direct['final_version_id'] != vid:
+            raise ReviewError('REVIEW_REQUIRED', '审查已重新开启或版本已更新，请使用当前已完成审查的最终版本')
         head = c.execute(
             "SELECT id FROM final_versions WHERE confirmation_id=? ORDER BY rowid DESC LIMIT 1",
             (s["id"],),
@@ -146,7 +161,7 @@ def snapshots(c, ids):
         w, h = media["width"], media["height"]
         if w <= 0 or h <= 0:
             raise ReviewError("INVALID_MEDIA_SIZE", "视频尺寸无效")
-        frames = [
+        frames = v.get("directFrames") if "directFrames" in v else [
             {"frameIndex": r["frame_index"], "objects": json.loads(r["objects_json"])}
             for r in c.execute(
                 "SELECT * FROM final_version_frames WHERE final_version_id=? ORDER BY frame_index",
@@ -182,6 +197,10 @@ def snapshots(c, ids):
                 classes.add(name)
                 total_objects += 1
         v["frames"] = frames
+        record = None if "directFrames" in v else c.execute("SELECT decision_snapshot_json FROM confirmation_final_records WHERE final_version_id=?", (v['final']['id'],)).fetchone()
+        # Presence choices which result in no box are still part of the
+        # exported provenance. They must never become fake training objects.
+        v['decisionRecords'] = json.loads(record[0]) if record else []
     total_frames = sum(len(v["frames"]) for v in versions)
     if total_frames < 2:
         raise ReviewError(
@@ -225,6 +244,8 @@ def create(actor, key, body):
                 )
             log.info("dataset.replay export=%s actor=%s key=%s", old["id"], actor, key)
             return status(old["id"], actor)
+        from .annotation_export import authorize
+        authorize(c, body["finalVersionIds"], actor)
         versions, summary = snapshots(c, body["finalVersionIds"])
         eid = "train_" + uuid.uuid4().hex
         c.execute(
@@ -351,6 +372,8 @@ def build_package(eid, body, versions, summary, work, audit_snapshot, audit_sha)
         "sources": [],
         "samples": [],
     }
+    if audit_snapshot.get('requiredFeatures'):
+        manifest['requiredFeatures'] = audit_snapshot['requiredFeatures']
     coco = {
         split: {
             "images": [],
@@ -387,6 +410,7 @@ def build_package(eid, body, versions, summary, work, audit_snapshot, audit_sha)
                 "height": m["height"],
                 "frameCount": m["frame_count"],
                 "snapshotHash": v["final"]["snapshot_hash"],
+                "annotationOnly": "directFrames" in v,
             }
         )
         cap = cv2.VideoCapture(str(video))
@@ -509,7 +533,7 @@ def build_package(eid, body, versions, summary, work, audit_snapshot, audit_sha)
         provenance = work / "provenance"
         provenance.mkdir(exist_ok=True)
         (provenance / f"{v['final']['id']}.json").write_text(
-            packed({"finalVersionId": v["final"]["id"], "frames": v["frames"]}),
+            packed({"finalVersionId": v["final"]["id"], "frames": v["frames"], "decisionRecords": v['decisionRecords']}),
             encoding="utf-8",
         )
     if body["format"] != "coco":

@@ -54,6 +54,7 @@ async function request<T>(path: string, method = 'GET', body?: unknown, key?: st
 }
 
 export const trainingExportApi = {
+  annotationSnapshot: (mediaId:string, body:unknown, key:string) => request<{finalVersionId:string}>(`/annotations/${mediaId}/snapshot`, 'POST', body, key),
   preview: (ids: string[]) => request<ExportSummary>('/exports/preview', 'POST', { finalVersionIds: ids }),
   create: (settings: ExportSettings, key: string) => request<ExportJob>('/exports', 'POST', settings, key),
   status: (id: string) => request<ExportJob>(`/exports/${id}`),

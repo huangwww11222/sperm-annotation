@@ -1,8 +1,13 @@
+import {legacyTrackingProbe} from './legacy-tracking-probe.mjs'
 // Real APIs and videos. Inject a lost reset response after commit and bypass
 // CPU-disabled rewind only to verify new manual/seed inputs; no GPU inference.
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 const {chromium}=await import(process.env.PLAYWRIGHT_MODULE||'playwright')
+// The task list is a drawer that stays closed while a task is open.
+const openTask=async(target,selector)=>{const card=target.locator(selector),toggle=target.getByTestId('toggle-workbench-library');for(let i=0;i<40;i++){if(await card.isVisible()){try{await card.click({timeout:1500});return}catch{}}else if(await toggle.isVisible())await toggle.click();await target.waitForTimeout(250)}await card.click()}
+// The media list is a drawer that stays closed while a video is open.
+const openAsset=async(target,locator)=>{const toggle=target.getByTestId('toggle-workbench-library');for(let i=0;i<40;i++){if(await locator.isVisible()){try{await locator.click({timeout:1500});return}catch{}}else if(await toggle.isVisible())await toggle.click();await target.waitForTimeout(250)}await locator.click()}
 const fixture=JSON.parse(fs.readFileSync('work/workflow-transitions-browser-fixture.json'))
 const origin=process.env.CONFIRMATION_ORIGIN||'http://127.0.0.1:5427'
 const browser=await chromium.launch({channel:process.env.CHROME_CHANNEL || 'chrome',headless:true})
@@ -21,7 +26,7 @@ const api=async(path,method='GET',body)=>{
 const ws=mid=>api('/track/workspace/'+mid)
 const attach=()=>page.evaluate(async()=>{const resource=performance.getEntriesByType('resource').find(r=>r.name.includes('/src/stores/workspace.ts'));window.ws=(await import(resource.name)).useWorkspace()})
 const idle=()=>page.waitForFunction(()=>window.ws&&!window.ws.workspaceRestoring.value&&!window.ws.exactFrameLoading.value&&!window.ws.mediaImportBusy.value)
-async function asset(mode){const item=fixture.items[mode];await page.locator('.asset-card').filter({hasText:item.name}).click();await page.waitForFunction(mid=>window.ws.selectedMedia.value?.serverMediaId===mid&&!window.ws.workspaceRestoring.value&&!window.ws.exactFrameLoading.value,item.mid)}
+async function asset(mode){const item=fixture.items[mode];await openAsset(page,page.locator('.asset-card').filter({hasText:item.name}));await page.waitForFunction(mid=>window.ws.selectedMedia.value?.serverMediaId===mid&&!window.ws.workspaceRestoring.value&&!window.ws.exactFrameLoading.value,item.mid)}
 async function importVideo(mode){await page.locator('input[type=file][accept="video/*"]').setInputFiles(fixture.items[mode].video);await page.locator('[data-reimport-dialog]').waitFor()}
 const inView=locator=>locator.evaluate(e=>{const r=e.getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight&&r.left>=0&&r.right<=innerWidth&&r.width>0})
 const theme=async dark=>{const toggle=button(dark?'切换深色主题':'切换浅色主题');if(await toggle.count())await toggle.click()}
@@ -74,19 +79,21 @@ try{
   const manual=page.waitForResponse(r=>r.url().includes('/api/annotation/annotations/manual')&&r.request().method()==='POST')
   const seed=page.waitForResponse(r=>r.url().endsWith('/api/track/annotations')&&r.request().method()==='POST')
   const run=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/track'&&r.request().method()==='POST')
-  await button('AI Tracking').click()
+  await legacyTrackingProbe(page).click()
   const [manualResponse,seedResponse,runResponse]=await Promise.all([manual,seed,run])
   check(manualResponse.status()===201&&seedResponse.status()===201&&manualResponse.request().postDataJSON().generationId===newState.generationId&&seedResponse.request().postDataJSON().generationId===newState.generationId,'current-generation manual records and seed succeed on real backend')
   const expectedStart = process.env.CRITICAL_AI_MODE === 'simulated' ? 202 : 503
   check(requests.rewind.generationId===newState.generationId&&requests.run.generationId===newState.generationId&&runResponse.status()===expectedStart,'rewind and tracking carry current generation to the configured model boundary')
   await page.waitForFunction(()=>!window.ws.isAiBusy.value&&window.ws.saveState.value==='saved')
   await page.unroute('**/api/track/rewind')
-  await asset('pending');await page.locator('[data-testid=withdraw-submission]').first().waitFor()
+  // Submission details (withdraw, view task) live in the header status popover.
+  const openSubmission=async()=>{await page.locator('.submission-pill').waitFor();if(!await page.locator('.submission-pop[open]').count())await page.locator('.submission-pill').click()}
+  await asset('pending');await openSubmission();await page.locator('[data-testid=withdraw-submission]').first().waitFor()
   await importVideo('pending')
   check((await page.locator('[data-reimport-dialog]').innerText()).includes('先撤回'),'submitted unclaimed video directs author to withdraw')
   check(await button('覆盖并重新标注').count()===0,'submitted video offers no destructive overwrite')
   await button('取消导入').click();await idle()
-  await page.locator('[data-testid=withdraw-submission]').first().click()
+  await openSubmission();await page.locator('[data-testid=withdraw-submission]').first().click()
   await button('确认撤回').click()
   await page.getByRole('status').filter({hasText:'已撤回送审'}).waitFor()
   check((await api('/review/sessions/'+fixture.items.pending.sid)).state==='withdrawn','author withdraws unclaimed review with real API')
@@ -96,8 +103,8 @@ try{
   await asset('started');await importVideo('started')
   check((await page.locator('[data-reimport-dialog]').innerText()).includes('无法重复导入'),'claimed review blocks duplicate overwrite')
   await button('取消导入').click();await idle()
-  check(await page.locator('[data-testid=withdraw-submission]').count()===0,'claimed review exposes no withdrawal action')
-  await page.goto(origin+'/confirm');await page.locator(`[data-session-id="${fixture.items.confirm.cid}"]`).click();await page.locator('.confirmation-page[data-busy="false"]').waitFor()
+  check(await page.locator('[data-testid=withdraw-submission]').isDisabled() && (await page.locator('.submission-controls').innerText()).includes('审查'), 'claimed review keeps a disabled withdrawal entry with a clear reason')
+  await page.goto(origin+'/confirm');await openTask(page,`[data-session-id="${fixture.items.confirm.cid}"]`);await page.locator('.confirmation-page[data-busy="false"]').waitFor()
   if(await page.getByRole('dialog').count())await button('留在上次位置').click()
   const old=await api('/confirmation/sessions/'+fixture.items.confirm.cid+'/changes')
   check(old.items.every(i=>i.decision.choice==='B'),'fixture starts with two saved choices')
@@ -114,7 +121,7 @@ try{
   check((await api('/confirmation/sessions/'+fixture.items.confirm.cid)).state==='returned','C returns selected frame and old frozen version becomes read-only')
   check(await page.getByTestId('choose-b').isDisabled(),'returned comparison cannot save further choices')
   check(await button('导出训练数据集').count()===0,'no training export during re-review')
-  await page.goto(origin+'/review');await page.locator(`[data-session-id="${fixture.items.confirm.sid}"]`).click();await page.locator('.review-drawing').waitFor()
+  await page.goto(origin+'/review');await openTask(page,`[data-session-id="${fixture.items.confirm.sid}"]`);await page.locator('.review-drawing').waitFor()
   if(await page.getByRole('dialog').count())await button('关闭').click()
   const b=await api('/review/sessions/'+fixture.items.confirm.sid)
   check(b.progress.submittedFrames===2&&b.returnRequests[0].frameIndex===0,'only returned frame loses its submitted status')
@@ -127,7 +134,7 @@ try{
   const latest=(await api('/confirmation/sessions')).items.find(s=>s.baselineId===b.baselineId&&s.state!=='returned')
   assert(latest)
   check(latest.progress.decided===1&&latest.progress.pending===1,'new comparison preserves other frame choice and rechecks returned frame')
-  await page.goto(origin+'/confirm');await page.locator(`[data-session-id="${fixture.items.confirm.cid}"]`).click();await page.locator('.confirmation-page[data-busy="false"]').waitFor()
+  await page.goto(origin+'/confirm');await openTask(page,`[data-session-id="${fixture.items.confirm.cid}"]`);await page.locator('.confirmation-page[data-busy="false"]').waitFor()
   if(await page.getByRole('dialog').count())await button('留在上次位置').click()
   await button('继续新一轮确认').click();await page.locator('.confirmation-page[data-busy="false"]').waitFor()
   check(await page.locator(`[data-session-id="${latest.id}"]`).getAttribute('class').then(s=>s.includes('selected')),'old returned task links to new comparison round')
@@ -137,3 +144,6 @@ try{
   fs.writeFileSync('output/playwright/workflow-transitions-results.json',JSON.stringify({checks,errors},null,2))
   console.log(`Completed ${checks.length} workflow transition checks.`)
 }finally{await browser.close()}
+
+// New review presence paths use separate media; never reset the transition fixtures.
+await import('./review-presence-browser.mjs')

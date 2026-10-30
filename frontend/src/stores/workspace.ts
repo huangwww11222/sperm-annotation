@@ -1,6 +1,7 @@
 import { createRequestId } from '../utils/browserCompat'
 import { computed, nextTick, reactive, ref, shallowRef, watch } from 'vue'
 import { FrameCache } from '../annotation/frameCache'
+import { reconcileTerminalIdentities } from '../annotation/trackingResult'
 import { pauseDiagnostics, pauseTypeFromEvidence, type OverlapPairNotice } from '../annotation/pauseDiagnostics'
 import { savedTrackingCalibration } from '../annotation/trackingCalibration'
 import { hitHandle, moveBox, resizeBox, type Box } from '../annotation/geometry'
@@ -89,7 +90,7 @@ const createWorkspace = () => {
   const messageOf = (error: unknown, fallback: string) => typeof (error as {message?:unknown})?.message === 'string' ? (error as {message:string}).message : fallback
   type TrackingJob = {mediaId:string;startFrame:number;input:Parameters<typeof trackApi.run>[0];key:string;taskId?:string;maxFrames?:number}
   const trackingJobs = reactive(new Map<string, TrackingJob>())
-  const trackingErrors = ref<Record<string,{message:string;phase:string;frameIndex:number}>>({})
+  const trackingErrors = ref<Record<string,{message:string;phase:string;frameIndex:number;endpointMode?:boolean}>>({})
   const trackingError = computed(()=>trackingErrors.value[currentMediaId.value])
   const trackingRetryBusy = ref(false)
   const trackingProgress = ref('')
@@ -106,7 +107,8 @@ const createWorkspace = () => {
   const cancelTrackingRestartRequest = () => { restartController?.abort(); restartController = null; restartEpoch++; trackingRestartBusy.value = false }
   const zoom = ref(1)
   const isInteracting = () => !!tempBbox.value || !!draggingObjectId || !!bboxStart
-  const zoomIn = (step = 0.1) => { if (isInteracting()) return; zoom.value = Math.min(5, +(zoom.value + step).toFixed(2)) }
+  // 4K heads are 20–30 px in a ~0.27× fitted view, so allow up to 10× the fit.
+  const zoomIn = (step = 0.1) => { if (isInteracting()) return; zoom.value = Math.min(10, +(zoom.value + step).toFixed(2)) }
   const zoomOut = (step = 0.1) => { if (isInteracting()) return; zoom.value = Math.max(0.25, +(zoom.value - step).toFixed(2)) }
   const zoomReset = () => { if (!isInteracting()) zoom.value = 1 }
   const toastMessage = ref('')
@@ -209,6 +211,7 @@ const createWorkspace = () => {
     historyRevision.value++; scheduleWorkspaceStateSave(mid)
   }
   const undo = () => {
+    cancelHeadBox()
     if (editingBlocked.value || isInteracting()) return
     const h = history()
     const deletion = videoDeletionHistory.value[currentMediaId.value]
@@ -217,6 +220,7 @@ const createWorkspace = () => {
     h.redo.push(captureHistory()); restoreHistory(h.undo.pop()!); statusMessage.value = '已撤销本帧操作'
   }
   const redo = () => {
+    cancelHeadBox()
     if (editingBlocked.value || isInteracting()) return
     const h = history()
     const deletion = videoDeletionHistory.value[currentMediaId.value]
@@ -505,7 +509,7 @@ const createWorkspace = () => {
   const ensureVideoFirstFrame = async (_mediaId = currentMediaId.value) => true
 
   const toolLabel = (tool: AnnotationTool) =>
-    tool === 'select' ? '选择框' : tool === 'point' ? '点标注' : '框标注'
+    tool === 'head' ? '点选头部' : tool === 'select' ? '选择框' : tool === 'point' ? '点标注' : '框标注'
 
   const selectTool = (tool: AnnotationTool) => {
     if (editingBlocked.value) return
@@ -515,8 +519,40 @@ const createWorkspace = () => {
       : `已切换到${toolLabel(tool)}`
   }
 
+  const edgeDiscovery = ref(true) // New tracking always discovers edge entries; persisted jobs replay their original body.
+  const headBoxBusy = ref(false)
+  const headBoxError = ref('')
+  let headRequest: AbortController | null = null
+  const cancelHeadBox = () => { headRequest?.abort(); headRequest=null; headBoxBusy.value=false }
+  watch([currentMediaId, currentFrame, activeTool, editingBlocked, annotationsByMedia, () => useAuth().user.value?.id], cancelHeadBox, {flush:'sync'})
+  const createHeadBox = async (point: {x:number;y:number}) => {
+    if (editingBlocked.value || headBoxBusy.value) return
+    const media=selectedMedia.value
+    if (!media?.serverMediaId || media.type!=='video') {
+      headBoxError.value='点选头部目前用于已导入的视频；图片请使用手动画框。'; return
+    }
+    const frame=currentFrame.value, controller=new AbortController()
+    headRequest=controller; headBoxBusy.value=true; headBoxError.value=''
+    try {
+      const result=await trackApi.headBox(media.serverMediaId,frame,Math.min((media.width||1)-1,point.x*(media.width||1)/100),Math.min((media.height||1)-1,point.y*(media.height||1)/100),controller.signal)
+      if(headRequest!==controller || controller.signal.aborted || editingBlocked.value) return
+      const [x1,y1,x2,y2]=result.bbox || []
+      if(result.frameIndex!==frame || result.width!==media.width || result.height!==media.height || result.bbox.length!==4 || ![x1,y1,x2,y2].every(Number.isFinite) || x1<0 || y1<0 || x2>result.width || y2>result.height || x2<=x1 || y2<=y1) throw new Error('检测结果无效，未创建标注框，请重试或手动画框。')
+      const box={x:x1/result.width*100,y:y1/result.height*100,width:(x2-x1)/result.width*100,height:(y2-y1)/result.height*100}
+      const existing=currentObjects.value.find(obj=>{if(!obj.bbox)return false;const b=obj.bbox;const area=Math.max(0,Math.min(b.x+b.width,box.x+box.width)-Math.max(b.x,box.x))*Math.max(0,Math.min(b.y+b.height,box.y+box.height)-Math.max(b.y,box.y));return area/(b.width*b.height+box.width*box.height-area)>.7})
+      if(existing){selectedObjectId.value=existing.id;statusMessage.value='该头部已有标注，可继续点选其他头部；按 V 微调';return}
+      addObject(point,box)
+      statusMessage.value='已生成头部框，可继续点选；按 V 微调，或撤销'
+    } catch(error) {
+      if(headRequest!==controller || controller.signal.aborted)return
+      headBoxError.value=error instanceof Error?error.message:'头部检测失败，请重试或手动画框'
+      console.warn('[annotation.head_box_failed]',{mediaId:media.id,frame,error})
+    } finally { if(headRequest===controller) cancelHeadBox() }
+  }
+
   const onStageClick = (event: MouseEvent) => {
     if (editingBlocked.value) return
+    if (activeTool.value === 'head') { event.preventDefault(); void createHeadBox(getStagePoint(event)); return }
     // 如果本次按下命中了已有框，跳过 click（防止添加新点标注覆盖选中）
     if (hitExisting) { hitExisting = false; return }
     if (activeTool.value === 'select') {
@@ -552,7 +588,7 @@ const createWorkspace = () => {
 
   const pointInBbox = (px: number, py: number, b: Box) => px >= b.x && px <= b.x+b.width && py >= b.y && py <= b.y+b.height
   const onBboxDown = (event: PointerEvent) => {
-    if (editingBlocked.value || event.button !== 0) return
+    if (editingBlocked.value || activeTool.value === 'head' || event.button !== 0) return
     event.preventDefault(); event.stopPropagation()
     cancelAnnotationGesture()
     bboxPointerId = event.pointerId
@@ -746,7 +782,7 @@ const createWorkspace = () => {
         zoom: includeUiState ? zoom.value : 1,
       },
       editor: {
-        activeTool: includeUiState ? activeTool.value : 'select',
+        activeTool: includeUiState ? (activeTool.value === 'head' ? 'bbox' : activeTool.value) : 'select',
         objectNameInput: includeUiState ? objectNameInput.value : 'rare sperm',
         selectedObjectId: includeUiState ? selectedObjectId.value : null,
       },
@@ -1436,6 +1472,9 @@ const createWorkspace = () => {
       const result = await trackApi.getResult(media.serverMediaId, undefined, required)
       if (serial !== trackingLoadSerial || mediaId !== currentMediaId.value || actor !== useAuth().user.value?.id) return
       if ('state' in result && result.state === 'not_generated' && required) throw new Error('追踪任务应已生成结果，请管理员检查任务日志与存储')
+      if('jointTracking' in result && result.jointTracking?.state==='failed'){
+        trackingErrors.value[mediaId]={phase:'生成自动标注',frameIndex:0,endpointMode:true,message:'上次自动标注未完成，已保留原结果；请重试生成或检查服务日志。'}
+      }
       const frames = 'frames' in result ? result.frames : [result]
       if (media.frameCount && frames.some(f => f.frameIndex >= media.frameCount!)) throw new Error('追踪结果帧号超过原视频范围')
       // 过滤掉前端已删除的 AI tracking 对象
@@ -1447,7 +1486,7 @@ const createWorkspace = () => {
       // 策略：同帧同 objectId 的新结果覆盖旧结果，手动标注永不被覆盖
       const width = media.width || 1
       const height = media.height || 1
-      const existing = (annotationsByMedia.value[mediaId] ?? []).filter(o => !isObjectDeleted(mediaId, o.objectId, o.frameIndex ?? 0))
+      const existing = reconcileTerminalIdentities(annotationsByMedia.value[mediaId] ?? [], 'terminalIdentity' in result ? result.terminalIdentity : undefined).filter(o => !isObjectDeleted(mediaId, o.objectId, o.frameIndex ?? 0))
       // 被手动修改过的 (frameIndex, objectId) 集合 — 精准保护, 只跳过用户改过的那一个
       const manualKeys = new Set(existing
         .filter((o) => o.source === 'manual' && o.objectId != null)
@@ -2053,7 +2092,7 @@ const createWorkspace = () => {
     try{const job=trackingJobs.get(mediaId);if(job)sessionStorage.setItem(trackingJournalKey(mediaId),JSON.stringify(job));else sessionStorage.removeItem(trackingJournalKey(mediaId))}
     catch(error){console.warn('[annotation.tracking_journal_failed]',{mediaId,error})}
   }
-  const performTracking = async (resume=false, restartIntent?: TrackingRestartIntent) => {
+  const performTracking = async (resume=false, restartIntent?: TrackingRestartIntent, endpointMode=false) => {
     if(trackingRetryBusy.value)return
     const mediaId = currentMediaId.value
     const media = mediaAssets.value.find((item) => item.id === mediaId)
@@ -2063,10 +2102,11 @@ const createWorkspace = () => {
     }
 
     let job=resume?trackingJobs.get(mediaId):undefined
-    const startFrame = job?.startFrame ?? restartIntent?.body.startFrame ?? currentFrame.value
+    const startFrame = job?.startFrame ?? restartIntent?.body.startFrame ?? (endpointMode ? 0 : currentFrame.value)
     const restartSerial = restartEpoch
     let preparingRestartSeed = !!restartIntent
-    const restartSeedSnapshot: TrackingSeedSnapshot | undefined = restartIntent ? {frameIndex:startFrame,timestampMs:Math.round(frameToTime(startFrame)*1000),objects:clone((annotationsByMedia.value[mediaId]??[]).filter(object=>(object.frameIndex??0)===startFrame))} : undefined
+    const restartSeedSnapshot: TrackingSeedSnapshot | undefined = restartIntent || endpointMode ? {frameIndex:startFrame,timestampMs:Math.round(frameToTime(startFrame)*1000),objects:clone((annotationsByMedia.value[mediaId]??[]).filter(object=>(object.frameIndex??0)===startFrame && (!endpointMode || object.source==='manual')))} : undefined
+    const terminalSnapshot: TrackingSeedSnapshot | undefined = endpointMode ? {frameIndex:maxFrameIndex.value,timestampMs:Math.round(frameToTime(maxFrameIndex.value)*1000),objects:clone((annotationsByMedia.value[mediaId]??[]).filter(object=>(object.frameIndex??0)===maxFrameIndex.value && object.source==='manual'))} : undefined
     const ensureRestartCurrent = () => {
       if (restartIntent && (restartSerial !== restartEpoch || restartIntent.actorId !== useAuth().user.value?.id || mediaId !== currentMediaId.value)) throw new DOMException('账号或素材已切换，已停止本页续追', 'AbortError')
       if (preparingRestartSeed && (currentFrame.value !== startFrame || exactFrameLoading.value || !!frameError.value)) throw new Error('重追起始帧已变化或尚未读取完成，未继续写入起始框；请重试从原起点追踪')
@@ -2080,7 +2120,7 @@ const createWorkspace = () => {
       showToast('请先逐项确认暂停对象，或修正框后确认，再继续追踪')
       return
     }
-    if (!job&&!currentObjects.value.some(object => object.bbox)) { showToast('当前帧没有可追踪的框，请先绘制或选择有框的帧'); return }
+    if (!job&&!(restartSeedSnapshot?.objects ?? currentObjects.value).some(object => object.bbox)) { showToast('起始帧没有人工头框，请先完成首帧标注'); return }
     anomalyObjectIds.value = []
     pausedAnomalies.value = []
     anomalyPanelVisible.value = false
@@ -2094,6 +2134,7 @@ const createWorkspace = () => {
         task=job.taskId?{taskId:job.taskId,maxFrames:job.maxFrames}:await trackApi.run(job.input,job.key)
         job.taskId=task.taskId;job.maxFrames=task.maxFrames;rememberTracking(mediaId)
       }else{
+      const terminalAnnotations = terminalSnapshot ? (terminalSnapshot.objects.length ? await buildCurrentFrameSam3Objects(mediaId, terminalSnapshot) : []) : undefined
       // 固化完整工作区（人工框、稳定 ID/名称、人工基准和异常状态），
       // 确保后端本轮 Tracking 与以后重新加载使用同一份人工基准。
       if (!restartIntent) await persistWorkspaceState(mediaId)
@@ -2166,7 +2207,7 @@ const createWorkspace = () => {
       ensureRestartCurrent()
 
       // 后端以 SAM3_TRACK_FRAMES（包含 seed 帧）和剩余视频帧数为上限。
-      statusMessage.value = `③ SAM3 将从第 ${startFrame + 1} 帧持续向后追踪，直到异常、单轮上限或视频末尾……`
+      statusMessage.value = `③ SAM3 将从第 ${startFrame + 1} 帧持续向后追踪，疑点留待审查，分段自动续跑至视频末尾……`
       const input = {
         mediaId: media.serverMediaId,
         generationId: workspaceGenerations.get(mediaId),
@@ -2174,6 +2215,9 @@ const createWorkspace = () => {
         mediaWidth: pixelSize.width,
         mediaHeight: pixelSize.height,
         startFrame,
+        edgeDiscovery: edgeDiscovery.value,
+        reviewMode: true,
+        ...(terminalAnnotations !== undefined ? {terminalAnnotations,combineResults:true} : {}),
         annotations: seed,
       }
       phase='启动追踪任务'
@@ -2199,7 +2243,7 @@ const createWorkspace = () => {
         phase='查询追踪任务'
         const status = await trackApi.getStatus(task.taskId)
         ensureRestartCurrent()
-        trackingProgress.value=status.stage==='decoding'?'正在读取本轮原始帧':status.stage==='preparing_model'?'正在准备模型和输入':status.stage==='saving_results'?'正在保存追踪结果':status.lastProcessedFrame!=null?`正在追踪第 ${status.lastProcessedFrame+1} 帧`:status.status==='queued'?'等待模型任务启动':'正在追踪'
+        trackingProgress.value=status.stage==='decoding'?'正在读取本轮原始帧':status.stage==='preparing_model'?'正在准备模型和输入':status.stage==='checking'?(status.message||'正在核验疑点片段'):status.stage==='saving_results'?'正在保存追踪结果':status.lastProcessedFrame!=null?`正在追踪第 ${status.lastProcessedFrame+1} 帧`:status.status==='queued'?'等待模型任务启动':'正在追踪'
 
         trackingWarningSummary.value = status.warningSummary ?? []
         if (status.status === 'success') {completedStatus=status;break}
@@ -2244,6 +2288,16 @@ const createWorkspace = () => {
         await new Promise((resolve) => setTimeout(resolve, 700))
       }
 
+      if(job?.input.terminalAnnotations!==undefined && !completedStatus?.endpointVerification){
+        phase='校验首尾核验结果'
+        trackingJobs.delete(mediaId);rememberTracking(mediaId)
+        throw new Error('后端没有返回首尾反向核验证据，请更新并重启后端后重试；不能视为双向核验完成')
+      }
+      if(job?.input.combineResults && completedStatus?.jointTracking?.state!=='checked'){
+        phase='读取自动标注状态'
+        trackingJobs.delete(mediaId);rememberTracking(mediaId)
+        throw new Error('后端未完成综合标注，请更新并重启后端后重试；不能视为自动标注完成')
+      }
       phase='读取追踪结果'
       await loadTrackingResult(mediaId, true, true, true)
       ensureRestartCurrent()
@@ -2255,6 +2309,8 @@ const createWorkspace = () => {
         await seekVideo(frameToTime(lastProcessedFrame))
         if (finalStatus.reachedVideoEnd || lastProcessedFrame >= maxFrameIndex.value) {
           statusMessage.value = `完成：已追踪到视频末尾第 ${lastProcessedFrame + 1} 帧。`
+          if(finalStatus.jointTracking?.state==='checked') statusMessage.value='自动标注已完成，可微调或送审。'
+          else if(finalStatus.endpointVerification) statusMessage.value += finalStatus.endpointVerification.state==='checked'?'首尾核验完成，疑点请到审查页处理。':'反向核验失败或证据不足，请到审查页检查。'
           showToast('已追踪到视频末尾')
         } else {
           statusMessage.value = `完成：SAM3 已追踪第 ${startFrame + 1}～${lastProcessedFrame + 1} 帧。请检查/修正最终帧后再次点击 AI Tracking 继续。`
@@ -2266,7 +2322,7 @@ const createWorkspace = () => {
       if (restartIntent && (restartIntent.actorId !== useAuth().user.value?.id || restartSerial !== restartEpoch || mediaId !== currentMediaId.value)) return
       if (job&&(definiteRejection(error)||messageOf(error,'').includes('此服务器未启用 AI Tracking'))) {trackingJobs.delete(mediaId);rememberTracking(mediaId)}
       const message=phase==='查询追踪任务'&&Number((error as {status?:number})?.status)===404?'后台任务已不存在，服务器可能已重启。请检查已保存的结果，再重新追踪。':messageOf(error,'AI Tracking 失败')
-      trackingErrors.value[mediaId]={phase,frameIndex:startFrame,message}
+      trackingErrors.value[mediaId]={phase,frameIndex:startFrame,message,endpointMode:endpointMode || job?.input.terminalAnnotations!==undefined}
       console.error('[annotation.tracking_failed]',{mediaId:media.serverMediaId,frameIndex:startFrame,phase,taskId:job?.taskId,requestKey:job?.key,error})
       if (mediaId === currentMediaId.value) {
         statusMessage.value = `${phase}失败：${message}`
@@ -2284,8 +2340,9 @@ const createWorkspace = () => {
     }
   }
   const runAiTrack = () => performTracking()
+  const runEndpointTrack = () => performTracking(false, undefined, true)
   const trackingRetryLabel = computed(()=>trackingJobs.get(currentMediaId.value)?.taskId?'重新查询追踪任务':trackingJobs.has(currentMediaId.value)?'重试原追踪请求':'重试追踪')
-  const retryTracking = () => performTracking(true)
+  const retryTracking = () => performTracking(true, undefined, !!trackingErrors.value[currentMediaId.value]?.endpointMode)
 
   /**
    * Build a browser-downloadable SAM3 annotations JSON for the current media.
@@ -2665,11 +2722,12 @@ const createWorkspace = () => {
   })
 
   return {
+    runEndpointTrack,
     restartTrackingFromEarlierFrame, retryTrackingRestart, cancelTrackingRestartRequest, trackingRestartBusy, trackingRestartError, trackingRestartPendingAction, trackingRestartStorageWarning,
     trackingError,trackingProgress,trackingRetryLabel,trackingRetryBusy,retryTracking,workspaceRecoveryRequired,saveRecoveryLabel,retryWorkspaceSave,reloadWorkspaceFromServer,
     getObjectDeletionSummary, removeObjectAcrossVideo, undoVideoObjectDeletion, retryObjectDeletion, canUndoVideoDeletion, lastVideoObjectDeletion, objectDeletionBusy, objectDeletionError, objectDeletionPendingAction, confirmTrackingAnomaly, retryTrackingAnomalyFeedback, trackingFeedbackBusy, trackingFeedbackError, trackingFeedbackPending, trackingFeedbackPendingAction, trackingCalibrationSummary, resetTrackingCalibration, trackingWarningSummary,
     deleteMedia, deletingMediaId, mediaDeleteError, persistWorkspaceState, retryExactFrame, saveState, saveError, playbackRate, pausePlayback, displayObjects, editingBlocked, workspaceRestoring, frameError, loadExactFrame, nudgeSelected, cancelAnnotationGesture, canUndo, canRedo,
-    api, mediaAssets, selectedMediaId, submissionLocks, submissionBusy, mediaImportBusy, importError, duplicateImport, reimportSaving, cancelDuplicateImport, confirmDuplicateImport, restoreImportIntent, activeTool, objectNameInput, selectedObjectId, currentFrame, currentTime, videoDuration, videoFps, frameInput, isPlaying, isAiBusy, trackingFrameCount, statusMessage, toastMessage, showToast, zoom, zoomIn, zoomOut, zoomReset, savedResults, loadedRemoteResultKeys, effectResults, selectedEffectId, effectTime, effectPlaying, effectVideoRef, imageRef, videoRef, exactFrameImageRef, exactFrameUrl, exactFrameLoading, videoPlaybackFallback, annotationHitRef, fileInputRef, videoInputRef, effectFolderInputRef, annotationsByMedia, trackingFramesByMedia, anomalyObjectIds, anomalyFrames, pausedAnomalies, anomalyPanelVisible, trackingPausedFrame, closeAnomalyPanel, selectedMedia, isVideo, maxFrameIndex, currentMediaId, currentObjects, selectedObject, selectedEffect, formatTime, timeToFrame, frameToTime, getStagePoint, addObject, resetVideoViewToFirstFrame, ensureVideoFirstFrame, selectTool, onStageClick, tempBbox, onBboxDown, onBboxMove, onBboxUp, onObjectDropdownChange, selectObject, removeObject, renameObject, undo, redo, copyPreviousFrame, brightness, contrast, mediaFilterStyle, resetMediaFilter, annotatedFrameCount, clearSelection, openFilePicker, handleFiles, onImageLoaded, onVideoLoaded, onVideoTimeUpdate, onVideoError, loadTrackingResult, seekVideo, seekToInputFrame, seekByFrame, togglePlayback, onVideoEnded, onTimelineClick, runAiSegment, runAiTrack, getMediaPixelSize, buildSam3AnnotationsJson, generateAnnotationsJson, loadSavedResults, openEffectFolderPicker, handleEffectFolder, loadEffects, onEffectTimeUpdate, toggleEffectPlayback, selectEffect, effectOverlayObjects, resetAnnotationViewForMedia, loadServerMedia
+    edgeDiscovery, headBoxBusy, headBoxError, cancelHeadBox, api, mediaAssets, selectedMediaId, submissionLocks, submissionBusy, mediaImportBusy, importError, duplicateImport, reimportSaving, cancelDuplicateImport, confirmDuplicateImport, restoreImportIntent, activeTool, objectNameInput, selectedObjectId, currentFrame, currentTime, videoDuration, videoFps, frameInput, isPlaying, isAiBusy, trackingFrameCount, statusMessage, toastMessage, showToast, zoom, zoomIn, zoomOut, zoomReset, savedResults, loadedRemoteResultKeys, effectResults, selectedEffectId, effectTime, effectPlaying, effectVideoRef, imageRef, videoRef, exactFrameImageRef, exactFrameUrl, exactFrameLoading, videoPlaybackFallback, annotationHitRef, fileInputRef, videoInputRef, effectFolderInputRef, annotationsByMedia, trackingFramesByMedia, anomalyObjectIds, anomalyFrames, pausedAnomalies, anomalyPanelVisible, trackingPausedFrame, closeAnomalyPanel, selectedMedia, isVideo, maxFrameIndex, currentMediaId, currentObjects, selectedObject, selectedEffect, formatTime, timeToFrame, frameToTime, getStagePoint, addObject, resetVideoViewToFirstFrame, ensureVideoFirstFrame, selectTool, onStageClick, tempBbox, onBboxDown, onBboxMove, onBboxUp, onObjectDropdownChange, selectObject, removeObject, renameObject, undo, redo, copyPreviousFrame, brightness, contrast, mediaFilterStyle, resetMediaFilter, annotatedFrameCount, clearSelection, openFilePicker, handleFiles, onImageLoaded, onVideoLoaded, onVideoTimeUpdate, onVideoError, loadTrackingResult, seekVideo, seekToInputFrame, seekByFrame, togglePlayback, onVideoEnded, onTimelineClick, runAiSegment, runAiTrack, getMediaPixelSize, buildSam3AnnotationsJson, generateAnnotationsJson, loadSavedResults, openEffectFolderPicker, handleEffectFolder, loadEffects, onEffectTimeUpdate, toggleEffectPlayback, selectEffect, effectOverlayObjects, resetAnnotationViewForMedia, loadServerMedia
   }
 }
 

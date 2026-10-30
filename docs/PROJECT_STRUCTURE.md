@@ -1,5 +1,9 @@
 # 代码地图与运行入口
 
+## 2026-10-29 当前入口
+
+当前直接导出：components/AnnotationDatasetExport.vue → trainingExportApi.annotationSnapshot → backend/app/annotation_export.py → training_export 队列及原视频打包；不创建审查或确认记录。
+
 Vue 3 + TypeScript + Vite；FastAPI + SQLite；SAM3 在后端按需加载。前端依赖见 [package.json](../frontend/package.json)，Python 依赖见 [requirements.txt](../backend/requirements.txt)，不在说明文档复制版本号。
 
 ## 按职责找文件
@@ -15,14 +19,18 @@ Vue 3 + TypeScript + Vite；FastAPI + SQLite；SAM3 在后端按需加载。前�
 | 固定浏览器回归与执行记录 | `scripts/run_browser_regression.py`；`frontend/tests/critical-workflows-browser.mjs` 从真实登录/上传走完整用户流程；测试专用模拟模型只在 `backend/tests/browser_server.py` |
 | 输入完整性、读取竞态与登录恢复 | `annotation/trackingResult.ts`、`stores/workspace.ts`、`stores/auth.ts`；`test_independent_integrity_audit.py`、`test_integrity_recovery.py` 及固定 `independent-integrity-browser.mjs` |
 | 路由/认证/布局/主题 | `frontend/src/router/index.ts`、`stores/auth.ts`、`layouts/AppLayout.vue`、`stores/appearance.ts`、`style.css` |
-| 三页共享工作台 | `components/WorkbenchHeader.vue` / `WorkbenchLayout.vue`、`workbench/workbench.css`；`stores/workbench.ts` 保存跨页视频列表收起偏好，布局约束见 WORKFLOW |
-| 人工标注 UI / 状态 | `pages/AnnotatePage.vue`、`stores/workspace.ts`、`annotation/annotation.css` |
+| 三页观看快捷键/平移/专注 | `workbench/viewTransform.ts`、`useViewportNavigation.ts`、`useWorkbenchFocus.ts`；C完整帧容器 `confirmation/ConfirmationViewport.vue`，观看不写业务 |
+| 三页共享工作台 | `components/WorkbenchShell.vue`、`workbench/shell.css`；站点顶栏上下文、视频抽屉、画布与可收起检查面板；A/B 共用 `components/WorkbenchFrameStrip.vue`，布局约束见 WORKFLOW |
+| 人工标注 UI / 状态 | `pages/AnnotatePage.vue`、`stores/workspace.ts`、`annotation/annotation.css` / `annotation-shell.css`；缩放小地图 `components/AnnotationMinimap.vue` |
 | 框绘制/坐标/缓存 | `components/AnnotationOverlay.vue`、`annotation/geometry.ts`、`annotation/frameCache.ts` |
-| 送审/撤回 | `components/SendToReview.vue`、`api/reviewWorkflowApi.ts`、`backend/app/annotation_completion.py`、`review_workflow.py` |
+| 送审/撤回/退回人工、审查对象目录 | `components/SendToReview.vue`、`api/reviewWorkflowApi.ts`、`backend/app/annotation_completion.py`、`review_workflow.py` |
 | 重复视频与覆盖重新标注 | `stores/workspace.ts`、`backend/app/media_reimport.py`、`main.py`；文件恢复日志与轮次保护见 STORAGE_LAYOUT |
+| 集中审查证据/最终接受 | `backend/app/review_evidence.py`、`concentrated_review.py`；新 Tracking → 审查疑点 → 最终 F，历史 C 仍可恢复 |
+| 人工首尾与独立反追 | `backend/app/endpoint_tracking.py`：端点校验、反向有界窗口、多帧身份匹配与只读证据；`main.py` 编排、`annotation_completion.py` 有效尾框合并 |
+| 三路综合标注 | `backend/app/joint_tracking.py`：已有身份内关联、连续路径选择、统一几何与不确定片段；`head_click.detect_regions` 批量ROI推理；新首尾请求 combineResults=true |
 | B 审查 | `pages/ReviewPage.vue`、`review/geometry.ts`、`review/review.css`、`backend/app/review_workflow.py` 与 `_routes.py` |
 | C 对比确认/本帧重审 | `pages/ConfirmationPage.vue`、`confirmation/ConfirmationImage.vue`、`confirmation/geometry.ts`、`api/confirmationApi.ts`、`backend/app/confirmation_workflow.py` 与 `_routes.py`；其他帧决定继承在 `review_workflow.py` |
-| 视频进度 | `components/WorkflowProgress.vue`，B/C 均使用工作区顶部横条；人工标注顶部展示帧位置、含标注帧数、保存与送审 |
+| 视频进度与帧条 | B/C 在共享外壳顶栏上下文展示真实进度和显式完成入口；B 帧条读取 `resume.submittedFrameIndexes` / `draftFrameIndexes` 及退回记录，A 帧条展示人工/AI/无框及追踪提示；浏览不改变完成状态 |
 | 用户使用说明 | `components/UserGuide.vue`；`help/user-guide.md` 为页面阅读和下载的唯一内容源，`AppLayout.vue` 提供入口 |
 | 训练集导出 | `components/TrainingDatasetExport.vue`、`api/trainingExportApi.ts`、`backend/app/training_export.py` 与 `_routes.py` |
 | 自动质量审计与只读提取 | `backend/app/quality_audit.py` / `audit_export.py`、根 `export-audit.sh`；统计仓库单独检出到 `标注统计/`，不纳入主仓库或镜像 |
@@ -32,6 +40,8 @@ Vue 3 + TypeScript + Vite；FastAPI + SQLite；SAM3 在后端按需加载。前�
 | Tracking 编排 / 模型 / 异常 | `backend/app/tracker.py`、`services/sam3_engine.py`、`services/anomaly_detector.py`、`services/annotation_seed.py` |
 | 异常后较早帧重建 | `pages/AnnotatePage.vue` 的确认窗口、`components/AnnotationTrackingFeedback.vue`、`stores/workspace.ts` / `api/trackApi.ts`、`backend/app/tracking_restart.py`；持久暂停在 `annotation_state.py`，版本/SQL 收据/跨文件恢复见 API 与 STORAGE_LAYOUT |
 | 按需带框视频预览 | `backend/app/tracking_preview.py`；长时编码在来源锁外，输入签名校验后发布 |
+| 点选头部生成框 | `backend/app/head_click.py` 与 `main.py` 的 head-box 接口；前端 `stores/workspace.ts`、`pages/AnnotatePage.vue` |
+| 可选边缘入画新增 | `backend/app/edge_entry.py`、`head_click.detect_edges`、`tracker.track_video`；现有 AI Tracking 开关与请求正文 |
 | 精确帧性能与缓存 | `backend/app/video_frames.py` 复用/限量解码器、原子 JPEG 与源签名；`frontend/src/api/sourceFrameApi.ts` 为 B/C 提供限量 Blob 缓存 |
 | 数据库和增量迁移 | `db.py`、`review_schema.py`、三个 workflow/export 模块中的 `migrate()` |
 | 日志/来源锁 | `review_logging.py`、`review_source_lock.py` |

@@ -4,6 +4,8 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+// The media list is a drawer that stays closed while a video is open.
+const openAsset=async(target,locator)=>{const toggle=target.getByTestId('toggle-workbench-library');for(let i=0;i<40;i++){if(await locator.isVisible()){try{await locator.click({timeout:1500});return}catch{}}else if(await toggle.isVisible())await toggle.click();await target.waitForTimeout(250)}await locator.click()}
 
 // Publish simulated data from the backend's filesystem namespace. A host-side
 // rename across Docker Desktop's bind mount can transiently disappear to the
@@ -87,7 +89,7 @@ export async function trackingRestartChecks(page, fixture, origin, { redProbeOnl
     const rows = Array.from({length:8}, (_, frame_index) => ({frame_index,source_frame_index:frame_index,objects:[{object_id:1,name:'sperm',bbox:[1500,1000,1560,1030],source:'manual_sam3_tracker',anomaly_level:frame_index===5?'anomaly':'normal',anomaly_reasons:frame_index===5?['motion_normalized=3 HARD']:[]}]}))
     publishTrackingFixture(fixture,{operation:'pause',rows,workspace:{...state,revision:state.revision+1,currentFrame:2,manualAnnotations:manual,manualBaselines:[{objectId:1,name:'sperm 1',source:'manual',frameIndex:6,bbox:[1538.4,1000,1598.4,1030]}],pausedAnomalies:[{objectId:1,displayName:'sperm 1',title:'目标偏移',summary:'追踪偏移需检查',metrics:[],rawReasons:['motion_normalized=3 HARD'],suggestion:'查看前几帧',canLearn:true,acceptsGeometry:false}],lastPausedContext:{mediaId:fixture.mid,frameIndex:5}}})
     await page.reload(); await attach(); await idle()
-    if (await page.evaluate(mid=>window.ws.selectedMedia.value?.serverMediaId!==mid,fixture.mid)) {await page.locator('.asset-card').filter({hasText:'4k-recovery.avi'}).click();await idle()}
+    if (await page.evaluate(mid=>window.ws.selectedMedia.value?.serverMediaId!==mid,fixture.mid)) {await openAsset(page,page.locator('.asset-card').filter({hasText:'4k-recovery.avi'}));await idle()}
     await page.waitForFunction(() => window.ws.currentFrame.value === 2 && window.ws.pausedAnomalies.value.length === 1)
     // Workspace metadata arrives before the source image and AI collection;
     // correction controls remain intentionally disabled until all are loaded.
@@ -125,7 +127,9 @@ export async function trackingRestartChecks(page, fixture, origin, { redProbeOnl
   check(fs.readFileSync(resultFile,'utf8') === originalRows && (await api(`/track/workspace/${fixture.mid}`)).pausedAnomalies.length === 1, 'cancelling restart preserves the old results and pending anomaly')
   await page.getByRole('button', {name:'下一帧',exact:true}).click(); await idle()
   await page.evaluate(() => {window.ws.frameInput.value=5;return window.ws.seekToInputFrame()}); await idle()
-  check(await item('open').count() === 0 && await page.getByRole('button',{name:'AI Tracking',exact:true}).isDisabled(), 'the paused frame itself still requires explicit anomaly feedback')
+  const pausedTrackButtons=page.getByRole('button',{name:'AI Tracking',exact:true})
+  const noTrackingBypass=await pausedTrackButtons.evaluateAll(buttons=>buttons.every(button=>!button.getClientRects().length||button.disabled))
+  check(await item('open').count() === 0 && await page.getByTestId('confirm-tracking-object-normal').isVisible() && await page.getByTestId('confirm-tracking-object-normal').isEnabled() && noTrackingBypass, 'the paused frame keeps explicit anomaly confirmation available and exposes no enabled tracking bypass')
   await page.evaluate(() => {window.ws.frameInput.value=2;return window.ws.seekToInputFrame()}); await idle()
 
   await page.route('**/api/track/annotations', route => {seedWrites.push(route.request().postDataJSON());return route.continue()})
@@ -149,7 +153,7 @@ export async function trackingRestartChecks(page, fixture, origin, { redProbeOnl
     if (lostReply) {lostReply=false;const response=await route.fetch();assert(response.ok(),await response.text());await route.abort('failed');return}
     await route.continue()
   })
-  await page.getByRole('button',{name:/选择对象 #1 /}).click();await page.keyboard.press('Alt+ArrowRight')
+  await page.getByRole('button',{name:/选择对象 1 /}).click();await page.keyboard.press('Alt+ArrowRight')
   await page.waitForFunction(()=>window.ws.saveState.value==='saved')
   const corrected = await page.evaluate(()=>window.ws.currentObjects.value.find(object=>object.objectId===1).bbox.x)
   rejectOnce=true
@@ -178,7 +182,7 @@ export async function trackingRestartChecks(page, fixture, origin, { redProbeOnl
   check(await item('error').count()===0&&await page.evaluate(()=>!window.ws.editingBlocked.value), 'restart response recovery restores a usable annotation editor')
 
   await pausedFixture()
-  await page.getByRole('button',{name:/选择对象 #1 /}).click();await page.keyboard.press('Alt+ArrowRight');await page.waitForFunction(()=>window.ws.saveState.value==='saved')
+  await page.getByRole('button',{name:/选择对象 1 /}).click();await page.keyboard.press('Alt+ArrowRight');await page.waitForFunction(()=>window.ws.saveState.value==='saved')
   let releaseManual, manualEntered
   const entered=new Promise(resolve=>{manualEntered=resolve})
   await page.route('**/api/annotation/annotations/manual',async route=>{

@@ -1,10 +1,10 @@
 .annotation-page{color:var(--text)}.annotation-heading{display:flex;align-items:center;justify-content:space-between;gap:14px;min-height:44px}.eyebrow{font-size:11px;letter-spacing:.15em;color:var(--accent);font-weight:650}.annotation-heading h2{font-size:21px;font-weight:650;letter-spacing:-.02em;display:flex;align-items:baseline;gap:16px}.annotation-heading h2 span{font-size:12px;font-weight:400;color:var(--muted);letter-spacing:0}.heading-actions{display:flex;align-items:center;gap:15px}.save-indicator{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}.save-indicator i{width:6px;height:6px;border-radius:50%;background:var(--success)}.save-indicator.saving i{background:var(--warning)}.save-indicator.error{color:var(--danger)}.save-indicator.error i{background:var(--danger)}.asset-panel{display:flex;flex-direction:column;min-height:0;overflow:hidden}.asset-actions{display:flex;gap:6px;padding:14px 12px 10px}.asset-actions .btn-primary{flex:1}.asset-actions button{padding:7px 9px}.asset-search{padding:0 12px 12px}.asset-search .input{width:100%;background:var(--surface-subtle)}.asset-list{min-height:0;overflow:auto;flex:1;padding:0 8px}.asset-card{display:flex;gap:9px;position:relative;align-items:center;padding:13px 9px;border:1px solid transparent;border-radius:8px;margin-bottom:4px;cursor:pointer}.asset-card:hover{background:var(--surface-subtle)}.asset-card.selected{background:var(--accent-soft);border-color:var(--accent)}.asset-card>div{min-width:0;flex:1;padding-right:6px}.asset-card strong{font-size:12px;font-weight:600;display:block;text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.asset-card small{font-size:11px;color:var(--muted);display:block;margin-top:5px}.asset-type{display:grid;place-items:center;width:31px;height:37px;border:1px solid var(--line);background:var(--surface);border-radius:7px;font-size:11px;letter-spacing:.04em;font-weight:600;color:var(--accent);flex-shrink:0}.asset-import{margin:10px;border:1px dashed var(--line);min-height:35px}.sidebar-empty{padding:30px 10px;display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center;font-size:13px;color:var(--muted)}.sidebar-empty svg{opacity:.45}.sidebar-empty small{font-size:11px}
 .annotation-workbench{min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden}.workbench-title{display:flex;justify-content:space-between;align-items:center;min-height:38px;padding:6px 12px;border-bottom:1px solid var(--line)}.workbench-title>div{min-width:0;display:flex;align-items:center;gap:10px}.workbench-title>div:first-child{flex:1}.workbench-title strong{font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:260px}.workbench-title span{font-size:11px;color:var(--muted);white-space:nowrap}.annotation-toolbar{display:flex;gap:9px;align-items:center;flex-wrap:wrap;min-height:44px;padding:5px 10px;border-bottom:1px solid var(--line)}.tool-group{display:flex;align-items:center;gap:4px;border-right:1px solid var(--line);padding-right:9px}.tool-group:last-child{border:0;padding:0}.display-tools{margin-left:auto}.annotation-toolbar .tool-btn{padding:6px 9px;border-color:transparent;background:transparent}.annotation-toolbar .tool-btn.active{color:var(--accent);background:var(--accent-soft);border-color:var(--accent)}.annotation-toolbar .icon-button.active,.annotation-toolbar .quiet-button.active{color:var(--accent);background:var(--accent-soft)}.tool-btn kbd{font-size:11px;padding:0 3px;opacity:.75}.enhancement-bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;background:var(--surface-subtle);border-bottom:1px solid var(--line);padding:7px 12px;font-size:11px}.enhancement-bar label{display:flex;align-items:center;gap:5px;color:var(--text)}.enhancement-bar input[type=range]{width:65px;accent-color:var(--accent)}.enhancement-bar>span{margin-left:auto;color:var(--muted)}.enhancement-bar .quiet-button{padding:3px 5px;font-size:12px}
 .annotation-canvas{position:relative;flex:1;min-height:200px;background:var(--canvas)}.canvas-scroll{position:absolute;inset:0;display:flex;overflow:auto;overscroll-behavior:contain;padding:20px;scrollbar-color:#4d657b #152333;scrollbar-width:thin}.annotation-stage{position:relative;margin:auto;flex-shrink:0;background:#080e15}.stage-media{display:block;width:100%;height:100%;object-fit:contain;user-select:none}.stage-media.hidden-video{position:absolute;inset:0;visibility:hidden}.exact-media{position:absolute;inset:0}.annotation-hit{position:absolute;inset:0;z-index:20;touch-action:none;user-select:none;cursor:crosshair}.annotation-hit.selecting{cursor:default}.annotation-hit.panning{cursor:grab}.annotation-hit.locked{cursor:wait}.canvas-bottom{position:absolute;left:12px;right:12px;bottom:11px;pointer-events:none;display:flex;align-items:center;justify-content:space-between;gap:8px;z-index:32}.canvas-hint{color:#c2d0de;background:#101e2dcc;padding:6px 9px;border:1px solid #59708640;border-radius:6px;font-size:11px}.canvas-zoom{display:flex;align-items:center;gap:2px;background:#122232e8;border:1px solid #47627b;border-radius:7px;color:#e7edf6;pointer-events:auto}.canvas-zoom button{display:grid;place-items:center;min-width:30px;height:30px;font-size:12px;padding:0 6px}.canvas-zoom button:hover{background:#294155}.canvas-status{position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:33;color:#d5e5f3;font-size:12px;background:#142436e8;padding:8px 13px;border:1px solid #3b5b73;border-radius:7px;pointer-events:none;white-space:nowrap}.canvas-error{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;gap:12px;z-index:34;background:#101923cc;color:#ffc6d2;font-size:13px}.canvas-empty{display:flex;flex-direction:column;justify-content:center;align-items:center;gap:15px;position:absolute;inset:0;color:#98afc4;z-index:31;background:var(--canvas)}.canvas-empty h3{font-size:18px;color:#e1ebf7}.canvas-empty p{font-size:13px}.loupe{position:absolute;right:14px;top:14px;z-index:32;border:1px solid #7089a0;box-shadow:0 10px 30px #0005;border-radius:8px;overflow:hidden;pointer-events:none;background:#142334;color:#d7e6f5;width:202px}.loupe canvas{display:block;width:200px;height:150px}.loupe span{display:block;font-size:11px;padding:6px;text-align:center}
-.annotation-timeline{padding:10px 15px 8px;background:var(--surface)}.timeline-controls{display:flex;align-items:center;gap:5px;flex-wrap:wrap}.play-button{width:32px;height:32px;display:grid;place-items:center;background:var(--accent-soft);color:var(--accent);border-radius:50%}.frame-jump{display:flex;align-items:center;gap:5px;margin-left:9px;font-size:12px;color:var(--muted);white-space:nowrap}.frame-jump input{width:54px;min-height:30px;text-align:center;background:var(--surface-subtle);border:1px solid var(--line);border-radius:5px;padding:4px;color:var(--text);font-size:12px;-moz-appearance:textfield}.frame-jump input::-webkit-inner-spin-button{appearance:none}.speed-select{background:var(--surface);border:1px solid var(--control-line);min-height:30px;font-size:12px;border-radius:5px;margin-left:6px;padding:3px}.copy-previous{margin-left:auto;font-size:12px}.timeline-track{height:20px;position:relative;margin-top:6px;cursor:pointer}.timeline-base,.timeline-progress{height:4px;position:absolute;top:8px;left:0;border-radius:5px}.timeline-base{right:0;background:var(--line)}.timeline-progress{background:var(--accent);opacity:.55}.timeline-marker{position:absolute;top:6px;width:2px;height:8px;background:var(--success);pointer-events:none}.timeline-anomaly{position:absolute;top:3px;width:4px;height:14px;background:var(--warning)}.timeline-cursor{position:absolute;top:4px;width:10px;height:12px;border:2px solid var(--surface);border-radius:5px;background:var(--accent);transform:translateX(-50%);box-shadow:0 1px 4px #0003}.timeline-caption{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}.timeline-caption>span:last-child{display:flex;align-items:center;gap:6px}.timeline-caption i{display:inline-block;width:4px;height:4px;border-radius:50%;background:var(--success);margin-left:8px}.annotation-status{display:flex;gap:10px;align-items:center;justify-content:space-between;min-height:29px;padding:5px 13px;border-top:1px solid var(--line);background:var(--surface-subtle);font-size:11px;color:var(--muted)}.annotation-status>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}.annotation-status>span:last-child{white-space:nowrap}.tracking-anomaly{background:var(--warning-soft);color:var(--warning);font-size:12px;padding:8px 12px;max-height:170px;overflow:auto}.tracking-anomaly>div{display:flex;align-items:center;justify-content:space-between}.tracking-anomaly summary{cursor:pointer}.tracking-anomaly details>div{padding:8px 0;border-bottom:1px solid var(--line)}
+.annotation-timeline{padding:10px 15px 8px;background:var(--surface)}.timeline-controls{display:flex;align-items:center;gap:5px;flex-wrap:wrap}.play-button{width:32px;height:32px;display:grid;place-items:center;background:var(--accent-soft);color:var(--accent);border-radius:50%}.frame-jump{display:flex;align-items:center;gap:5px;margin-left:9px;font-size:12px;color:var(--muted);white-space:nowrap}.frame-jump input{width:54px;min-height:30px;text-align:center;background:var(--surface-subtle);border:1px solid var(--line);border-radius:5px;padding:4px;color:var(--text);font-size:12px;-moz-appearance:textfield}.frame-jump input::-webkit-inner-spin-button{appearance:none}.speed-select{background:var(--surface);border:1px solid var(--control-line);min-height:30px;font-size:12px;border-radius:5px;margin-left:6px;padding:3px}.copy-previous{margin-left:auto;font-size:12px}.timeline-track{height:20px;position:relative;margin-top:6px;cursor:pointer}.timeline-base,.timeline-progress{height:4px;position:absolute;top:8px;left:0;border-radius:5px}.timeline-base{right:0;background:var(--line)}.timeline-progress{background:var(--accent);opacity:.55}.timeline-marker{position:absolute;top:6px;width:2px;height:8px;background:var(--success);pointer-events:none}.timeline-anomaly{position:absolute;top:3px;width:4px;height:14px;background:var(--warning)}.timeline-cursor{position:absolute;top:4px;width:10px;height:12px;border:2px solid var(--surface);border-radius:5px;background:var(--accent);transform:translateX(-50%);box-shadow:0 1px 4px #0003}.timeline-caption{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}.timeline-caption>span:last-child{display:flex;align-items:center;gap:6px}.timeline-caption i{display:inline-block;width:4px;height:4px;border-radius:50%;background:var(--success);margin-left:8px}.annotation-status{display:flex;gap:10px;align-items:center;justify-content:space-between;min-height:29px;padding:5px 13px;border-top:1px solid var(--line);background:var(--surface-subtle);font-size:11px;color:var(--muted)}.annotation-status>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}.annotation-status>span:nth-of-type(2){white-space:nowrap}.tracking-anomaly{background:var(--warning-soft);color:var(--warning);font-size:12px;padding:8px 12px;max-height:170px;overflow:auto}.tracking-anomaly>div{display:flex;align-items:center;justify-content:space-between}.tracking-anomaly summary{cursor:pointer}.tracking-anomaly details>div{padding:8px 0;border-bottom:1px solid var(--line)}
 .annotation-inspector{min-height:0;display:flex;flex-direction:column;gap:12px}.inspector-body{padding:13px;display:flex;flex-wrap:wrap;gap:8px}.inspector-body .input{width:100%}.inspector-body .btn-secondary{width:100%;padding:5px}.object-measure{display:flex;flex-wrap:wrap;gap:6px;font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}.object-panel{min-height:100px;flex:1;display:flex;flex-direction:column;overflow:hidden}.labels-toggle{display:flex;align-items:center;gap:4px;font-size:11px;color:var(--muted);font-weight:400}.labels-toggle input{accent-color:var(--accent)}.object-search{padding:10px}.object-search .input{width:100%}.object-list{flex:1;min-height:0;overflow:auto;padding:7px}.object-row{display:flex;align-items:center;border:1px solid transparent;border-radius:7px;padding:3px 5px;margin-bottom:3px}.object-row:hover{background:var(--surface-subtle)}.object-row.selected{border-color:var(--warning);background:var(--warning-soft)}.object-select{display:flex;align-items:center;gap:9px;text-align:left;flex:1;padding:7px 3px;min-width:0}.object-select>span{min-width:0}.object-select strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;font-weight:550}.object-select small{display:block;font-size:11px;color:var(--muted);margin-top:4px}.object-select>i,.object-legend i{display:inline-block;flex-shrink:0;width:8px;height:8px;border-radius:2px}.object-select .manual,.object-legend .manual{background:#a284d0}.object-select .ai,.object-legend .ai{background:#45b895}.object-legend .chosen{background:#dfac48}.remove-object{opacity:.2;width:25px}.object-row:hover .remove-object,.object-row:focus-within .remove-object{opacity:1}.object-legend{display:flex;justify-content:space-between;gap:10px;border-top:1px solid var(--line);padding:10px 14px;font-size:11px;color:var(--muted)}.object-legend span{display:flex;align-items:center;gap:5px}.ai-panel{padding:15px;background:var(--surface)}.ai-heading{display:flex;gap:8px;align-items:center;color:var(--accent)}.ai-heading strong{font-size:13px;font-weight:600}.ai-panel p{font-size:12px;color:var(--muted);line-height:1.7;margin:10px 0}.ai-panel button{width:100%}.ai-panel small{display:block;text-align:center;font-size:11px;color:var(--muted);margin-top:10px}.annotation-help{width:630px}.annotation-help dl{display:flex;flex-direction:column;gap:12px;margin-bottom:22px}.annotation-help dl>div{display:grid;grid-template-columns:235px 1fr;gap:10px;font-size:13px}.annotation-help kbd{font-size:12px}.focused .asset-panel,.focused .annotation-inspector{display:none}
 @media(max-width:1280px){.annotation-heading h2 span{display:none}.annotation-toolbar{gap:4px;padding:7px}.tool-group{gap:2px;padding-right:4px}.tool-btn kbd{display:none}.annotation-toolbar .tool-btn{padding:6px}.asset-actions{padding:10px 7px}.asset-actions button{font-size:11px;padding:7px}.heading-actions{gap:9px}.canvas-hint{font-size:11px;max-width:60%}}
-@media(max-width:1000px){.annotation-heading h2{font-size:18px}.annotation-inspector{gap:7px}.panel-title{padding:0 10px}.display-tools{margin-left:0}.annotation-toolbar .quiet-button{font-size:11px}.annotation-status>span:last-child{display:none}.annotation-timeline{padding:8px}.copy-previous kbd{display:none}.frame-jump{margin-left:2px}.speed-select{margin-left:0}}
+@media(max-width:1000px){.annotation-heading h2{font-size:18px}.annotation-inspector{gap:7px}.panel-title{padding:0 10px}.display-tools{margin-left:0}.annotation-toolbar .quiet-button{font-size:11px}.annotation-status>span:nth-of-type(2){display:none}.annotation-timeline{padding:8px}.copy-previous kbd{display:none}.frame-jump{margin-left:2px}.speed-select{margin-left:0}}
 
 /* Focus uses the entire browser viewport; source images still retain their aspect ratio. */
 .annotation-page.focused{position:fixed;inset:0;z-index:45;height:100vh;height:100dvh;min-height:0;padding:10px;gap:8px;background:var(--app-bg)}
@@ -17,7 +17,6 @@
 .annotation-page.focused .workbench-title strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
 .annotation-page.focused .annotation-canvas{min-height:80px}
 .annotation-page.focused .annotation-toolbar,.annotation-page.focused .annotation-timeline,.annotation-page.focused .annotation-status{flex-shrink:0}
-.annotation-page.focused .tracking-anomaly{max-height:25vh;overflow:auto;flex-shrink:0}
 @media(max-width:1000px){.workbench-actions{gap:4px}.annotation-page.focused .workbench-title>div:first-child>span{display:none}.annotation-page.focused{padding:6px}}
 
 .annotation-page.focused .workbench-actions .save-indicator{display:flex}
@@ -86,7 +85,6 @@
 .tracking-target>span{font-size:11px;color:var(--muted)}
 .tracking-anomaly .tracking-feedback-controls{display:flex;align-items:center;justify-content:flex-start;gap:7px;flex-wrap:wrap;position:sticky;top:0;z-index:1;background:var(--warning-soft);padding:4px 0}
 .tracking-overlap-targets{max-height:32px;overflow:auto}
-.annotation-page.tracking-paused .annotation-canvas{min-height:80px}
 .annotation-page.tracking-paused .annotation-timeline,.annotation-page.tracking-paused .annotation-status{flex-shrink:0}
 .tracking-learn{display:flex;align-items:flex-start;gap:5px;font-size:11px;color:var(--text);line-height:1.5;flex:1;min-width:200px}
 .tracking-learn input{margin-top:2px;accent-color:var(--accent);flex-shrink:0}
@@ -117,7 +115,6 @@
 .focus-calibration .calibration-items{display:flex;align-items:center;gap:5px;flex-wrap:wrap;padding-top:4px}
 details.focus-calibration:not([open]){display:block;max-height:none}
 .tracking-calibration:not([open]){max-height:none}
-.annotation-page.focused .tracking-anomaly{max-height:28vh}
 
 .object-delete-dialog{width:535px;max-width:calc(100vw - 40px);margin:auto;padding:23px}
 .tracking-restart-dialog{width:560px;max-width:calc(100vw - 40px);max-height:calc(100vh - 48px);margin:auto;padding:23px;overflow:auto}.tracking-restart-dialog::backdrop{background:#0c203577}.tracking-restart-dialog header{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:16px}.tracking-restart-dialog h2{font-size:18px}.tracking-restart-dialog p,.tracking-restart-dialog ul{font-size:13px;line-height:1.9;margin:12px 0;color:var(--muted)}.tracking-restart-dialog ul{list-style:disc;padding-left:18px}.tracking-restart-dialog .error-banner{display:flex;align-items:center;flex-wrap:wrap;gap:8px;font-size:12px}.tracking-restart-dialog .error-banner span{overflow-wrap:anywhere}
@@ -206,3 +203,105 @@ details.focus-calibration:not([open]){display:block;max-height:none}
   .annotation-page.focused .annotation-workbench{overflow-y:auto;overscroll-behavior:contain}
   .annotation-page.focused .annotation-canvas{flex:0 0 180px;min-height:180px}
 }
+
+/* The image keeps the vertical workspace; pause actions use the inspector or a
+   compact focus strip. Details have their own dock and scroll container. */
+.annotation-page .annotation-view-body{display:flex;flex:1;min-width:0;min-height:200px;overflow:hidden}
+.annotation-page .annotation-view-body>.annotation-canvas{min-width:0;min-height:0}
+.annotation-page .pause-inspector-panel{display:flex;flex-direction:column;flex:0 1 auto;min-height:0;max-height:72%;overflow:hidden;border-top:3px solid var(--warning)}
+.annotation-page .pause-control-host{min-height:0;overflow:auto;flex:0 1 auto}
+.annotation-page .pause-inspector-details{height:190px;flex:0 1 190px;min-height:0;max-height:210px;overflow:hidden;border-top:1px solid var(--line)}
+.annotation-page .tracking-anomaly{max-height:none;min-height:0;padding:10px 12px;overflow:visible;background:var(--warning-soft);border:0;font-size:12px;line-height:1.5;flex-shrink:0}
+.annotation-page .tracking-feedback-title{display:flex;align-items:center;gap:5px 8px;flex-wrap:wrap}
+.annotation-page .tracking-feedback-title strong{font-size:13px}
+.annotation-page .tracking-feedback-title>span{font-size:11px;margin-left:auto}
+.annotation-page .tracking-feedback-title .quiet-button{min-height:28px;font-size:12px}
+.annotation-page .tracking-feedback-subject{min-width:0;min-height:0}
+.annotation-page .pause-object-tabs{margin-top:7px;max-height:34px}
+.annotation-page .pause-object-tabs button{font-size:12px;padding:4px 7px;min-height:30px}
+.annotation-page .tracking-target{margin:7px 0 3px}
+.annotation-page .tracking-target strong{font-size:12px}
+.annotation-page .tracking-feedback-controls{position:static;display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding:6px 0 0;background:transparent}
+.annotation-page .tracking-anomaly:not(.compact) .tracking-feedback-controls{position:sticky;bottom:0;z-index:2;background:var(--warning-soft)}
+.annotation-page .tracking-feedback-actions{width:100%;display:flex;gap:6px;flex-wrap:wrap}
+.annotation-page .tracking-feedback-actions>.btn-primary,.annotation-page .tracking-feedback-actions>.btn-secondary{flex:1;min-width:0}
+.annotation-page .tracking-feedback-actions button{font-size:12px;min-height:32px;padding:6px 7px}
+.annotation-page .tracking-frame-confirm{min-height:28px}
+.annotation-page .tracking-feedback-details{font-size:12px;line-height:1.5;margin:0;min-width:0}
+.annotation-page .tracking-feedback-details>summary{min-height:28px;padding:4px 0;color:var(--accent);white-space:nowrap}
+.annotation-page .pause-details-dock{flex:0 0 310px;width:310px;max-width:42%;min-width:0;min-height:0;border-left:1px solid var(--line);background:var(--surface);overflow:hidden}
+.annotation-page .pause-details-panel{display:flex;flex-direction:column;height:100%;min-height:0;background:var(--surface);color:var(--text);font-size:12px;line-height:1.75}
+.annotation-page .pause-details-panel>header{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:7px 10px;border-bottom:1px solid var(--line);flex-shrink:0;font-size:12px}
+.annotation-page .pause-details-panel>header .icon-button{width:28px;height:28px;min-height:28px;padding:4px}
+.annotation-page .pause-details-content{min-height:0;overflow:auto;overscroll-behavior:contain;padding:10px 12px;flex:1}
+.annotation-page .pause-details-content>div{padding:9px 0;border-bottom:1px solid var(--line)}
+.annotation-page .pause-details-content p{margin:5px 0;overflow-wrap:anywhere}
+.annotation-page .pause-details-content .tracking-learn{min-width:0;font-size:12px;margin-bottom:10px}
+.annotation-page .pause-details-content .tracking-overlap-targets{max-height:none;overflow:visible}
+.annotation-page .pause-details-content .tracking-feedback-note{font-size:12px}
+.annotation-page.focused .annotation-workbench{overflow-y:auto;overscroll-behavior:contain}
+.annotation-page .shell-annotate.is-focus .annotation-view-body{min-height:180px}
+.annotation-page .shell-annotate.is-focus .tracking-anomaly.compact{display:grid;grid-template-columns:minmax(160px,1fr) auto;gap:4px 12px;max-height:none;padding:7px 12px;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.annotation-page .shell-annotate.is-focus .tracking-anomaly.compact .tracking-feedback-title{grid-column:1;grid-row:1;min-width:0}
+.annotation-page .shell-annotate.is-focus .tracking-anomaly.compact .tracking-feedback-title>span{margin-left:0}
+.annotation-page .shell-annotate.is-focus .tracking-anomaly.compact .tracking-feedback-subject{grid-column:1;grid-row:2;display:flex;align-items:center;gap:8px}
+.annotation-page .shell-annotate.is-focus .tracking-anomaly.compact .pause-object-tabs{margin:0;flex:0 1 auto;min-width:80px;max-width:55%;max-height:34px}
+.annotation-page .shell-annotate.is-focus .tracking-anomaly.compact .tracking-target{min-width:0;flex:1;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.annotation-page .shell-annotate.is-focus .tracking-anomaly.compact .tracking-feedback-subject>[data-testid=tracking-trigger-evidence]{display:none}
+.annotation-page .shell-annotate.is-focus .tracking-anomaly.compact .tracking-feedback-controls{grid-column:2;grid-row:1/3;display:flex;gap:8px;max-width:560px;justify-content:flex-end;padding:0}
+.annotation-page .shell-annotate.is-focus .tracking-anomaly.compact .tracking-feedback-actions{width:auto;flex-wrap:nowrap}
+.annotation-page .shell-annotate.is-focus .tracking-anomaly.compact .tracking-feedback-actions button{flex:none;font-size:12px}
+.annotation-page .shell-annotate.is-focus .tracking-anomaly.compact .tracking-details-label{display:none}
+.annotation-page .shell-annotate.is-focus .tracking-anomaly.compact .tracking-feedback-error{grid-column:1/-1;max-height:64px;overflow:auto;padding:2px 0}
+.annotation-page .shell-annotate.is-focus .tracking-anomaly.compact .tracking-missing-target,.annotation-page .shell-annotate.is-focus .tracking-anomaly.compact .tracking-return-note{font-size:11px;margin:0}
+.annotation-page .shell-annotate.is-focus .tracking-anomaly.compact .tracking-missing-target{flex-wrap:wrap;max-width:45%}
+@media(max-width:1000px){
+  .annotation-page .shell-annotate.is-focus .tracking-anomaly.compact{grid-template-columns:minmax(0,1fr);gap:5px}
+  .annotation-page .shell-annotate.is-focus .tracking-anomaly.compact .tracking-feedback-title{grid-row:1;grid-column:1}
+  .annotation-page .shell-annotate.is-focus .tracking-anomaly.compact .tracking-feedback-subject{grid-row:2;grid-column:1}
+  .annotation-page .shell-annotate.is-focus .tracking-anomaly.compact .tracking-feedback-controls{grid-row:3;grid-column:1;max-width:none;justify-content:flex-start}
+  .annotation-page .shell-annotate.is-focus .tracking-anomaly.compact .tracking-feedback-error{grid-row:auto}
+}
+@media(max-width:700px){
+  .annotation-page .pause-inspector-panel{max-height:none;flex:none}
+  .annotation-page .pause-inspector-details{max-height:260px}
+  .annotation-page .pause-details-dock{flex-basis:42%;width:42%}
+  .annotation-page .pause-details-panel>header{padding:5px 7px;flex-wrap:wrap}
+  .annotation-page .pause-details-content{padding:8px}
+  .annotation-page .shell-annotate.is-focus .tracking-anomaly.compact{padding:6px 8px;gap:3px}
+  .annotation-page .shell-annotate.is-focus .tracking-anomaly.compact .tracking-feedback-controls{gap:4px}
+  .annotation-page .shell-annotate.is-focus .tracking-anomaly.compact .tracking-feedback-actions{gap:4px;flex-wrap:wrap}
+  .annotation-page .shell-annotate.is-focus .tracking-anomaly.compact .tracking-feedback-actions button{font-size:11px;padding:5px;min-height:30px}
+  .annotation-page .shell-annotate.is-focus .tracking-anomaly.compact .tracking-feedback-subject{flex-wrap:wrap;gap:3px 6px}
+  .annotation-page .shell-annotate.is-focus .tracking-anomaly.compact .tracking-missing-target{max-width:none;flex-basis:100%}
+}
+@media(max-height:560px){
+  .annotation-page .shell-annotate.is-focus .annotation-view-body{flex:0 0 200px;min-height:200px}
+  .annotation-page .shell-annotate.is-focus .annotation-view-body>.annotation-canvas{flex:1;min-height:0}
+  .annotation-page .shell-annotate.is-focus .pause-details-dock{height:200px}
+}
+
+/* At the two-column breakpoint, inspector content must not determine the image
+   row's intrinsic height when evidence is opened. */
+@media(min-width:701px) and (max-width:960px){
+  .annotation-page .workbench-layout:not(.immersive){grid-template-rows:auto 640px}
+  .annotation-page .annotation-inspector{height:100%;overflow:auto}
+}
+.annotation-page .annotation-inspector.pause-active .object-panel{overflow:auto;min-height:160px}
+.annotation-page .annotation-inspector.pause-active .object-list{flex:1;min-height:64px}
+
+.annotation-page .tracking-anomaly:not(.compact) .tracking-feedback-actions>.tracking-frame-confirm{flex:0 0 100%;justify-content:flex-start;padding-left:0}
+
+/* Quiet numeric badges identify the existing object without a code-like prefix. */
+.annotation-page .object-stable-id{display:inline-flex;align-items:center;justify-content:center;min-width:23px;height:22px;padding:0 5px;border-radius:4px;background:var(--surface-subtle);color:var(--muted);font-size:11px;font-weight:550;font-variant-numeric:tabular-nums;flex-shrink:0}
+.annotation-page .object-row.selected .object-stable-id{background:var(--surface);color:var(--warning)}
+
+/* Zoom controls share the existing status row, outside the editable image. */
+.annotation-page .annotation-status{gap:8px;padding:3px 10px}
+.annotation-page .annotation-status .canvas-zoom{flex-shrink:0;margin-left:auto;background:var(--surface);color:var(--text);border-color:var(--line)}
+.annotation-page .annotation-status .canvas-zoom button{height:28px;min-width:28px}
+.annotation-page .annotation-status .canvas-zoom button:hover{background:var(--surface-hover)}
+
+.annotation-page .endpoint-tracking { display:grid; gap:8px; padding-bottom:12px; margin-bottom:10px; border-bottom:1px solid var(--line); }
+.annotation-page .endpoint-navigation { display:flex; gap:6px; flex-wrap:wrap; }
+.annotation-page .endpoint-navigation button { flex:1; min-width:95px; font-size:12px; }

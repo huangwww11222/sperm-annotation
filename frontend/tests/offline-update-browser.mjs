@@ -26,7 +26,7 @@ try {
   const upload = async () => {
     await page.locator('input[accept="video/*"]').setInputFiles({ name, mimeType: 'video/x-msvideo', buffer: video })
     await page.locator(`img[alt="${name} 第 1 帧"]`).waitFor()
-    await page.waitForFunction(() => !document.querySelector('.annotation-heading .btn-primary')?.disabled)
+    await page.waitForFunction(() => !document.querySelector('.annot-context .submission-controls .btn-primary')?.disabled)
     assert(await page.locator('img.exact-media').evaluate(i => i.complete && i.naturalWidth === 800))
   }
   await upload()

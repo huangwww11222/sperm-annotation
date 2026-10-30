@@ -2,6 +2,8 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 const {chromium}=await import(process.env.PLAYWRIGHT_MODULE||'playwright')
+// The task list is a drawer that stays closed while a task is open.
+const openTask=async(target,selector)=>{const card=target.locator(selector),toggle=target.getByTestId('toggle-workbench-library');for(let i=0;i<40;i++){if(await card.isVisible()){try{await card.click({timeout:1500});return}catch{}}else if(await toggle.isVisible())await toggle.click();await target.waitForTimeout(250)}await card.click()}
 const c=JSON.parse(fs.readFileSync('work/confirmation-browser-fixture.json'))
 const r=JSON.parse(fs.readFileSync('work/browser-fixture.json'))
 const browser=await chromium.launch({channel:'chrome',headless:true}),p=await browser.newPage({viewport:{width:1366,height:768}})
@@ -17,15 +19,15 @@ async function guide(section){await button('使用说明').click();await p.getBy
 try{
  await p.addInitScript(({r,c})=>{const review=location.pathname==='/review';localStorage.setItem('rare-sperm-token',(review?r:c).token);localStorage.setItem('rare-sperm-auth',JSON.stringify({id:review?'2':'3',name:review?'review-B':'confirm-C'}));localStorage.setItem('annotation-theme','light')},{r,c})
  await p.route('**/api/track/media',async route=>{const response=await route.fetch(),d=await response.json();d.items=d.items.filter(m=>m.mediaId.startsWith('ux-'));await route.fulfill({response,json:d})})
- await p.goto(origin+'/review');await p.locator(`[data-session-id="${r.sid}"]`).click();await p.locator('.review-drawing').waitFor()
+ await p.goto(origin+'/review');await openTask(p,`[data-session-id="${r.sid}"]`);await p.locator('.review-drawing').waitFor()
  if(await p.getByRole('dialog').count())await button('关闭').click()
- const progress=p.getByRole('region',{name:'视频审查进度'})
+ const progress=p.getByTestId('video-progress')
  for(const size of [{width:1366,height:768},{width:1180,height:760}]){
   await p.setViewportSize(size)
-  const card=await progress.boundingBox(),vp=await p.locator('.review-center').boundingBox()
-  check(card.y+card.height<=vp.y+2&&card.x<vp.x,'review progress spans the top above the image workspace')
+  const card=await progress.boundingBox(),vp=await p.locator('.shell-canvas').boundingBox()
+  check(card.y+card.height<=vp.y+2,'review progress sits in the header above the image workspace')
   check(await inView(progress)&&await inView(p.getByTestId('submit-frame')),'video progress and frame submission are visible together')
-  check(await progress.locator('.workflow-progress-title strong').evaluate(e=>parseFloat(getComputedStyle(e).fontSize)>=22),'review percentage remains readable in the shared progress header')
+  check((await progress.innerText()).includes('已提交'),'header progress states the submitted frame count')
   const before=await progress.boundingBox();await p.locator('.review-object-list').evaluate(e=>e.scrollTop=e.scrollHeight)
   check(Math.abs((await progress.boundingBox()).y-before.y)<1&&await inView(progress),'scrolling objects cannot hide video progress')
   check(await p.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'compact layout has no horizontal page overflow')
@@ -33,7 +35,7 @@ try{
  await p.setViewportSize({width:1366,height:768});await p.locator('.review-object-list').evaluate(e=>e.scrollTop=0);await p.screenshot({path:'output/playwright/priority-review.png',animations:'disabled'})
  await guide('审查模式');await p.locator('.user-guide-content').focus();await p.keyboard.press('Control+Enter');await p.keyboard.press('ArrowRight');await p.keyboard.press(' ')
  check((await read('/review/sessions/'+r.sid,r.token)).progress.submittedFrames===0,'guide shortcuts do not submit review frames')
- check((await p.locator('.review-center .section-head').innerText()).includes('第 1 / 3 帧'),'guide shortcuts do not navigate review frames')
+ check((await p.locator('.shell-context').innerText()).includes('第 1 / 3 帧'),'guide shortcuts do not navigate review frames')
  await p.getByRole('searchbox',{name:'搜索使用说明'}).fill('xyz-no-match')
  check(await p.getByRole('status').filter({hasText:'没有匹配内容'}).count()===1,'guide search has a clear empty state')
  await p.getByRole('searchbox',{name:'搜索使用说明'}).fill('只读')
@@ -52,7 +54,7 @@ try{
  await p.keyboard.press('Escape');await p.getByRole('dialog',{name:'使用说明',exact:true}).waitFor({state:'hidden'})
  check(await button('使用说明').evaluate(e=>e===document.activeElement),'closing guide restores focus to the launcher')
  check(await p.evaluate(()=>document.body.style.overflow)!=='hidden','closing guide restores body scrolling')
- await p.goto(origin+'/confirm');await idle();await p.locator(`[data-session-id="${c.main.sid}"]`).click();await idle();await button('领取并开始确认').click();await idle()
+ await p.goto(origin+'/confirm');await idle();await openTask(p,`[data-session-id="${c.main.sid}"]`);await idle();await button('领取并开始确认').click();await idle()
  check(await p.locator('.confirmation-right>section').first().getAttribute('class')==='c-panel c-decision','confirmation DOM begins with the core A/B action panel')
  check(await inView(p.getByTestId('choose-a'))&&await inView(p.getByTestId('choose-b')),'A/B actions are visible without scrolling')
  await p.setViewportSize({width:1180,height:760})

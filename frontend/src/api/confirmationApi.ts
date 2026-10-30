@@ -4,8 +4,9 @@ import { sourceFrameBlob } from './sourceFrameApi'
 import type { Box, ReviewObject } from '../review/geometry'
 export type Choice = 'A' | 'B'
 export interface Change {
-  changeId:string;frameIndex:number;objectId:number;annotationId:string;beforeBbox:Box;afterBbox:Box
-  metrics:{iou:number;centerShiftPx:number;deltaCenterX:number;deltaCenterY:number;deltaWidth:number;deltaHeight:number;changeType:string}
+  changeId:string;frameIndex:number;objectId:number;annotationId:string;beforeBbox:Box|null;afterBbox:Box|null
+  changeKind?:'update'|'add'|'delete'
+  metrics:{iou:number|null;centerShiftPx:number|null;deltaCenterX:number|null;deltaCenterY:number|null;deltaWidth:number|null;deltaHeight:number|null;changeType:string}
   decisionRevision:number;decision:{choice:Choice;eventId:string}|null
 }
 export interface ConfirmationSession {
@@ -13,7 +14,7 @@ export interface ConfirmationSession {
   media:{mediaId:string;name:string;width:number;height:number;fps:number;frameCount:number}
   progress:{totalChanges:number;decided:number;pending:number;keptA:number;adoptedB:number;percent:number}
   permissions:{canClaim:boolean;canEdit:boolean;canUndo:boolean;canComplete:boolean;canReopen:boolean;canExport:boolean;canReturn:boolean}
-  returnedReview?:{frameIndex:number;reason:string;reviewSessionId:string;nextConfirmationId:string|null}|null
+  returnedReview?:{frameIndex:number;reason:string;reviewSessionId:string;nextConfirmationId:string|null;reviewState?:string;annotationReturnReason?:string|null}|null
   resume:{lastViewedChangeId:string|null;cursorRevision:number;firstPendingChangeId:string|null}
   undo:{actionId:string;changeId:string}|null;finalVersionId:string|null;readOnlyReason:string|null
 }
@@ -25,7 +26,7 @@ export interface Failure {message:string;status?:number;code?:string;requestId?:
 async function request<T>(path:string,method='GET',body?:unknown,key?:string,blob=false):Promise<T> {
   try {
     return await withRequestTimeout(30000, async (signal) => {
-      const r=await fetch('/api'+path,{method,signal,headers:{Authorization:`Bearer ${tokenStore.get()}`,'Content-Type':'application/json',...(key?{'X-Review-Contract':'2','Idempotency-Key':key,'X-Confirmation-Response':'delta'}:{})},body:body===undefined?undefined:JSON.stringify(body)})
+      const r=await fetch('/api'+path,{method,signal,headers:{Authorization:`Bearer ${tokenStore.get()}`,'Content-Type':'application/json',...(key?{'X-Review-Contract':'3','Idempotency-Key':key,'X-Confirmation-Response':'delta'}:{})},body:body===undefined?undefined:JSON.stringify(body)})
       if(!r.ok) {
         const d=await r.json().catch(()=>({}))
         throw {message:d.message||(typeof d.detail==='string'?d.detail:`请求失败（${r.status}）`),status:r.status,code:d.code,requestId:d.requestId||r.headers.get('X-Request-ID')}

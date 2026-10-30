@@ -72,10 +72,12 @@ export interface TrackingRestartResponse {
 
 
 export interface TrackStatusResponse {
+  jointTracking?: {state:'checked'|'failed';checkedFrames?:number;changedObjects?:number}
+  endpointVerification?: {state:'checked'|'failed'|'insufficient';matches:Record<string,number>;checkedFrames:number}
   taskId: string
   status: 'queued' | 'running' | 'success' | 'failed' | 'paused'
   message?: string
-  stage?: 'queued' | 'decoding' | 'preparing_model' | 'tracking' | 'saving_results' | 'paused' | 'completed'
+  stage?: 'queued' | 'decoding' | 'preparing_model' | 'tracking' | 'checking' | 'saving_results' | 'paused' | 'completed'
   elapsedSeconds?: number
   paused?: boolean
   pausedFrame?: number
@@ -236,6 +238,8 @@ export interface TrackWorkspaceState {
 }
 
 export const trackApi = {
+  headBox: (mediaId: string, frameIndex: number, x: number, y: number, signal?: AbortSignal) =>
+    jsonRequest<{bbox:number[];confidence:number;frameIndex:number;width:number;height:number}>(`/track/head-box/${encodeURIComponent(mediaId)}`, {method:'POST', body:JSON.stringify({frameIndex,x,y}), signal}),
   async uploadVideo(file: File): Promise<TrackUploadResponse> {
     const form = new FormData()
     form.append('file', file, file.name)
@@ -307,6 +311,9 @@ export const trackApi = {
     mediaHeight: number
     startFrame: number
     maxFrames?: number
+    edgeDiscovery?: boolean; reviewMode?: boolean
+    terminalAnnotations?: unknown[]
+    combineResults?: boolean
     annotations: unknown[]
   }, requestKey?: string) {
     const result=await jsonRequest<TrackRunResponse>('/track', { method: 'POST', headers: requestKey ? {'Idempotency-Key': requestKey} : {}, body: JSON.stringify(input) })
@@ -317,6 +324,10 @@ export const trackApi = {
   async getStatus(taskId: string) {
     const result=await jsonRequest<TrackStatusResponse>(`/track/status/${encodeURIComponent(taskId)}`)
     if(!['queued','running','success','failed','paused'].includes(result.status))throw new Error('服务器未返回有效追踪状态，请重新查询原任务')
+    const e=result.endpointVerification
+    if(e && (!['checked','failed','insufficient'].includes(e.state)||!e.matches||typeof e.matches!=='object'||Array.isArray(e.matches)||!Object.values(e.matches).every(v=>Number.isSafeInteger(v)&&v>0)||!Number.isSafeInteger(e.checkedFrames)||e.checkedFrames<0))throw new Error('首尾核验状态结构无效，请重新查询原任务')
+    const joint=result.jointTracking
+    if(joint && (!['checked','failed'].includes(joint.state)||(joint.state==='checked'&&(!Number.isSafeInteger(joint.checkedFrames)||joint.checkedFrames!<0))))throw new Error('综合标注状态无效，请重新查询原任务')
     return result
   },
 

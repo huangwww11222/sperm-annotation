@@ -2,6 +2,10 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 const {chromium}=await import(process.env.PLAYWRIGHT_MODULE||'playwright')
+// The task list is a drawer that stays closed while a task is open.
+const openTask=async(target,selector)=>{const card=target.locator(selector),toggle=target.getByTestId('toggle-workbench-library');for(let i=0;i<40;i++){if(await card.isVisible()){try{await card.click({timeout:1500});return}catch{}}else if(await toggle.isVisible())await toggle.click();await target.waitForTimeout(250)}await card.click()}
+// The media list is a drawer that stays closed while a video is open.
+const openAsset=async(target,locator)=>{const toggle=target.getByTestId('toggle-workbench-library');for(let i=0;i<40;i++){if(await locator.isVisible()){try{await locator.click({timeout:1500});return}catch{}}else if(await toggle.isVisible())await toggle.click();await target.waitForTimeout(250)}await locator.click()}
 const c=JSON.parse(fs.readFileSync('work/confirmation-browser-fixture.json'))
 const r=JSON.parse(fs.readFileSync('work/browser-fixture.json'))
 const origin=process.env.CONFIRMATION_ORIGIN||'http://127.0.0.1:5373'
@@ -20,14 +24,14 @@ async function visibleProgress(label){
  check(await region.evaluate(e=>{const r=e.getBoundingClientRect();return e.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2))}),`${label} is not covered by other panels`)
  check(await region.getByRole('progressbar',{name:label}).count()===1,`${label} has a labelled progressbar`)
 }
-async function openC(sid){await p.locator('.confirmation-page[data-busy="false"]').waitFor();await p.locator(`[data-session-id="${sid}"]`).click();await p.locator('.confirmation-page[data-busy="false"]').waitFor()}
+async function openC(sid){await p.locator('.confirmation-page[data-busy="false"]').waitFor();await openTask(p,`[data-session-id="${sid}"]`);await p.locator('.confirmation-page[data-busy="false"]').waitFor()}
 try{
  await p.addInitScript(c=>{localStorage.setItem('rare-sperm-token',c.token);localStorage.setItem('rare-sperm-auth',JSON.stringify({id:'3',name:'layout tester'}));localStorage.setItem('annotation-theme','light')},c)
  await p.route('**/api/track/media',async route=>{const res=await route.fetch(),d=await res.json();d.items=d.items.filter(m=>m.mediaId.startsWith('ux-'));await route.fulfill({response:res,json:d})})
  await p.goto(origin+'/annotate')
  await p.evaluate(async()=>{window.ws=(await import(performance.getEntriesByType('resource').find(r=>r.name.includes('/src/stores/workspace.ts')).name)).useWorkspace()});await idle()
  for(const [name,ratio] of [['ux-video.avi',800/450],['ux-portrait.avi',450/800]]){
-  await p.locator('.asset-card').filter({hasText:name}).click();await idle();await p.waitForFunction(()=>window.ws.currentObjects.value.length===2)
+  await openAsset(p,p.locator('.asset-card').filter({hasText:name}));await idle();await p.waitForFunction(()=>window.ws.currentObjects.value.length===2)
   const before=await objectState(),normalCanvas=await p.locator('.annotation-canvas').boundingBox()
   await button('放大画面').click();await button('放大画面').click()
   const prior=await p.evaluate(()=>({zoom:window.ws.zoom.value,width:document.querySelector('.annotation-stage').clientWidth}))
@@ -72,7 +76,7 @@ try{
  await p.locator('.records-page').waitFor()
  check(await p.evaluate(()=>document.body.style.overflow)!=='hidden'&&!await p.locator('.app-header').evaluate(e=>e.inert),'leaving focused page restores body and navigation')
  await p.evaluate(r=>{localStorage.setItem('rare-sperm-token',r.token);localStorage.setItem('rare-sperm-auth',JSON.stringify({id:'2',name:'review-B'}))},r)
- await p.goto(origin+'/review');await p.locator(`[data-session-id="${r.sid}"]`).click();await p.locator('.review-drawing').waitFor()
+ await p.goto(origin+'/review');await openTask(p,`[data-session-id="${r.sid}"]`);await p.locator('.review-drawing').waitFor()
  if(await p.getByRole('dialog').count())await button('关闭').click()
  await visibleProgress('视频审查进度')
  const progress=p.getByRole('region',{name:'视频审查进度'})

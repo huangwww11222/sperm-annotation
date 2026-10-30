@@ -1,8 +1,10 @@
 # 微流控标注工作台
 
-用于视频人工标注、SAM3 辅助追踪、逐帧审查、A/B 对比确认及 YOLO / COCO 训练数据集导出。浏览器即可操作；数据保存在部署方自己的服务器。
+当前标注流程：首尾帧标头框 → 首尾双向追踪（默认识别边缘入画）→ 检查微调 → 标注页直接导出 YOLO / COCO 数据集。新标注暂不送审；历史审查及确认任务保留。
 
-**训练集必须经过审查和对比确认后才能导出。** 同一账号可以自审、自确认，也可由团队分工完成。
+用于视频人工标注、SAM3 辅助追踪、疑点集中审查及 YOLO / COCO 训练数据集导出。浏览器即可操作；数据保存在部署方自己的服务器。
+
+**新任务在集中审查中完成最终验收后才能导出训练集。** 升级前的历史任务保留原对比确认和恢复入口。 同一账号可以自审、自确认，也可由团队分工完成。
 
 ## 快速开始：默认启用 AI 的 Docker 部署
 
@@ -28,7 +30,7 @@ cd sperm-annotation
 
 | 模式 | 功能 | 额外条件 |
 | --- | --- | --- |
-| `cpu` | 人工标注 → 审查 → 确认 → 训练集导出 | 不需要 GPU 或模型；AI Tracking 显示未启用提示 |
+| `cpu` | 人工标注 → 检查 → 直接导出 | 不需要 GPU 或模型；AI Tracking 显示未启用提示 |
 | `gpu`（默认） | 上述功能 + SAM3 AI Tracking | NVIDIA GPU、驱动、Container Toolkit / WSL2 GPU 支持；脚本自动准备模型 |
 
 首次不传模式即选择 GPU + AI，也可显式运行 `bash deploy.sh gpu`（Windows：`.\deploy.ps1 -Mode gpu`）。仅需人工标注时才显式选择 `bash deploy.sh cpu` / `.\deploy.ps1 -Mode cpu`。缺少 GPU 或模型时会报错，不自动降级。已有 `.env` 的模式切换及驱动要求见 [Docker 部署说明](docs/DOCKER_DEPLOYMENT.md)。SAM3 模型作为[本仓库 Release 附件](https://github.com/huangwww11222/sperm-annotation/releases/tag/sam3-model-6d06f0a5)随项目提供；首次部署自动下载至 `models/sam3/`、校验 SHA256 后启用，无需另行申请模型下载权限。约 3.45 GB 下载量，下载与组装需约 6.5 GiB 可用空间。重复部署复用已验证模型，失败保留下载缓存供重试。模型附带原始 SAM License；源码 Git 和应用镜像不重复存储大权重。

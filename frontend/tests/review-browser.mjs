@@ -3,6 +3,8 @@ import { useLegacyBrowserAPIs } from './legacy-browser-profile.mjs'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright')
+// The task list is a drawer that stays closed while a task is open.
+const openTask=async(target,selector)=>{const card=target.locator(selector),toggle=target.getByTestId('toggle-workbench-library');for(let i=0;i<40;i++){if(await card.isVisible()){try{await card.click({timeout:1500});return}catch{}}else if(await toggle.isVisible())await toggle.click();await target.waitForTimeout(250)}await card.click()}
 const fixture=JSON.parse(fs.readFileSync(process.env.REVIEW_FIXTURE || 'work/browser-fixture.json'))
 const origin=process.env.REVIEW_ORIGIN || 'http://127.0.0.1:5373'
 const browser=await chromium.launch({channel:process.env.CHROME_CHANNEL || 'chrome',headless:true})
@@ -26,18 +28,18 @@ const drag=async(dx=15,dy=5)=>{
  await waitSaved()
 }
 const go=async(i)=>{
- await page.getByRole('textbox',{name:'跳转帧号'}).fill(String(i+1));await page.getByRole('button',{name:'确定',exact:true}).click()
+ await page.getByRole('textbox',{name:'跳转帧号'}).fill(String(i+1));await page.getByRole('textbox',{name:'跳转帧号'}).press('Enter')
  await page.waitForFunction(n=>document.querySelector('[aria-label="跳转帧号"]').value===String(n),i+1)
- await page.locator('.review-center .section-head').filter({hasText:`第 ${i+1} / 3 帧`}).waitFor();await waitSaved();await closeDialog()
+ await page.locator('.shell-context').filter({hasText:`第 ${i+1} / 3 帧`}).waitFor();await waitSaved();await closeDialog()
  await page.locator('.review-page').click({position:{x:600,y:12}})
 }
 try {
  await page.addInitScript(({token})=>{localStorage.setItem('rare-sperm-token',token);localStorage.setItem('rare-sperm-auth',JSON.stringify({id:'2',name:'review-B',role:'annotator'}))},fixture)
- await page.goto(origin+'/review');await page.locator(`[data-session-id="${fixture.sid}"]`).click();await page.locator('.review-drawing').waitFor();await waitSaved();await closeDialog()
+ await page.goto(origin+'/review');await openTask(page,`[data-session-id="${fixture.sid}"]`);await page.locator('.review-drawing').waitFor();await waitSaved();await closeDialog()
  check((await session()).progress.submittedFrames===0,'opening/browsing does not submit')
  await page.keyboard.press(']');check(await page.locator('[data-row="1"]').evaluate(e=>e.classList.contains('selected')),'bracket selects object and comparison row')
  await page.keyboard.press(']');await page.keyboard.press(']');check(await page.locator('[data-row="2"]').evaluate(e=>e.classList.contains('selected')),'object selection does not wrap')
- await page.keyboard.press('f');check(await page.getByRole('textbox',{name:'跳转帧号'}).evaluate(e=>e===document.activeElement),'F focuses frame input')
+ await page.keyboard.press('g');check(await page.getByRole('textbox',{name:'跳转帧号'}).evaluate(e=>e===document.activeElement),'G focuses frame input')
  await page.keyboard.press('ArrowRight');check((await page.getByRole('textbox',{name:'跳转帧号'}).inputValue())==='1','input arrow does not navigate')
  await page.keyboard.press('Escape')
  await drag();check((await getFrame()).hasDraft,'drag auto-saves server draft')
@@ -46,11 +48,11 @@ try {
  check(await page.locator('.compare-pair svg').count()===2,'real paired frame crops available')
  await page.screenshot({path:'output/playwright/review-edited.png',fullPage:true})
  const draft=await getFrame()
- await page.reload();await page.locator(`[data-session-id="${fixture.sid}"]`).click();await page.getByRole('dialog').waitFor()
+ await page.reload();await openTask(page,`[data-session-id="${fixture.sid}"]`);await page.getByRole('dialog').waitFor()
  check((await page.getByRole('dialog').innerText()).includes('未提交草稿'),'refresh offers draft recovery')
  await page.getByRole('button',{name:'继续编辑',exact:true}).click()
  check((await getFrame()).patch[0].bbox[0]===draft.patch[0].bbox[0],'draft geometry survives refresh')
- await page.getByTestId('submit-frame').click();await page.locator('.review-center .section-head').filter({hasText:'第 2 / 3 帧'}).waitFor();await waitSaved()
+ await page.getByTestId('submit-frame').click();await page.locator('.shell-context').filter({hasText:'第 2 / 3 帧'}).waitFor();await waitSaved()
  check((await session()).progress.submittedFrames===1,'explicit submit commits and advances')
  await go(0);await drag(10,0)
  check((await session()).progress.submittedFrames===0,'reedit removes submitted progress')
@@ -69,11 +71,11 @@ try {
  await page.getByRole('button',{name:'人工标注',exact:true}).click();await waitSaved()
  // Guard retries the same request and may leave on success.
  check(keys.length>=2&&keys[0]===keys[1],'leave guard retries uncertain save with same idempotency key')
- await page.getByRole('button',{name:'审查模式',exact:true}).click();await page.locator(`[data-session-id="${fixture.sid}"]`).click();await closeDialog();await page.locator('.review-drawing').waitFor();await waitSaved();await closeDialog()
+ await page.getByRole('button',{name:'审查模式',exact:true}).click();await openTask(page,`[data-session-id="${fixture.sid}"]`);await closeDialog();await page.locator('.review-drawing').waitFor();await waitSaved();await closeDialog()
  check((await getFrame()).frameRevision===committedDraft.frameRevision,'retry produces no extra frame revision')
  await page.unroute('**/api/review/sessions/*/frames/*/draft')
- await page.getByTestId('submit-frame').click();await page.locator('.review-center .section-head').filter({hasText:'第 2 / 3 帧'}).waitFor();await waitSaved()
- await page.getByTestId('submit-frame').click();await page.locator('.review-center .section-head').filter({hasText:'第 3 / 3 帧'}).waitFor();await waitSaved()
+ await page.getByTestId('submit-frame').click();await page.locator('.shell-context').filter({hasText:'第 2 / 3 帧'}).waitFor();await waitSaved()
+ await page.getByTestId('submit-frame').click();await page.locator('.shell-context').filter({hasText:'第 3 / 3 帧'}).waitFor();await waitSaved()
  check(await page.locator('[data-box]').count()===0,'empty frame renders without invented boxes')
  await page.getByTestId('submit-frame').click();await page.getByRole('dialog').waitFor()
  check((await session()).state==='in_progress','last submission does not auto-finish')

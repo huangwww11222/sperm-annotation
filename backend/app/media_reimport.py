@@ -66,7 +66,7 @@ def overwrite_permission(c, media_id):
     sessions = c.execute('''SELECT s.state,s.reviewer_id,s.id FROM review_sessions s
         JOIN annotation_baselines a ON a.id=s.baseline_id
         JOIN media_revisions m ON m.id=a.media_revision_id
-        WHERE m.media_id=? AND s.state!='withdrawn' ''', (media_id,)).fetchall()
+        WHERE m.media_id=? AND s.state NOT IN ('withdrawn','returned_to_annotation') ''', (media_id,)).fetchall()
     if any(s['state'] != 'pending' or s['reviewer_id'] is not None for s in sessions):
         return False, '视频已进入审查，已送审无法重复导入。'
     if sessions:

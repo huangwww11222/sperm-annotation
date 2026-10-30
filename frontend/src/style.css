@@ -7,7 +7,7 @@
   font-family:"PingFang SC","Microsoft YaHei UI","Microsoft YaHei","Segoe UI",sans-serif;
   font-synthesis:none;
   text-rendering:optimizeLegibility;
-  --app-header-height:64px;
+  --app-header-height:48px;
   --page-gutter:12px;
   --app-bg:#f4f7f8;
   --surface:#ffffff;
@@ -29,6 +29,10 @@
   --danger-soft:#fff0f2;
   --a:#7850b5;
   --b:#187e61;
+  --a-soft:#ddd0f1;
+  --a-line:#9c7fd0;
+  --b-soft:#cfeadf;
+  --b-line:#62ab91;
   --selection:#a46a16;
   --shadow:0 1px 3px #263d460b;
   --canvas:#111d24;
@@ -57,6 +61,10 @@
   --danger-soft:#442b34;
   --a:#c7aff4;
   --b:#85d4ad;
+  --a-soft:#4a3d68;
+  --a-line:#8f78bd;
+  --b-soft:#24473a;
+  --b-line:#4f9a7c;
   --selection:#f0c575;
   --shadow:0 1px 3px #0002;
   color-scheme:dark;
@@ -72,13 +80,13 @@ button,input,select,textarea {outline-offset:3px}
 button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,[tabindex]:focus-visible {outline:2px solid var(--accent)}
 kbd {font-size:11px;line-height:1.2;border:1px solid var(--line);border-radius:4px;padding:2px 4px;white-space:nowrap;color:var(--muted)}
 .app-shell {min-height:100vh;background:var(--app-bg);color:var(--text)}
-.app-header {height:var(--app-header-height);display:flex;gap:20px;align-items:center;justify-content:space-between;padding:0 20px;background:var(--surface);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:40}
-.app-brand {display:flex;align-items:center;gap:10px;flex-shrink:0;min-width:0}
-.brand-mark {display:grid;place-items:center;width:36px;height:36px;border-radius:8px;color:var(--on-accent);background:var(--accent)}
-.app-brand h1 {margin:0;font-size:15px;line-height:1.45;font-weight:700;letter-spacing:.01em;white-space:nowrap}
+.app-header {height:var(--app-header-height);display:flex;gap:14px;align-items:center;justify-content:space-between;padding:0 12px;background:var(--surface);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:40}
+.app-brand {display:flex;align-items:center;gap:8px;flex-shrink:0;min-width:0}
+.brand-mark {display:grid;place-items:center;width:28px;height:28px;border-radius:7px;color:var(--on-accent);background:var(--accent)}
+.app-brand h1 {margin:0;font-size:14px;line-height:1.4;font-weight:700;letter-spacing:.01em;white-space:nowrap}
 .app-brand small {display:block;margin-top:2px;font-size:11px;line-height:1.4;color:var(--muted)}
-.workflow-nav {display:flex;align-items:center;gap:3px;padding:3px;border:1px solid var(--line);border-radius:9px;background:var(--surface-subtle);color:var(--muted);flex-shrink:0}
-.workflow-nav button {display:flex;gap:8px;align-items:center;padding:8px 11px;min-height:34px;border-radius:6px;white-space:nowrap;font-size:13px;font-weight:600;color:var(--muted)}
+.workflow-nav {display:flex;align-items:center;gap:2px;padding:2px;border:1px solid var(--line);border-radius:9px;background:var(--surface-subtle);color:var(--muted);flex-shrink:0}
+.workflow-nav button {display:flex;gap:6px;align-items:center;padding:5px 11px;min-height:30px;border-radius:6px;white-space:nowrap;font-size:13px;font-weight:600;color:var(--muted)}
 .workflow-nav button:hover {background:var(--surface-hover);color:var(--text)}
 .workflow-nav button span {font-size:11px;font-variant-numeric:tabular-nums;color:inherit;opacity:.85}
 .workflow-nav .active,.workflow-nav .active:hover {background:var(--accent);color:var(--on-accent)}
@@ -86,6 +94,9 @@ kbd {font-size:11px;line-height:1.2;border:1px solid var(--line);border-radius:4
 .app-account {display:flex;align-items:center;gap:6px;min-width:0}
 .user-name {font-size:12px;color:var(--muted);max-width:85px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .app-main {min-height:calc(100vh - var(--app-header-height));padding:var(--page-gutter)}
+.app-main.flush {padding:0}
+.app-header-context {flex:1;min-width:0;display:flex;align-items:center;justify-content:flex-end;gap:10px}
+.app-header-context:empty {display:none}
 .quiet-button,.icon-button {display:inline-flex;gap:6px;align-items:center;justify-content:center;border-radius:6px;color:var(--muted);font-size:12px;padding:7px;min-height:32px}
 .quiet-button:hover,.icon-button:hover {background:var(--surface-hover);color:var(--text)}
 .quiet-button.active {color:var(--accent);background:var(--accent-soft)}
@@ -130,6 +141,7 @@ kbd {font-size:11px;line-height:1.2;border:1px solid var(--line);border-radius:4
   .brand-mark {width:32px;height:32px}
   .app-account {flex:1;flex-wrap:wrap;justify-content:flex-end}
   .workflow-nav {order:3;width:100%;justify-content:center}
+  .app-header-context {order:4;flex-basis:100%;justify-content:flex-start}
   .workflow-nav button {flex:1;justify-content:center}
   .app-main {padding:10px}
 }

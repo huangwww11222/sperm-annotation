@@ -17,13 +17,16 @@ def test_anomaly_panel_contract_keeps_markers_and_uses_real_names() -> None:
     panel = (ROOT / "frontend/src/components/AnnotationTrackingFeedback.vue").read_text(encoding="utf-8")
     store = (ROOT / "frontend/src/stores/workspace.ts").read_text(encoding="utf-8")
     assert "AnnotationTrackingFeedback" in page
-    assert "item.displayName" in panel and "最近人工标注" in panel and "尺寸 / 形状判断参考" in panel
+    # Layout and copy may change; retain evidence bindings. The browser policy
+    # checks validate the saved reference frame and actual rendered values.
+    assert "item.displayName" in panel
+    assert "geometryReferenceFrame" in panel and "baselineFrame" in panel
     assert "该错误可能在触发暂停前已经逐渐出现" in store
     close_panel_block = store[store.index("const closeAnomalyPanel"):store.index("const lastPausedContext")]
     assert "anomalyFrames.value = []" not in close_panel_block
     assert "const trackingPausedFrame = computed" in store
     assert "pausedFrame + 1" in panel
-    assert "查看前几帧是否已经偏移" in panel
+    assert "target.reviewNotice" in panel and "target.reviewRange" in panel
     # Per-object feedback remains bound to the pause frame, while an explicit
     # earlier-frame restart is a separate action (covered by browser checks).
     # These are wiring guards, not a replacement for tracking-focus-checks:

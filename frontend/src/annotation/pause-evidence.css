@@ -1,0 +1,113 @@
+/* Evidence is a reading surface, separate from the compact pause controls.
+   All colors come from the shared light/dark workstation palette. */
+.annotation-page .pause-details-panel .pause-evidence{line-height:1.5;color:var(--text)}
+.annotation-page .pause-evidence h4,.annotation-page .pause-evidence h5,.annotation-page .pause-evidence dl,.annotation-page .pause-evidence ol,.annotation-page .pause-evidence ul{margin:0}
+.annotation-page .pause-evidence h4{font-size:13px;font-weight:650;line-height:1.45;margin:5px 0 10px;overflow-wrap:anywhere}
+.annotation-page .pause-evidence h5{display:flex;gap:6px;align-items:center;font-size:12px;line-height:1.5;font-weight:650;margin:0 0 9px}
+.annotation-page .pause-evidence h5>span{margin-left:auto;color:var(--muted);font-weight:400;font-size:11px}
+.annotation-page .pause-evidence-object{display:flex;align-items:center;gap:7px;min-width:0;font-size:12px}
+.annotation-page .pause-evidence-object>strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:550}
+.annotation-page .pause-evidence-object>span:last-child{margin-left:auto;white-space:nowrap;font-size:11px;color:var(--muted)}
+.annotation-page .pause-evidence-id,.annotation-page .pause-object-number{display:inline-flex;align-items:center;justify-content:center;min-width:23px;min-height:21px;padding:1px 5px;border-radius:4px;background:var(--accent-soft);color:var(--accent);font-size:11px;font-weight:650;font-variant-numeric:tabular-nums;line-height:1.4;flex-shrink:0}
+.annotation-page .pause-object-tabs button{gap:6px}
+.annotation-page .pause-object-tabs button.active .pause-object-number{background:var(--accent-soft);color:var(--accent)}
+.annotation-page .pause-evidence-pair-ids{display:inline-flex;gap:6px;align-items:center}
+.annotation-page .pause-evidence-pair-ids>span:not(.pause-evidence-id){font-size:12px;color:var(--muted)}
+.annotation-page .pause-evidence-metric{margin:9px 0 12px;border-left:2px solid var(--warning);padding-left:9px}
+.annotation-page .pause-evidence-metric-label{display:flex;align-items:baseline;justify-content:space-between;gap:5px;font-size:12px}
+.annotation-page .pause-evidence-metric-label>strong{font-weight:550}
+.annotation-page .pause-evidence-metric-label>span{color:var(--warning);font-size:11px;white-space:nowrap}
+.annotation-page .pause-evidence-comparison{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px;margin-top:5px!important;font-variant-numeric:tabular-nums}
+.annotation-page .pause-evidence-comparison dt{font-size:11px;color:var(--muted);line-height:1.5}
+.annotation-page .pause-evidence-comparison dd{font-size:21px;font-weight:650;letter-spacing:-.035em;line-height:1.3;color:var(--warning);overflow-wrap:anywhere}
+.annotation-page .pause-evidence-comparison>div+div dd{font-size:15px;font-weight:500;color:var(--text);padding-top:4px}
+.annotation-page .pause-evidence-scale{height:13px;margin:5px 5px 0 0;position:relative}
+.annotation-page .pause-evidence-scale:before{content:'';position:absolute;left:0;right:0;top:6px;height:2px;background:var(--line)}
+.annotation-page .pause-evidence-scale-fill{position:absolute;left:0;top:6px;height:2px;background:var(--warning);opacity:.55}
+.annotation-page .pause-evidence-scale-bound{position:absolute;top:1px;bottom:0;width:1px;background:var(--muted)}
+.annotation-page .pause-evidence-scale-current{position:absolute;top:3px;width:7px;height:7px;background:var(--warning);border-radius:50%;transform:translateX(-50%)}
+.annotation-page .pause-evidence-reasons{list-style:none;display:flex;flex-direction:column;gap:7px;margin:8px 0 10px!important;padding:0}
+.annotation-page .pause-evidence-reasons li{display:flex;align-items:flex-start;gap:7px;line-height:1.55;overflow-wrap:anywhere}
+.annotation-page .pause-evidence-reasons svg{margin-top:2px;color:var(--warning);flex-shrink:0}
+.annotation-page .pause-evidence-fallback{color:var(--muted);font-size:12px;line-height:1.55}
+.annotation-page .pause-evidence-more{border-top:1px solid var(--line);padding:8px 0;margin:8px 0 0}
+.annotation-page .pause-evidence-more>summary{cursor:pointer;font-weight:550;font-size:12px;line-height:1.5;padding:2px 0;color:var(--text);overflow-wrap:anywhere}
+.annotation-page .pause-evidence-more>summary>span{font-size:11px;font-weight:400;color:var(--muted);margin-left:4px}
+.annotation-page .pause-evidence-more[open]>summary{margin-bottom:8px}
+.annotation-page .pause-evidence-measurements{display:grid;gap:6px;font-variant-numeric:tabular-nums}
+.annotation-page .pause-evidence-measurements>div{display:flex;justify-content:space-between;align-items:baseline;gap:8px;min-width:0}
+.annotation-page .pause-evidence-measurements dt{color:var(--muted);font-size:11px}
+.annotation-page .pause-evidence-measurements dd{font-size:12px;white-space:nowrap;text-align:right}
+.annotation-page .pause-evidence-related,.annotation-page .pause-evidence-history,.annotation-page .pause-evidence-confirmation,.annotation-page .pause-evidence-workflow{border-top:1px solid var(--line);padding-top:12px;margin-top:11px}
+.annotation-page .pause-evidence-pair{padding:5px 0 7px}
+.annotation-page .pause-evidence-pair>div{display:flex;align-items:baseline;justify-content:space-between;gap:7px;font-variant-numeric:tabular-nums}
+.annotation-page .pause-evidence-pair strong{font-size:12px;font-weight:550;white-space:nowrap}
+.annotation-page .pause-evidence-pair>div>span{font-size:11px;color:var(--muted)}
+.annotation-page .pause-evidence-pair>small{display:block;font-size:11px;color:var(--muted);line-height:1.5;margin-top:3px;overflow-wrap:anywhere}
+.annotation-page .pause-evidence .pause-evidence-caption{display:block;color:var(--muted);font-size:11px;line-height:1.55;margin:8px 0 0}
+.annotation-page .pause-evidence-frames{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;list-style:none;padding:0;position:relative}
+.annotation-page .pause-evidence-frames li{min-width:0;border-top:2px solid var(--line);padding-top:6px;display:flex;flex-direction:column;gap:2px}
+.annotation-page .pause-evidence-frames .pause-evidence-frame-current{border-color:var(--accent)}
+.annotation-page .pause-evidence-frames span{font-size:11px;color:var(--muted)}
+.annotation-page .pause-evidence-frames strong{font-size:12px;font-weight:600;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+.annotation-page .pause-evidence-frames small{font-size:11px;color:var(--muted);line-height:1.5;overflow-wrap:anywhere}
+.annotation-page .pause-evidence .pause-evidence-range{display:flex;gap:5px;align-items:flex-start;margin-top:9px;color:var(--accent);font-size:11px}
+.annotation-page .pause-evidence-range svg{flex-shrink:0;margin-top:1px}
+.annotation-page .pause-evidence-review p{font-size:11px;line-height:1.65;color:var(--muted);margin:7px 0}
+.annotation-page .pause-evidence-other{padding:7px 0;border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:3px}
+.annotation-page .pause-evidence-other:last-child{border-bottom:0}
+.annotation-page .pause-evidence-other strong{font-size:12px;display:flex;gap:5px;align-items:center;overflow-wrap:anywhere}
+.annotation-page .pause-evidence-other strong svg{color:var(--success);flex-shrink:0}
+.annotation-page .pause-evidence-other>span{font-size:11px;color:var(--muted)}
+.annotation-page .pause-evidence-other small{font-size:11px;line-height:1.55;overflow-wrap:anywhere}
+.annotation-page .pause-evidence-other .pause-evidence-other-detail{margin-top:3px;padding:5px 0;border-top:0}
+.annotation-page .pause-evidence-other-detail>summary{font-size:11px;color:var(--accent)}
+.annotation-page .pause-evidence-other-detail>p,.annotation-page .pause-evidence-other-advice p,.annotation-page .pause-evidence-other-pairs p{font-size:11px;color:var(--muted);line-height:1.6;margin:7px 0}
+.annotation-page .pause-evidence-other-detail .pause-evidence-measurements{padding:8px 0}
+.annotation-page .pause-evidence-facts{display:grid;gap:7px;border-top:1px solid var(--line);padding-top:9px;margin-top:5px!important}
+.annotation-page .pause-evidence-facts>div{display:flex;justify-content:space-between;align-items:baseline;gap:9px;font-size:11px}
+.annotation-page .pause-evidence-facts dt{color:var(--muted);flex:0 1 auto}
+.annotation-page .pause-evidence-facts dd{text-align:right;min-width:0;overflow-wrap:anywhere}
+.annotation-page .pause-evidence-facts small{display:block;color:var(--muted);font-size:11px}
+.annotation-page .pause-evidence-other-pairs,.annotation-page .pause-evidence-other-advice{border-top:1px solid var(--line);padding-top:8px;margin-top:9px;font-size:11px}
+.annotation-page .pause-evidence-other-pairs>strong,.annotation-page .pause-evidence-other-advice>strong{font-size:11px;font-weight:550}
+.annotation-page .pause-evidence-scope{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}
+.annotation-page .pause-evidence-scope>div{background:var(--surface-subtle);padding:8px;border-radius:4px;min-width:0}
+.annotation-page .pause-evidence-scope dt{font-size:11px;font-weight:650;color:var(--accent);line-height:1.5}
+.annotation-page .pause-evidence-scope dd{margin-top:4px;font-size:11px;line-height:1.6;overflow-wrap:anywhere}
+.annotation-page .pause-evidence-scope small{display:block;color:var(--muted);font-size:11px}
+.annotation-page .pause-evidence-pair-policy{font-size:11px;margin-top:11px}
+.annotation-page .pause-evidence-pair-policy>strong{font-weight:550}
+.annotation-page .pause-evidence-pair-policy ul{list-style:disc;padding-left:15px;margin-top:4px}
+.annotation-page .pause-evidence-pair-policy li{color:var(--muted);line-height:1.65;margin:3px 0}
+.annotation-page .pause-evidence .pause-evidence-learn{border-top:1px solid var(--line);padding-top:11px;margin:11px 0 0;min-width:0;gap:7px;line-height:1.55}
+.annotation-page .pause-evidence-learn input{margin-top:3px;flex-shrink:0;accent-color:var(--accent)}
+.annotation-page .pause-evidence-learn small{display:block;margin-top:4px;color:var(--muted);font-size:11px}
+.annotation-page .pause-evidence-workflow ol{padding:0;counter-reset:pause-step;list-style:none;display:flex;flex-direction:column;gap:7px}
+.annotation-page .pause-evidence-workflow li{counter-increment:pause-step;display:flex;gap:6px;align-items:baseline;font-size:11px;line-height:1.6;flex-wrap:wrap}
+.annotation-page .pause-evidence-workflow li:before{content:counter(pause-step);width:16px;height:16px;line-height:16px;text-align:center;border:1px solid var(--line);border-radius:50%;color:var(--muted);font-size:11px;flex-shrink:0}
+.annotation-page .pause-evidence-workflow li>span{font-weight:600}
+.annotation-page .pause-evidence .pause-evidence-resume{display:flex;gap:6px;align-items:flex-start;padding:8px;margin-top:12px;background:var(--accent-soft);color:var(--accent);font-size:11px;border-radius:4px}
+.annotation-page .pause-evidence-resume svg{margin-top:2px;flex-shrink:0}
+.annotation-page .pause-evidence-workflow>small{display:block;font-size:11px;color:var(--muted);line-height:1.6;margin:6px 0 2px}
+
+/* The normal inspector scrolls as a column. Evidence must not shrink until its
+   first measurement is clipped; it never takes height from the image column. */
+.annotation-page .annotation-inspector.pause-active{overflow:auto;overscroll-behavior:contain}
+.annotation-page .annotation-inspector.pause-active>.pause-inspector-panel{flex:0 0 auto;max-height:none}
+.annotation-page .annotation-inspector.pause-active .pause-control-host{flex:0 0 auto;overflow:visible}
+.annotation-page .annotation-inspector.pause-active .pause-inspector-details{height:218px;min-height:218px;max-height:218px;flex:0 0 218px}
+.annotation-page .annotation-inspector.pause-active>.ai-panel{padding:8px 10px}
+.annotation-page .annotation-inspector.pause-active>.ai-panel .tracking-calibration{margin:0}
+@media(max-width:700px){
+  .annotation-page .pause-details-panel .pause-evidence{padding:9px}
+  .annotation-page .pause-evidence-object>span:last-child{display:none}
+  .annotation-page .pause-evidence-comparison{gap:4px}
+  .annotation-page .pause-evidence-comparison dd{font-size:17px}
+  .annotation-page .pause-evidence-comparison>div+div dd{font-size:13px;padding-top:3px}
+  .annotation-page .pause-evidence-scope{grid-template-columns:minmax(0,1fr)}
+  .annotation-page .pause-evidence-frames{grid-template-columns:minmax(0,1fr);gap:7px}
+  .annotation-page .pause-evidence-frames li{border-top:0;border-left:2px solid var(--line);padding:0 0 0 7px;gap:1px}
+  .annotation-page .pause-evidence-frames .pause-evidence-frame-current{border-color:var(--accent)}
+  .annotation-page .pause-evidence-pair>div{flex-wrap:wrap;gap:2px 7px}
+}

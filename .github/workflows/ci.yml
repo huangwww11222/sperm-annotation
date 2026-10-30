@@ -24,6 +24,7 @@ jobs:
       - name: Install pinned browser test runtime
         run: npx --prefix frontend playwright install --with-deps chromium
       - run: npm run test:compatibility --prefix frontend
+      - run: npm run test:workbench --prefix frontend
       - run: bash -n scripts/install_compat_update.sh
       - run: npm run test:annotation --prefix frontend
       - run: npm run test:review --prefix frontend
@@ -88,6 +89,8 @@ jobs:
             output/playwright/*.png
             output/playwright/e2e-confirm-ux-*/*.json
             output/playwright/e2e-confirm-ux-*/*.png
+            output/playwright/workbench-shortcuts/*.json
+            output/playwright/workbench-shortcuts/*.png
           if-no-files-found: ignore
       - name: Container diagnostics
         if: always()

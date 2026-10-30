@@ -1,5 +1,9 @@
 # 存储、快照与迁移边界
 
+## 2026-10-29 当前入口
+
+annotation_export_snapshots 独立保存直接导出快照：账号/请求键、正文哈希、来源版本、原视频哈希和元数据、完整帧框及快照哈希。快照不写 final_versions、不创建A/B/C/F。audit requiredFeatures=annotation_direct_export_v1，包含原快照及操作者；下游不支持时须拒绝，不能将其误作经过审查的数据。
+
 异常后的早帧重建及普通 rewind 在媒体根目录 `_tracking_restarts/<operation>/` 保存持久 journal、结果与工作区原文件备份及已同步的新文件。源锁保护当前进程，API 的 SQL 收据决定重启后保留已提交发布还是恢复两份原文件；普通 rewind 不递增人工工作区 revision。独立模型脚本没有登录账号时，同日志使用已同步的 `committed.json` 提交标记，不创建伪造用户或依赖运行中服务的数据库。读取工作区/追踪结果、送审和后续追踪前先恢复未完成日志，已提交清理不能覆盖之后的新编辑。此目录是恢复状态，不纳入 Git、不手动清理；恢复成功后服务仅清理本操作目录。缺工作区的 legacy 路径不发布空 workspace 遮蔽原人工 seed。历史人工反馈和已保存人工框不随 AI 未来分支截断而删除。兼容旧工作区无私有暂停字段，新的 `_pauseCandidates` / `_pauseContext` 仅供服务器维护暂停候选及删除撤销，不在公共响应或统计 ZIP 中。
 
 真实模型结果发表前另写媒体目录的 `.tracking-pause-publication.json`，记录本次 publicationId、目标结果摘要和暂停依据；发表后或读/启动时，仅在结果摘要匹配时补持久暂停，并以工作区 `_pausePublicationId` 防重复应用。清理失败后的残留不能让已经确认的旧暂停复活；结果尚未发表时不借意图清除原暂停。该文件同样是恢复状态，不作为工作区/API/统计数据交付，不能手工删除来绕过异常。
@@ -126,3 +130,17 @@ A/B/F 不随浏览、缩放、草稿、重新确认或退回重审而改写。F 
 旧数据集没有快照时明确未覆盖；只读提取不会初始化数据库、补造历史或把未知观看时长写成零。A 的作者字段表示送审责任，不能代表每个框的手工作者。失败任务可保留尝试快照，但不算成功交付。
 
 完整快照保存在 DB，训练 ZIP 仅带轻量索引和原有 provenance。新增表/触发器是增量迁移，存储运行契约仍为 1；回滚按完整离线更新器恢复同批 DB/storage。
+
+审查增删与退回采用兼容增量迁移：review_workflow.migrate 创建 `review_object_catalog`、`review_object_allocators`、`review_annotation_returns`，已有表和 A/B/F 不删除重建。旧几何 patch 仍可读；新 patch 增加 add/delete，review_changes 的 before_bbox/after_bbox 以 JSON null 表示不存在，几何指标为 SQL NULL。新客户端用业务协议 3，旧客户端不得擦除新存在性变化。退回只关闭旧任务，不清空原人工文件；重送产生新 A/任务。存储运行契约保持 1（同一 SQLite/目录，启动兼容迁移，无模型/环境变更），降级仍必须恢复同批备份数据，不能让旧后端直接打开新版活动标注数据。
+
+启用边缘发现时，Tracking JSONL 行可附加 `edgeDiscovery`（version=1的有界候选状态），对象可附加 `entryOrigin`（kind、firstFrame、confirmedFrame、motionVerified、humanConfirmed）。候选不是人工标注或审查结论；回退/覆盖按原Tracking分支事务处理，不另写失去事务保护的候选文件。旧行缺字段时正常从当前帧建立排除基线，不能把初始可见目标当新入画。
+
+## 集中审查兼容存储
+
+新首尾请求 combineResults=true 时，Tracking objects 数组只保存一套综合框。反向候选与局部检测在内存中参与连续路径计算，不另存整段自动候选文件，不向标注画面增加来源/采用理由。人工端点快照与必要未解决疑点仍按原来源契约保存；jointCheck 仅记录状态、策略及不确定对象，综合失败有明确标记。修正框清除旧 score/mask_area/anomaly 等过期诊断；人工几何、删除墓碑、稳定身份和 sourceRevision/F 导出链路仍生效。
+
+首尾双向追踪没有新增业务数据库或独立可变模型标签文件。尾帧人工框保留在 workspace_state.json 的 manualAnnotations 中，唯一对应后统一 objectId，另存 endpointOriginalObjectId / endpointAnchorHash 以保留原局部编号并防止重复转换。本次首尾请求快照由原追踪幂等正文固定。JSONL 行 reviewEvidence.endpointCheck 保存状态、策略/端点哈希、一对一身份对应及末帧 terminalAnnotations 原始快照；反向框仅在差异疑点中保存，不替换正向对象数组。送审时将原始尾帧快照复制到集中审查 evidence_json，后续重追不抹除历史。A 来源合并兼容尚未完成客户端编号统一的尾框，已转换框不再次应用映射；未确定对应不强制合并。
+
+`concentrated_reviews` 保存 session/source_hash/不可变 evidence_json 和当前 final_version_id；`concentrated_reopens` 保存重开帧、原最终版本、操作者与时间。Tracking 行 `reviewEvidence` 包含 findings、检查状态、反向核验状态、expectedObjectIds；同一原子发布保护。送审固定证据不再依赖可变工作区。
+
+为复用既有 F 外键与导出校验，新流程内部仍有 confirmation 记录，但决定 note 为 `review-acceptance:explicit-video-completion`，不是 C 人工点击。新审查完成与 F 在同一 SQL 事务；重开立即使旧导出无效，再完成只准当前最终指针。旧任务不迁移、不改原历史。此次为兼容新增表，离线 contract 仍为 1；回滚须恢复同批数据库/存储，不能只回退源码。

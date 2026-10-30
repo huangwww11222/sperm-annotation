@@ -1,0 +1,55 @@
+/* Annotation-only content inside the shared WorkbenchShell (workbench/shell.css):
+   canvas internals, enhancement popover, per-frame object chips. */
+.annot-context{display:flex;align-items:center;gap:12px;min-width:0}
+.shell-annotate .annotation-view-body{flex:1;min-height:0}
+.shell-annotate .annotation-canvas{flex:1;min-height:0;display:flex;flex-direction:column;align-items:flex-start}
+.shell-annotate .canvas-scroll{padding:12px}
+.shell-annotate .loupe{right:auto;top:auto;left:12px;bottom:12px}
+.shell-annotate .canvas-status{top:auto;bottom:14px}
+/* The image scroll surface stays absolute. These overlay controls follow each
+   other in normal flow, so a wrapped toolbar never sits under its own popover. */
+.shell-annotate .annotation-canvas>.shell-tools{position:relative;left:auto;top:auto;margin:12px 12px 0;width:fit-content;flex:none}
+.annot-enhance{position:relative;left:auto;top:auto;margin:6px 12px 12px;width:fit-content;max-width:calc(100% - 24px);min-height:0;max-height:160px;flex:0 1 auto;overflow:auto;overscroll-behavior:contain;z-index:34;border:1px solid var(--line);border-radius:8px;box-shadow:0 6px 20px #0004;background:var(--surface)}
+.annot-coords{padding:0 8px;font-size:11px;color:#b9cad8;font-variant-numeric:tabular-nums;white-space:nowrap}
+.annot-time{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+
+.annot-inspector{display:flex;flex-direction:column;flex:1;min-height:0}
+.annot-inspector .pause-inspector-panel{border-bottom:1px solid var(--line)}
+.annot-inspector .ai-state{margin-left:auto}
+.annot-ai .tracking-warning-summary{margin:10px -14px -12px;padding:7px 14px}
+.annot-objects{flex:1;display:flex;flex-direction:column;min-height:200px;border-bottom:0}
+.annot-count{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.annot-split{margin-left:auto;display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted);white-space:nowrap}
+.annot-split i{width:8px;height:8px;border-radius:2px;margin-left:4px;background:var(--chip)}
+.annot-split i.manual,.annot-chip.manual{--chip:var(--a)}
+.annot-split i.ai,.annot-chip.ai{--chip:var(--b)}
+.annot-objects .object-selection{margin:10px -14px 0;padding:10px 14px;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.annot-objects .selection-context{flex-wrap:wrap;justify-content:flex-start}
+.annot-objects .object-no-selection{margin:0}
+.annot-chips{flex:1;min-height:0;overflow:auto;display:flex;flex-wrap:wrap;align-content:flex-start;gap:5px;padding-top:10px;overscroll-behavior:contain}
+.shell-annotate .annot-chip{flex:0 0 auto;display:inline-grid;place-items:center;min-width:36px;height:26px;padding:0 6px;gap:0;border-radius:5px;border:1px solid var(--line);border-left:3px solid var(--chip);background:var(--surface-subtle);color:var(--text);font-size:12px;font-variant-numeric:tabular-nums;text-align:center}
+.shell-annotate .annot-chip:hover:not(:disabled){background:var(--surface-hover)}
+.shell-annotate .annot-chip.selected{border-color:var(--selection);border-left-color:var(--selection);background:var(--warning-soft);font-weight:650}
+.annot-chips .sidebar-empty{width:100%;margin:6px 0;font-size:12px;color:var(--muted)}
+.annot-assets{display:flex;flex-direction:column;min-height:0}
+.annot-assets .asset-actions{padding:6px 12px 8px}
+.annot-assets .asset-card{padding:9px}
+.annot-assets .asset-type{height:30px}
+@media(max-width:1200px){.annot-time{display:none}}
+@media(max-width:700px){.annot-context{flex-wrap:wrap;row-gap:6px}}
+
+/* The shell owns focus positioning; its inner column must still scroll in a
+   short window instead of clipping the compact pause controls and frame bar. */
+.shell-annotate.is-focus .shell-center{height:100%;min-height:0;overflow-y:auto;overscroll-behavior:contain}
+.shell-annotate.is-focus .shell-canvas{flex:1;min-height:0}
+@media(max-width:700px){
+  .shell-annotate.is-focus .shell-focusbar{height:auto;min-height:44px;padding-top:6px;padding-bottom:6px}
+}
+@media(max-height:560px){
+  .shell-annotate.is-focus .shell-canvas{flex:0 0 auto}
+}
+
+/* Readable non-modal feedback; canvas coordinates and scroll stay unchanged. */
+.head-proposal-status { position:absolute; top:64px; right:12px; max-width:min(360px,80%); padding:8px 12px; border-radius:8px; background:var(--surface); color:var(--text); border:1px solid var(--line); z-index:12; display:flex; align-items:center; gap:8px; font-size:13px; }
+
+.annotation-page .edge-discovery-option { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; margin-block: 6px; }

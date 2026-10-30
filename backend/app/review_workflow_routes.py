@@ -2,7 +2,7 @@
 
 import logging
 import uuid
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Header, Request, HTTPException
 from fastapi.exceptions import RequestValidationError
@@ -97,7 +97,7 @@ def protocol(
     x_review_contract: str = Header(default=""),
     idempotency_key: str = Header(default=""),
 ):
-    if x_review_contract != "2":
+    if x_review_contract not in ("2", "3"):
         raise workflow.ReviewError(
             "CONTRACT_UPGRADE_REQUIRED", "请刷新页面使用新的审查版本", 428
         )
@@ -111,13 +111,22 @@ def protocol(
 Key = Annotated[str, Depends(protocol)]
 
 
+def contract_header(x_review_contract: str = Header(default='')):
+    return x_review_contract
+
+
+Contract = Annotated[str, Depends(contract_header)]
+
+
 class Model(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
 class Patch(Model):
     objectId: int = Field(strict=True, gt=0)
-    bbox: list[float] = Field(min_length=4, max_length=4)
+    bbox: list[float] | None = Field(default=None, min_length=4, max_length=4)
+    op: Literal['update', 'add', 'delete'] = 'update'
+    classKey: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class FrameVersion(Model):
@@ -130,6 +139,14 @@ class Edit(FrameVersion):
 
 class Complete(Model):
     expectedSessionRevision: int = Field(ge=0)
+
+
+class ReturnAnnotation(Complete):
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class AddObject(Complete):
+    classKey: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class ResetAnnotations(Model):
@@ -175,6 +192,23 @@ def withdraw(sid: str, body: Complete, user: User, key: Key):
     return workflow.write("withdraw", sid, user["uid"], key, body.model_dump())
 
 
+@router.get('/sessions/{sid}/objects')
+def objects(sid: str, user: User):
+    return workflow.get_objects(sid, user['uid'])
+
+
+@router.post('/sessions/{sid}/objects')
+def add_object(sid: str, body: AddObject, user: User, key: Key, contract: Contract):
+    return workflow.write('add_object', sid, user['uid'], key, body.model_dump(exclude_unset=True), contract=contract)
+
+
+@router.post('/sessions/{sid}/return-annotation')
+def return_annotation(sid: str, body: ReturnAnnotation, user: User, key: Key, contract: Contract):
+    from .review_source_lock import completion_read
+    with completion_read():
+        return workflow.write('return_annotation', sid, user['uid'], key, body.model_dump(), contract=contract)
+
+
 @router.get("/sessions/{sid}")
 def session(sid: str, user: User):
     return workflow.get_session(sid, user["uid"])
@@ -191,23 +225,23 @@ def frame(sid: str, fi: int, user: User):
 
 
 @router.put("/sessions/{sid}/frames/{fi}/draft")
-def draft(sid: str, fi: int, body: Edit, user: User, key: Key):
-    return workflow.write("draft", sid, user["uid"], key, body.model_dump(), fi)
+def draft(sid: str, fi: int, body: Edit, user: User, key: Key, contract: Contract):
+    return workflow.write("draft", sid, user["uid"], key, body.model_dump(exclude_unset=True), fi, contract=contract)
 
 
 @router.post("/sessions/{sid}/frames/{fi}/submit")
-def submit(sid: str, fi: int, body: Edit, user: User, key: Key):
-    return workflow.write("submit", sid, user["uid"], key, body.model_dump(), fi)
+def submit(sid: str, fi: int, body: Edit, user: User, key: Key, contract: Contract):
+    return workflow.write("submit", sid, user["uid"], key, body.model_dump(exclude_unset=True), fi, contract=contract)
 
 
 @router.post("/sessions/{sid}/frames/{fi}/discard")
-def discard(sid: str, fi: int, body: FrameVersion, user: User, key: Key):
-    return workflow.write("discard", sid, user["uid"], key, body.model_dump(), fi)
+def discard(sid: str, fi: int, body: FrameVersion, user: User, key: Key, contract: Contract):
+    return workflow.write("discard", sid, user["uid"], key, body.model_dump(), fi, contract=contract)
 
 
 @router.post("/sessions/{sid}/freeze")
-def complete(sid: str, body: Complete, user: User, key: Key):
-    return workflow.write("finish", sid, user["uid"], key, body.model_dump())
+def complete(sid: str, body: Complete, user: User, key: Key, contract: Contract):
+    return workflow.write("finish", sid, user["uid"], key, body.model_dump(), contract=contract)
 
 
 @router.put("/cursors")
@@ -244,6 +278,7 @@ class AnnotationComplete(Model):
     expectedSourceRevision: str
     confirmComplete: bool = Field(strict=True)
     explicitEmptyFrameRanges: list[EmptyRange] = Field(default_factory=list)
+    concentratedReview: bool = False
 
 
 def completion_context(media_id):
@@ -278,6 +313,24 @@ def annotation_complete(media_id: str, body: AnnotationComplete, user: User, key
 
     with completion_read():
         directory, video, info = completion_context(media_id)
-        return complete(
-            directory, video, media_id, user["uid"], key, body.model_dump(), info
-        )
+        payload = body.model_dump()
+        if not payload['concentratedReview']: payload.pop('concentratedReview')
+        return complete(directory, video, media_id, user["uid"], key, payload, info)
+
+
+@router.get('/sessions/{sid}/evidence')
+def review_evidence(sid: str, user: User):
+    from contextlib import closing
+    from .db import connect
+    from .concentrated_review import evidence
+    with closing(connect()) as c:
+        return evidence(c, workflow.session_row(c, sid))
+
+
+class ReopenReview(Complete):
+    frameIndex: int = Field(strict=True, ge=0)
+
+
+@router.post('/sessions/{sid}/reopen-review')
+def reopen_review(sid: str, body: ReopenReview, user: User, key: Key):
+    return workflow.write('reopen_review', sid, user['uid'], key, body.model_dump())

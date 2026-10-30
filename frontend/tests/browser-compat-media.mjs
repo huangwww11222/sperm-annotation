@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import { useLegacyBrowserAPIs } from './legacy-browser-profile.mjs'
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright')
+// The media list is a drawer that stays closed while a video is open.
+const openAsset=async(target,locator)=>{const toggle=target.getByTestId('toggle-workbench-library');for(let i=0;i<40;i++){if(await locator.isVisible()){try{await locator.click({timeout:1500});return}catch{}}else if(await toggle.isVisible())await toggle.click();await target.waitForTimeout(250)}await locator.click()}
 const fixture = JSON.parse(fs.readFileSync('work/browser-fixture.json'))
 const videoFile = process.env.COMPAT_VIDEO || 'work/e2e-confirm-ux-compat-storage/media/review-fixture/review-fixture.avi'
 assert(videoFile.includes('work/'), 'Only generated fixture videos may be uploaded by this test')
@@ -78,7 +80,7 @@ try {
   await page.reload(); await synced
   await row().waitFor({ state: 'detached' })
   check(true, 'authoritative server list removes stale cached media from another tab')
-  await page.locator('.asset-card').filter({ hasText: 'review-fixture.avi' }).click()
+  await openAsset(page,page.locator('.asset-card').filter({ hasText: 'review-fixture.avi' }))
   await loaded()
   await page.getByRole('button', { name: '完成标注并送审', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: '完成标注并送审' })

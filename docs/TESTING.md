@@ -1,5 +1,9 @@
 # 测试与日志排查
 
+## 2026-10-29 当前入口
+
+当前新流程为标注页直接导出；旧单向追踪和送审UI已移除，兼容用例通过命名明确的 legacy-tracking-probe / authenticated legacy complete API 验证底层恢复；不能将其记为新UI入口测试。新主流程必须从真实画框、首尾追踪到直接ZIP下载。test_annotation_export.py 覆盖来源完整性、显式空帧、版本/账号、原键重放、真实原视频ZIP与编辑后旧下载撤销。
+
 测试需要证明目标行为和核心边界；不要为纯文案反复跑 GPU，也不要以构建通过代替交互验证。
 
 ## 固定回归入口与发布门禁
@@ -12,7 +16,9 @@ npx --prefix frontend playwright install chromium
 python3 scripts/run_browser_regression.py --python work/review-venv/bin/python --channel chromium
 ```
 
-也可用本机 Chrome：`--channel chrome`。CI 使用已构建的 Python 3.12 后端镜像：`python3 scripts/run_browser_regression.py --backend-image annotation-ci-backend:cpu --channel chromium`。镜像模式仍使用独立 `work/e2e-confirm-ux-regression-*` 数据和单后端进程。`--critical-only` 仅用于定位问题，报告明确标记为子集，不能用于完整验收。
+也可用本机 Chrome：`--channel chrome`。CI 使用已构建的 Python 3.12 后端镜像：`python3 scripts/run_browser_regression.py --backend-image annotation-ci-backend:cpu --channel chromium`。镜像模式仍使用独立 `work/e2e-confirm-ux-regression-*` 数据和单后端进程。`--critical-only` 或可重复的 `--only <套件名>` 仅用于定位问题，不能同时使用，也不能用于完整验收。例如 `--only workbench-consistency --only independent-integrity` 只运行这两组；最终验收须去掉筛选参数重新运行全部十组。
+
+`run.json` 的 `requiredSuites` 始终列出十组固定范围，`selectedSuites` 记录本次实际选择，`scope` 区分完整与诊断运行。子集可记录本次 `status: passed`，但 `fullRegressionPassed` 仍为 `false`；只有未使用筛选参数的完整运行全部通过时才为 `true`。不能拼接分批通过记录代替同一批源码的一次完整回归。运行器在占用共享夹具锁前校验参数，初始化失败也清理自己取得的锁；其他进程持有的锁不得删除。
 
 固定套件：`critical-workflows`、`workflow-transitions`、`annotation-ux`、`tracking-recovery`、`review-failure`、`confirmation-failure`、`confirmation`、`training-export`、`workbench-consistency`、`independent-integrity`。每组前按依赖重建夹具；不得并行消费或重置共享夹具。执行记录、版本/未提交文件清单、各组退出状态、耗时与日志保存在该次隔离目录；失败会非零退出并记录尚未执行的范围，不能把旧报告当成本次结果。CI 保留服务/套件日志及截图子目录；夹具 JSON 可能包含 token，禁止上传。
 
@@ -62,6 +68,7 @@ APP_DB_FILE="$PWD/work/agent-test-data/app.db" \
 APP_STORAGE_DIR="$PWD/work/agent-test-storage" \
 PYTHONPATH=backend work/review-venv/bin/python -m pytest backend/tests -q
 
+npm run test:workbench --prefix frontend
 npm run test:compatibility --prefix frontend
 npm run test:annotation --prefix frontend
 npm run test:review --prefix frontend
@@ -72,6 +79,25 @@ npm run build --prefix frontend
 构建包含类型检查。已有混合静态/动态导入和 Python 弃用警告应与新错误区分，不能因为日志有 warning 就猜测业务失败。
 
 ## 按修改选择测试
+
+三路综合专项：`test_joint_tracking.py` 验证正向漂移实际修框、反向漂移保留正确输出、检测细化、已知身份找回、两侧缺失不补假框、检测缺失不删目标、内部未知候选不扩范围、自然重叠不合并、人工框与删除优先、30对象身份不变、全输入结构验证后才修改、原图/检测失败释放与恢复，以及 worker 失败保留几何/记录日志、缺端点启动不写seed。`test_endpoint_tracking.py` 仍验证旧仅核验兼容。固定 critical-workflows 的 endpoint-tracking-browser 验证 combineResults 原键恢复、实际中间几何来自综合而非复制正向、画面只有一套框、微调/撤销、整段删除/刷新/撤销、旧后端缺综合结果不假成功、送审冻结后的简短状态。浏览器模型均模拟；专项不能替代完整十组固定回归。
+
+综合回归同时覆盖隔帧漏检时不在10/16px之间闪烁（先保留失败证据），以及综合函数在修改工作副本后异常的注入：worker 仍只发布原有正向几何与失败标记，不能把部分综合框混入失败结果。真实模型观测可冻结后回放最终路径策略，和新神经推理分别记录。
+
+结果接口的综合失败/恢复状态和浏览器刷新后的持续提示成对验证；部分帧 checked 不能声称整段完成。最终完整浏览器回归期间固定业务源码，不让 Vite 热更新重置测试中的页面/工作区状态；有热更新干扰的失败记录保留，不能当作最终通过。
+
+真实模型组件验证在服务器 `runs/feasibility/JOINT-TRACKING-20261027-001/`，复用已有1.mp4原始80–90帧、4个提示对象；SAM3 和 YOLO 在既有独立环境顺序运行，不本机推理、不改环境。原生真实观测与受控漂移回放分开记录；提示来源是冻结AI测试夹具，不是人工首尾金标，不能将输出变化数当作准确率或医院验收。日志/图片/源码指纹下载到本地 work/joint-tracking/。
+
+人工首尾双向专项：`test_endpoint_tracking.py` 覆盖独立尾编号、多窗口真实帧映射、一对一/歧义拒绝、持续定位分歧、进出画未对应、空尾帧证据不足、模型失败/缺帧不通过、原正向框保留和人工端点校验；A 来源合并验证匹配尾框不重复、原始人工ID保留及尾框删除生效。正常/失败均使用隔离数据。固定 critical-workflows 追加 `endpoint-tracking-browser.mjs`：真实登录、导入独立视频、首尾画框/刷新、启动成功丢响应后原键原正文恢复、双向证据发表、尾帧无重复框、普通/专注与多尺寸浅深主题、真实送审并查看冻结证据。浏览器模型输出仍明确模拟，不能作疑点召回率验收。
+
+服务器组件验证样例位于本地 `work/endpoint-tracking/`，记录已有1.mp4短片段11帧/4对象的真实SAM3反追。其尾帧提示是已有AI观察测试夹具，不是用户人工金标；只验证模型/API/窗口映射可运行，不代表首尾人工标注后的查错准确率、全视频或医院验收。后续质量验收需要真实人工首尾与独立中间帧核对。
+
+三页观看操作专项：`npm run test:workbench --prefix frontend` 验证键位、4K适应边界和指针锚点；固定 `workbench-consistency` 调用 `workbench-shortcuts-checks.mjs`，在真实浏览器分别测A/B/C的加减/适应/组合滚轮、Space/中键平移、H显隐、F专注与G跳转、只读观看、输入/IME/帮助和导出弹窗隔离。B/C观看前后校验真实API几何/提交/决定不变；拖框/角点开始后不得被缩放打断，手势失焦/离页/弹窗复位，C局部倍率不改变全帧倍率。复现先保留旧B/C快捷键不改变图像尺寸的失败，再跑恢复与完整十组。截图保留1366/1180浅深及窄窗，使用占位滚动条（不使用--hide-scrollbars）验证ResizeObserver不会重置手动倍率。
+
+审查补标/删除/退回人工专项：`test_review_object_edits.py` 与 `test_confirmation_presence.py` 先在旧实现记录预期失败，再成对验证正常与故障恢复。覆盖稳定身份/跨帧补标、真实 rare sperm 类别继承/空A默认/多类必须选择、删除只影响本帧、撤销恢复、零净差量、分配ID/写入/退回事务失败与原键重放、旧协议防擦除、A及审查历史不变、退回后重送新任务、C接受/拒绝新增及删除、空帧与真实YOLO/COCO标签、缺席决定审计、重审继承及旧训练包门禁。前端 `test:review` 含 `review-presence.test.mjs` 与 `review-intent.test.mjs`（真实Vue函数、确定性API桩验证两阶段意图，不代替浏览器），`test:confirmation` 含null侧共享裁剪与选择文案测试。
+
+固定 `workflow-transitions` 还加载独立 `review_presence_browser_fixture.py` 并串行执行 `review-presence-browser.mjs`。使用合成真实视频、真实前后端和数据库，验证画框补标/关联已有对象、删除恢复/撤销/刷新、失败原键重试、逐帧提交/完成B、C八种存在性选择、真实ZIP内容及空标签、撤回不领取、整段退回后新A/任务、C本帧重审与历史留存；补标两阶段恢复额外覆盖：reserve成功丢响应、draft成功丢响应、刷新原键原正文重放、另一窗口已修框时不重新基于最新版本构造旧draft、旧回执后的当前态读取失败仍保留原意图。两窗口浅深主题及窄窗口截图保存在 `output/playwright/review-presence/`。它不运行模型推理，不能称为医院GPU验证。仍需完整十组固定回归，专项不能替代。
+
 
 整帧人工检查点专项：`test_tracking_frame_checkpoint.py` 验证一次确认含未报异常对象、已保存人工修框/新框优先、删除排除、固定基准替换与恢复、缺失/坏框/错误帧/版本冲突不部分提交、原子发布失败及原键恢复。固定 `independent-integrity` 的 tracking-policy 场景验证真实页面一次确认全部对象、刷新及续追；只有模型预测模拟。Windows 可使用 `backend/.venv/Scripts/python.exe scripts/run_browser_regression.py --python backend/.venv/Scripts/python.exe --channel chrome`，建议设置 `PYTHONUTF8=1`；运行器使用本机解释器、Vite 和自己启动的进程树，不终止已有开发服务。
 
@@ -101,6 +127,8 @@ work/review-venv/bin/python scripts/replay_tracking_pause_cases.py work/replay-i
 真实模型验收使用相同视频与首帧 JSON 的校验和，记录实际设备、dtype、代码校验和、每次暂停的首次风险帧/决定帧/原因、人工实验确认范围、主体位置与掩膜。先对保存的真实掩膜和原图复核关联，再重新运行 SAM3 到约定帧；两者分别报告。若现场工作区多加了对象或修过框，作为第二组输入说明，不能称其与原始首帧完全相同。零暂停本身不证明修复：必须同时确认主体没有换到邻居，并通过真实丢失、合并和严重覆盖遗漏的负向用例。Apple MPS、本机浏览器的模拟模型与医院 CUDA 分别记录，不互相替代。
 
 固定 `independent-integrity` 还调用 `tracking-focus-checks.mjs`：真实上传/画框/追踪进入暂停，验证初始单项、两项处理到最后一项、object 与 frame 的明确范围、正常/修正混合顺序、选择与选择工具联动、视野外框保持缩放并最小平移/视野内不移动、错帧先加载再定位、移动/缩放保存、主动检查其他框不抢选择、读帧失败/原位恢复、成功响应丢失刷新后原键原正文恢复、消失对象不能确认正常及同 ID 补框续追。两窗口浅深主题、专注/返回帧均验证。模型输出模拟；不从测试 UI 导入 store，不绕过反馈/版本保护。修复前失败截图与断言必须单独保留，不能被修复后复测覆盖。
+
+其中 `tracking-pause-layout-checks.mjs` 比较同一真实暂停前后的图像高度，验证普通模式的确认区实际位于右侧主操作区，专注模式使用紧凑操作条。1366×768、1180×760 浅深主题均核验至少 300 px 的可编辑图像高度、桌面紧凑条不超过 96 px、检查依据独立滚动且不覆盖图像、不改变图像高度。760×900、390×844、390×480 浅深主题同时检查普通/专注、增强画面、按钮中心命中和文字不溢出、至少 180 px 图像高度；小窗口允许滚动到操作区，不以容器存在代替可用性。手动放大后展开/收起依据及切换模式，实际比较渲染帧宽度、选中身份和视野位置，而不只比较倍率文字；居中图像刚变成可滚动时仍保持图像锚点、四边均可达。把真实选框滚到图像右下角后，核验浮动缩放控件仍在可见范围内；按住 Space 平移画面后，选框四角中心均能实际命中编辑层，视野操作不改变已保存坐标。从专注模式直接启动追踪的第一次暂停也核验实际帧尺寸，不能在 100% 文字不变时暗中重适应；依据刚打开即适应画面或改选对象时，旧异步视图恢复不能覆盖新操作；后续继续原有真实修框保存、最后一项定位和确认响应丢失后的原键重试，并核验普通/专注暂停中已保存正常确认的重置入口仍可用。`pause-evidence.test.mjs` 串联原有诊断和新可视展示，验证真实触发与 SOFT 辅助指标分离、缺失阈值不补默认比较尺、多个重叠伙伴及单位准确，展示不改写原始证据。真实现场历史暂停的截图应另行标明快照来源与回放方式；它不能代替该套新导入用户流程，也不等于重新执行 GPU 模型。
 
 | 修改面 | 后端/单元 | 浏览器 |
 | --- | --- | --- |
@@ -175,7 +203,7 @@ node frontend/tests/workspace-layout-browser.mjs
 
 `node frontend/tests/workbench-consistency-browser.mjs` 使用同一套 B/C/UX 夹具；`CONFIRMATION_ORIGIN` 可指定前端地址。检查三页在 1366×768、1180×760 及浅深主题下的共用区域、核心操作、列表独立滚动、跨页视频库收起和专注全宽、A/B 折叠详情的键盘行为、B 筛选定位与真实草稿、C 分组导航/回访、长文件名、45 项分页定位、说明隔离及零修改显式完成。C 完整帧还检查横竖源图四角与等比例显示、主图及局部图首屏大小、图上鼠标/键盘选择联动且不产生决定、未修改对象非交互、弹窗内图像读取和位置保存失败的分别重试。会写 B 草稿、消费 C main/zero，并浏览 many/portrait；后续 B/C 正常或故障脚本前必须重新生成对应夹具，不能并行重置同一批任务。
 
-该套件还覆盖 760×900、390×844：视频库搜索/筛选与列表分区，条目在实际裁剪区内可命中并真实切换，收起/展开后释放纵向空间，三页无页面横向溢出；字号、选框、帧/修改项往返、专注退出和桌面恢复均检查真实状态。C 窄屏完整帧在上、A/B 局部图在下且等比例显示。390 浅深主题的使用说明检查正文可读宽高、目录位置、Tab 焦点循环、业务快捷键隔离及 Esc 回焦点；不能只测容器存在、一次截图或 CSS 字符串。短高专注窗口额外检查 390×480、320×480 的暂停/未暂停 × 增强/无增强组合：实际滚动到确认、修正、帧跳转和退出并验证中心命中，不能让 `overflow:hidden` 裁掉核心操作；1366×768 对照不能出现新增的多余滚动。登录和标注记录的视觉复核还需含登录错误、记录空态/密集列表、查询筛选、表格自身横滚及分页，模拟记录要与真实API夹具明确区分。
+该套件还覆盖 760×900、390×844：视频库搜索/筛选与列表分区，条目在实际裁剪区内可命中并真实切换，收起/展开后释放纵向空间，三页无页面横向溢出；字号、选框、帧/修改项往返、专注退出和桌面恢复均检查真实状态。C 窄屏完整帧在上、A/B 局部图在下且等比例显示。390 浅深主题的使用说明检查正文可读宽高、目录位置、Tab 焦点循环、业务快捷键隔离及 Esc 回焦点；不能只测容器存在、一次截图或 CSS 字符串。短高专注窗口额外检查 390×480、320×480 的暂停/未暂停 × 增强/无增强组合：实际滚动到确认、修正、帧跳转和退出并验证中心命中，不能让 `overflow:hidden` 裁掉核心操作；1366×768 对照不能出现新增的多余滚动。登录和标注记录的视觉复核还需含登录错误、记录空态/密集列表、查询筛选、表格自身横滚及分页，模拟记录要与真实API夹具明确区分。 同时将实际进度组件样式移到最后加载，并在窄屏已有页面滚动时核验进度卡不遮视频入口、条目中心仍真实命中，导航前后不产生新的选择或确认决定。
 
 该固定套件同时执行 `review-zoom-checks.mjs`，验证审查页的自动适应与手动缩放：连续放大、缩小后再放大超过初始倍率；手动倍率在换帧、滚动条出现、收起视频列表及窗口变化后保留；显式“适应窗口”恢复自动模式，随后窗口变化继续自适应；切换视频重新适应。缩放不得改变框的原图坐标、草稿或提交进度。占位式滚动条会改变 viewport 的可用尺寸，必须与不占位滚动条的正常场景成对测试；仅在默认无占位的无头浏览器里点击一次放大不能替代。固定用例关闭无头浏览器默认的隐藏滚动条选项，只在测试页面设置 15 px 占位滚动条，并断言真实占位宽度，不模拟 ResizeObserver 或缩放状态。`REVIEW_ZOOM_NATIVE_SCROLLBARS=1` 可省略测试样式，作为系统原生环境对照。真实可见 Chrome 中按相同步骤复测，保存操作前后截图与倍率、SVG/viewport 尺寸记录，保留修复前失败证据。固定套件还检查至少 120% 手动倍率下真实拖框的原图坐标换算、保存与撤销。旧 API 配置与 macOS 可见 Chrome 验证不等于医院真实 Windows / Chrome 93 引擎验收。
 
@@ -333,3 +361,23 @@ work/review-venv/bin/python -m pytest backend/tests/test_quality_audit.py backen
 interop 夹具生成真实 YOLO/COCO/双格式、多视频及重新确认前后的完整训练包和一份运维审计包。独立统计仓库检出到 `标注统计/` 时，将 `ANNOTATION_AUDIT_INTEROP_DIR` 指向该绝对目录，在统计仓库的 PYTHONPATH 下运行它的 pytest；两个进程不共用名为 app 的模块。没有设置联调路径时用例明确跳过。统计真实浏览器入口及运行方式见该仓库当前说明。
 
 容器 smoke 可设置 `SMOKE_STATE_FILE` 指向本次隔离 work 目录，避免覆盖其他测试的令牌文件。CPU 容器生成训练集后，用 `export-audit.sh` 实际提取，再让统计 CLI 导入；测试包含只读连接、输出拒绝覆盖、失败无半包，以及升级/恢复时运维脚本一起还原。
+
+### 点选头部
+
+`backend/tests/test_head_click.py` 覆盖偏差点击、歧义、空/损坏候选、精确帧、认证、越界与不写工作区；固定 annotation-ux 浏览器组覆盖点击创建、撤销重做、重复点击、失败/损坏结果和切帧/切工具/离开页面的迟到响应，以及拖出画面后仍可缩放、微调和专注模式。浏览器推理响应为模拟，不代表真实模型质量。真实模型测试仅在训练服务器独立目录运行，本地只检查日志与图像；不要在用户业务数据上测试。
+
+### 边缘入画发现
+
+`backend/tests/test_edge_entry.py` 覆盖连续向内运动、初始/内部目标、静止/相机平移/低置信度/已有对象/向外运动/歧义/坏输入拒绝、跨轮候选恢复、SAM3提示接续不重复帧、稳定ID避开删除墓碑、实际JSONL补帧和推理失败保留旧结果。局部模型输出为模拟；真实模型仅在训练服务器独立目录核验，不能据这些测试宣称运动能准确识别精子。固定annotation-ux组检查开关及刷新保存，tracking-recovery组验证开关随原任务/重试正文传递；仍须完整十组浏览器回归。
+
+## 集中审查首版
+
+专项 `test_concentrated_review.py` / `test_concentrated_review_extra.py`：先记录旧行为失败，再验证疑点分组、检测器缺失/重叠不等于判错、失败不得默认为检查完成、连续追踪不质量暂停、内部 AI 接续不造人工 seed、完成审查直接 F、事务失败/原键恢复、重开帧后旧 F 永久失效、旧 C 不能修改新接受版本。
+
+固定 critical-workflows 使用真实新页面发送 concentratedReview/reviewMode，验证疑点浏览不提交、完整逐帧审查、直接下载 ZIP、重新审查关闭导出。其余旧 C 与暂停专项明确验证历史兼容：旧暂停场景请求显式 reviewMode=false，不把旧暂停当新流程。浏览器服务同时模拟 SAM3 和检测器，禁止本机回归加载真实头部权重。必须运行完整十组，不能用模型组件实验替代。
+
+真实模型仅在服务器独立实验目录执行；短片段正反向成功只能证明算子与数据链路可运行，不表示疑点检出率、假阴性或医院验收通过。
+
+标注直接导出健康路径不得出现“导出当前标注”确认层或额外勾选；后台保存、来源读取、快照创建后直接进入设置。仅未知帧显示声明空帧输入，故障显示具体错误和重试。快照已提交但响应丢失时刷新须保留锁并原键回放；重放优先于来源锁 / 视频读取，随后恢复已有 ZIP 任务。真实 ZIP 检查包括图片、空标签、人工覆盖、annotationOnly 来源与修改后旧包失效。浏览器模型仍为模拟，不声称真实 GPU 精度验收。
+
+首尾重框回归：test_endpoint_duplicate_output.py 覆盖紧人工框/松AI框导致低IoU、连续时序恢复、自然双头竞争不合并、仅单帧重叠拒绝匹配、尾ID撞号、明确空尾帧、失败/历史策略保护，以及结果API/JSONL/导出/删除的一致性。实际冻结观察仅放 work/endpoint-duplicate-fix，标注为真实结果回放，不称为新模型推理或标注精度验收。

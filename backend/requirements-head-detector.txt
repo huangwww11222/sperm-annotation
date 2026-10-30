@@ -1,0 +1,3 @@
+# Optional click-to-head detector; install alongside backend/requirements.txt.
+ultralytics==8.4.183
+opencv-python>=4.8,<5

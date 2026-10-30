@@ -6,6 +6,7 @@ idempotency receipt, commits in one SQLite transaction with optimistic versions.
 
 import json
 import logging
+import math
 import sqlite3
 import uuid
 from contextlib import closing
@@ -102,6 +103,11 @@ def integrity(c, s):
 
 
 def change_metrics(a, b):
+    if a is None or b is None:
+        if a is None and b is None:
+            raise ReviewError("INVALID_CHANGES", "修改项的原始与审查标注不能同时缺失")
+        return dict(iou=None, centerShiftPx=None, deltaCenterX=None, deltaCenterY=None,
+                    deltaWidth=None, deltaHeight=None, changeType="补标" if a is None else "删除")
     metrics = box_metrics(a, b)
     if metrics:
         # Prototype classifies position by the center, so a concentric resize is size-only.
@@ -146,6 +152,7 @@ def changes(c, s, change_id=None):
                 annotationId=r["annotation_id"],
                 beforeBbox=a,
                 afterBbox=b,
+                changeKind="add" if a is None else "delete" if b is None else "update",
                 metrics=change_metrics(a, b),
                 decisionRevision=revisions.get(r["id"], 0),
                 decision=dict(choice=r["choice"], eventId=r["event_id"])
@@ -182,6 +189,18 @@ def session_data(c, s, uid):
     ).fetchone()
     action = last_action(c, s)
     returned = c.execute("SELECT * FROM review_return_events WHERE confirmation_id=? ORDER BY rowid DESC LIMIT 1", (s["id"],)).fetchone()
+    returned_review = None
+    if returned:
+        review_state = c.execute("SELECT state FROM review_sessions WHERE id=?", (returned['session_id'],)).fetchone()
+        returned_to_annotation = bool(review_state and review_state['state'] == 'returned_to_annotation')
+        annotation_return = c.execute("SELECT reason FROM review_annotation_returns WHERE session_id=? ORDER BY rowid DESC LIMIT 1", (returned['session_id'],)).fetchone() if returned_to_annotation else None
+        returned_review = dict(
+            frameIndex=returned['frame_index'], reason=returned['reason'],
+            reviewSessionId=returned['session_id'], nextConfirmationId=returned['next_confirmation_id'],
+            reviewState=review_state['state'] if review_state else None,
+            returnedToAnnotation=returned_to_annotation,
+            annotationReturnReason=annotation_return['reason'] if annotation_return else None,
+        )
     return dict(
         id=s["id"],
         baselineId=s["baseline_id"],
@@ -214,8 +233,7 @@ def session_data(c, s, uid):
             canExport=fv is not None and s["state"] == "confirmed",
             canReturn=active and own and bool(total),
         ),
-        returnedReview=dict(frameIndex=returned["frame_index"], reason=returned["reason"],
-                           reviewSessionId=returned["session_id"], nextConfirmationId=returned["next_confirmation_id"]) if returned else None,
+        returnedReview=returned_review,
         resume=dict(
             lastViewedChangeId=bookmark["change_id"] if bookmark else None,
             cursorRevision=bookmark["revision"] if bookmark else 0,
@@ -239,7 +257,9 @@ def list_sessions(uid):
         return [
             session_data(c, session_row(c, r[0]), uid)
             for r in c.execute(
-                "SELECT id FROM confirmation_sessions ORDER BY created_at DESC,id DESC"
+                """SELECT cs.id FROM confirmation_sessions cs JOIN review_versions rv ON rv.id=cs.review_version_id
+                WHERE NOT EXISTS(SELECT 1 FROM concentrated_reviews r WHERE r.session_id=rv.session_id)
+                ORDER BY cs.created_at DESC,cs.id DESC"""
             )
         ]
 
@@ -337,7 +357,7 @@ def next_pending(c, s, selected=None):
     return first[0] if first else None
 
 
-def write(action, sid, uid, key, body, change_id=None, response_mode='full'):
+def write(action, sid, uid, key, body, change_id=None, response_mode='full', client_contract='3'):
     h = digest(["confirmation", action, sid, change_id, body])
     try:
         with closing(connect()) as c, c:
@@ -361,6 +381,17 @@ def write(action, sid, uid, key, body, change_id=None, response_mode='full'):
                 )
                 return json.loads(old["response_json"])
             s = session_row(c, sid)
+            # A frozen add/delete has a genuinely absent side. An older page
+            # cannot explain what its generic A/B button would accept. Replays
+            # remain valid because their immutable receipt is checked first.
+            if client_contract != '3' and action in ('decide', 'finish', 'return', 'undo', 'reopen') and c.execute(
+                "SELECT 1 FROM review_changes WHERE review_version_id=? AND (before_bbox='null' OR after_bbox='null') LIMIT 1",
+                (s['review_version_id'],),
+            ).fetchone():
+                raise ReviewError("CONTRACT_UPGRADE_REQUIRED", "此任务包含补标或删除，请刷新页面后再确认", 428)
+            from .concentrated_review import info as concentrated_info
+            if concentrated_info(c, s['review_session_id']) and action != 'cursor':
+                raise ReviewError('REVIEW_ACCEPTANCE_ONLY', '此任务在审查页完成最终验收，请返回审查页操作')
             selected = change_id
             if action == "claim":
                 if s["confirmer_id"] not in (None, uid):
@@ -558,6 +589,28 @@ def return_frame(c, s, uid, body):
     log.info("confirmation.frame_returned confirmation=%s review=%s frame=%s actor=%s", s["id"], rs["id"], item["frame_index"], uid)
 
 
+def frozen_object_map(objects, s, fi):
+    """Validate snapshot identities before any A/B presence decision is applied."""
+    if not isinstance(objects, list):
+        raise ReviewError("INVALID_FROZEN_VERSION", "固定帧的对象列表无效")
+    result = {}
+    for obj in objects:
+        if not isinstance(obj, dict) or type(obj.get('objectId')) is not int or obj['objectId'] <= 0:
+            raise ReviewError("INVALID_FROZEN_VERSION", "固定帧的对象身份无效")
+        oid = obj['objectId']
+        box, category = obj.get('bbox'), obj.get('classKey', 'sperm')
+        if oid in result:
+            raise ReviewError("INVALID_FROZEN_VERSION", "固定帧包含重复对象")
+        if not isinstance(category, str) or not category.strip():
+            raise ReviewError("INVALID_FROZEN_VERSION", "固定帧的对象类别无效")
+        if not isinstance(box, list) or len(box) != 4 or any(type(v) not in (int, float) or not math.isfinite(v) for v in box) or not (0 <= box[0] < box[2] <= s['width'] and 0 <= box[1] < box[3] <= s['height']):
+            raise ReviewError("INVALID_FROZEN_VERSION", "固定帧的标注框无效或越界")
+        if obj.get('annotationId') is not None and (not isinstance(obj['annotationId'], str) or not obj['annotationId'].strip()):
+            raise ReviewError("INVALID_FROZEN_VERSION", "固定帧的标注来源无效")
+        result[oid] = {**obj, 'classKey': category}
+    return result
+
+
 def finalize(c, s, uid):
     items = changes(c, s)
     if any(x["decision"] is None for x in items):
@@ -567,43 +620,67 @@ def finalize(c, s, uid):
         raise ReviewError("INVALID_CHANGES", "固定 B 包含重复修改项")
     output = []
     matched = set()
+    contexts = [frame_context(c, s, fi) for fi in range(s['frame_count'])]
+    # Historical geometry-only tasks may predate the catalog; their baseline
+    # remains the authority for previously known identities. New B identities
+    # must have been allocated by this review task, never inferred from a box.
+    catalog = {}
+    if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_object_catalog'").fetchone():
+        catalog = {r['object_id']: r['class_key'] for r in c.execute("SELECT object_id,class_key FROM review_object_catalog WHERE session_id=?", (s['review_session_id'],))}
+    baseline_classes = {}
+    for ctx in contexts:
+        for oid, obj in frozen_object_map(ctx['baselineObjects'], s, ctx['frameIndex']).items():
+            baseline_classes.setdefault(oid, set()).add(obj['classKey'])
     for fi in range(s["frame_count"]):
-        context = frame_context(c, s, fi)
-        a = context["baselineObjects"]
-        b = {o["objectId"]: o for o in context["reviewObjects"]}
-        if len(a) != len(b) or {o["objectId"] for o in a} != set(b):
-            raise ReviewError("INVALID_FROZEN_VERSION", "A/B 对象集合不一致")
+        context = contexts[fi]
+        a = frozen_object_map(context['baselineObjects'], s, fi)
+        b = frozen_object_map(context['reviewObjects'], s, fi)
         objects = []
-        for obj in a:
-            other = b[obj["objectId"]]
-            key = (fi, obj["objectId"])
+        for oid in sorted(a.keys() | b.keys()):
+            obj, other = a.get(oid), b.get(oid)
+            before_box, after_box = obj['bbox'] if obj else None, other['bbox'] if other else None
+            canonical = f"{s['baseline_id']}:f{fi}:o{oid}"
+            baseline_id = obj.get('annotationId') or canonical if obj else canonical
+            review_id = other.get('annotationId') or canonical if other else canonical
+            key = (fi, oid)
             change = by_key.get(key)
-            if obj.get("classKey") != other.get("classKey"):
+            if obj and other and obj['classKey'] != other['classKey']:
                 raise ReviewError("INVALID_FROZEN_VERSION", "A/B 类别不一致")
+            if obj and other and review_id not in (canonical, baseline_id):
+                raise ReviewError("INVALID_FROZEN_VERSION", "A/B 标注来源与对象身份不一致")
+            if obj is None and review_id != canonical:
+                raise ReviewError("INVALID_FROZEN_VERSION", "补标对象的标注来源与身份不一致")
+            if obj is None and (other['classKey'] not in baseline_classes.get(oid, set()) and catalog.get(oid) != other['classKey']):
+                raise ReviewError("INVALID_FROZEN_VERSION", "补标对象的身份或类别未在此审查任务登记")
             if change:
                 if (
-                    obj["bbox"] != change["beforeBbox"]
-                    or other["bbox"] != change["afterBbox"]
-                    or obj["bbox"] == other["bbox"]
+                    before_box != change["beforeBbox"]
+                    or after_box != change["afterBbox"]
+                    or before_box == after_box
+                    or change['annotationId'] not in (canonical, baseline_id if obj else review_id)
                 ):
                     raise ReviewError(
-                        "INVALID_FROZEN_VERSION", "修改项与固定 A/B 几何不一致"
+                        "INVALID_FROZEN_VERSION", "修改项与固定 A/B 标注或来源不一致"
                     )
                 choice = change["decision"]["choice"]
                 matched.add(key)
             else:
-                if obj["bbox"] != other["bbox"]:
+                if before_box != after_box:
                     raise ReviewError("INVALID_CHANGES", "固定 B 存在未列出的修改项")
                 choice = None
+            selected = other if choice == 'B' else obj
+            if selected is None:
+                # Absence is a decision, never a zero-sized training label.
+                # The complete choice is kept in confirmation_final_records.
+                continue
             objects.append(
                 dict(
-                    objectId=obj["objectId"],
-                    annotationId=other.get("annotationId")
-                    or f"{s['baseline_id']}:f{fi}:o{obj['objectId']}",
-                    classKey=obj.get("classKey", "sperm"),
-                    bbox=other["bbox"] if choice == "B" else obj["bbox"],
-                    baselineBBox=obj["bbox"],
-                    reviewBBox=other["bbox"],
+                    objectId=oid,
+                    annotationId=(other or obj).get('annotationId') or canonical,
+                    classKey=selected['classKey'],
+                    bbox=selected['bbox'],
+                    baselineBBox=before_box,
+                    reviewBBox=after_box,
                     choice=choice,
                     resolution="adopted_b"
                     if choice == "B"
@@ -667,6 +744,7 @@ def finalize(c, s, uid):
         "UPDATE confirmation_sessions SET state='confirmed',revision=revision+1 WHERE id=?",
         (s["id"],),
     )
+    log.info("confirmation.finalized session=%s final=%s frames=%s objects=%s add=%s delete=%s actor=%s", s['id'], vid, len(output), sum(len(f['objects']) for f in output), sum(x['changeKind'] == 'add' for x in items), sum(x['changeKind'] == 'delete' for x in items), uid)
 
 
 def final_data(vid):
@@ -710,4 +788,5 @@ def final_data(vid):
             if record
             else None,
             frames=frames,
+            decisionRecords=json.loads(record['decision_snapshot_json']) if record else [],
         )

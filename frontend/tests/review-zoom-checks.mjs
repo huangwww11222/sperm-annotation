@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import { useLegacyBrowserAPIs } from './legacy-browser-profile.mjs'
+// The task list is a drawer that stays closed while a task is open.
+const openTask=async(target,selector)=>{const card=target.locator(selector),toggle=target.getByTestId('toggle-workbench-library');for(let i=0;i<40;i++){if(await card.isVisible()){try{await card.click({timeout:1500});return}catch{}}else if(await toggle.isVisible())await toggle.click();await target.waitForTimeout(250)}await card.click()}
 
 // This is a real layout control for tests, not a mocked ResizeObserver or zoom
 // value: Chromium creates a 15px occupying scrollbar when the image overflows.
@@ -48,22 +50,22 @@ export async function reviewZoomChecks({ page, fixture, origin, check, output = 
   const screenshot = name => page.screenshot({ path: `${output}/${name}.png`, animations: 'disabled' })
   const go = async index => {
     await page.getByRole('textbox', { name: '跳转帧号' }).fill(String(index + 1))
-    await button('确定').click()
-    await page.locator('.review-center .section-head').filter({ hasText: `第 ${index + 1} /` }).waitFor()
+    await page.getByRole('textbox', { name: '跳转帧号' }).press('Enter')
+    await page.locator('.shell-context').filter({ hasText: `第 ${index + 1} /` }).waitFor()
     await page.waitForFunction(() => !document.querySelector('[data-testid="submit-frame"]')?.textContent.includes('处理中'))
   }
   const before = await businessState()
   try {
     await page.setViewportSize({ width: 1366, height: 768 })
     if (process.env.REVIEW_ZOOM_NATIVE_SCROLLBARS !== '1') scrollbarStyle = await page.addStyleTag({ content: classicScrollbars })
-    await button('适应窗口').click()
+    await button('适应画面').click()
     const initial = await snapshot('initial-fit')
     fitContained(initial, 'initial fit')
     await screenshot('01-initial-fit')
     let current = initial
     for (let index = 0; index < 5; index++) {
       const expected = Math.min(5, current.zoom + .1)
-      await button('放大').click()
+      await button('放大画面').click()
       current = await snapshot(`plus-${index + 1}`)
       await screenshot(`02-plus-${index + 1}`)
       expectZoom(current, expected, `plus ${index + 1}`)
@@ -72,12 +74,12 @@ export async function reviewZoomChecks({ page, fixture, origin, check, output = 
     if (scrollbarStyle) check(current.scrollbarWidth >= 14 || current.scrollbarHeight >= 14, 'regression controls create actual occupying scrollbars, including in headless Chrome')
     while (current.zoom > Math.max(.1, initial.zoom - .1) + .00001) {
       const expected = Math.max(.1, current.zoom - .1)
-      await button('缩小').click(); current = await snapshot('minus')
+      await button('缩小画面').click(); current = await snapshot('minus')
       expectZoom(current, expected, 'minus')
     }
     for (let index = 0; index < 5 && current.zoom <= initial.zoom + .2; index++) {
       const expected = Math.min(5, current.zoom + .1)
-      await button('放大').click(); current = await snapshot('plus-after-minus')
+      await button('放大画面').click(); current = await snapshot('plus-after-minus')
       expectZoom(current, expected, 'enlarge after shrinking')
     }
     check(current.zoom > initial.zoom + .1, 'shrinking and enlarging again passes the original fitted size')
@@ -91,7 +93,7 @@ export async function reviewZoomChecks({ page, fixture, origin, check, output = 
     await toggle.click(); expectZoom(await snapshot('toggle-library'), manual, 'library layout change')
     await screenshot('04-manual-small-window-library-toggle')
     await toggle.click()
-    await button('适应窗口').click()
+    await button('适应画面').click()
     const fittedSmall = await snapshot('explicit-fit-small')
     fitContained(fittedSmall, 'explicit fit')
     check(fittedSmall.zoom < manual, 'the explicit fit button restores the complete image after manual enlargement')
@@ -112,15 +114,15 @@ export async function reviewZoomChecks({ page, fixture, origin, check, output = 
       const original = sessions.find(item => item.id === fixture.sid)
       const alternate = sessions.find(item => item.id !== fixture.sid && item.state === 'reviewed')
       check(!!alternate, 'shared fixtures include a different completed review video for source-switch checks')
-      await button('放大').click(); await snapshot('manual-before-video-switch')
-      await page.locator(`[data-session-id="${alternate.id}"]`).click()
-      await page.locator('.review-center .section-head').filter({ hasText: alternate.media.name }).waitFor()
+      await button('放大画面').click(); await snapshot('manual-before-video-switch')
+      await openTask(page,`[data-session-id="${alternate.id}"]`)
+      await page.locator('.shell-context').filter({ hasText: alternate.media.name }).waitFor()
       await page.locator('.review-drawing').waitFor()
       if (await page.getByRole('dialog').count()) await page.getByRole('dialog').getByRole('button', { name: '关闭', exact: true }).click()
       fitContained(await snapshot('different-video-initial-fit'), 'switching to a different video')
-      await button('放大').click(); await snapshot('alternate-video-manual')
-      await page.locator(`[data-session-id="${fixture.sid}"]`).click()
-      await page.locator('.review-center .section-head').filter({ hasText: original.media.name }).waitFor()
+      await button('放大画面').click(); await snapshot('alternate-video-manual')
+      await openTask(page,`[data-session-id="${fixture.sid}"]`)
+      await page.locator('.shell-context').filter({ hasText: original.media.name }).waitFor()
       await page.waitForFunction(() => !document.querySelector('[data-testid="submit-frame"]')?.textContent.includes('处理中'))
       await page.locator('.review-drawing').waitFor()
       if (await page.getByRole('dialog').count()) await page.getByRole('dialog').getByRole('button', { name: '关闭', exact: true }).click()
@@ -139,14 +141,14 @@ export async function reviewZoomChecks({ page, fixture, origin, check, output = 
       localStorage.setItem('rare-sperm-auth', JSON.stringify({ id: '3', name: 'review-C', role: 'annotator' }))
     }, fixture.thirdToken)
     await readonlyPage.goto(origin + '/review')
-    await readonlyPage.locator(`[data-session-id="${fixture.sid}"]`).click()
+    await openTask(readonlyPage,`[data-session-id="${fixture.sid}"]`)
     await readonlyPage.locator('.review-drawing').waitFor()
     if (await readonlyPage.getByRole('dialog').count()) await readonlyPage.getByRole('dialog').getByRole('button', { name: '关闭', exact: true }).click()
     if (scrollbarStyle) await readonlyPage.addStyleTag({ content: classicScrollbars })
-    await readonlyPage.getByRole('button', { name: '适应窗口', exact: true }).click()
+    await readonlyPage.getByRole('button', { name: '适应画面', exact: true }).click()
     const readonlyInitial = await snapshot('readonly-fit', readonlyPage)
-    check(await readonlyPage.getByTestId('submit-frame').isDisabled() && (await readonlyPage.locator('.zoom-bar').innerText()).includes('只读查看'), 'another account remains read only while its image controls are available')
-    await readonlyPage.getByRole('button', { name: '放大', exact: true }).click()
+    check(await readonlyPage.getByTestId('submit-frame').isDisabled() && (await readonlyPage.locator('.shell-alerts').innerText()).includes('仅可查看'), 'another account remains read only while its image controls are available')
+    await readonlyPage.getByRole('button', { name: '放大画面', exact: true }).click()
     expectZoom(await snapshot('readonly-plus', readonlyPage), Math.min(5, readonlyInitial.zoom + .1), 'read only enlargement')
     await readonlyPage.screenshot({ path: `${output}/06-readonly-zoom.png`, animations: 'disabled' })
     check(readonlyErrors.length === 0, 'read only image controls have no browser runtime errors')
@@ -160,7 +162,7 @@ export async function reviewZoomChecks({ page, fixture, origin, check, output = 
     if (readonlyPage) await readonlyPage.close()
     if (scrollbarStyle) await scrollbarStyle.evaluate(style => style.remove())
     await page.setViewportSize({ width: 1366, height: 768 })
-    await button('适应窗口').click()
+    await button('适应画面').click()
     await page.waitForTimeout(250)
     page.off('request', recordMutation)
   }

@@ -8,7 +8,7 @@ from pydantic import Field
 
 from . import training_export as export
 from .review_workflow import ReviewError
-from .review_workflow_routes import Key, LoggedRoute, Model, User
+from .review_workflow_routes import Key, LoggedRoute, Model, User, AnnotationComplete
 
 router = APIRouter(prefix="/api/datasets", tags=["datasets"], route_class=LoggedRoute)
 legacy_router = APIRouter(tags=["datasets"], route_class=LoggedRoute)
@@ -27,6 +27,10 @@ class Export(Selection):
 
 @router.post("/exports/preview")
 def preview(body: Selection, user: User):
+    from contextlib import closing
+    from .db import connect
+    from .annotation_export import authorize
+    with closing(connect()) as c: authorize(c, body.finalVersionIds, user["uid"])
     return export.preview(body.finalVersionIds)
 
 
@@ -53,3 +57,15 @@ def retired(user: User):
         "人工标注阶段不能导出训练数据集。请完成审查和对比确认后，在对比确认页导出。",
         410,
     )
+
+
+@router.post('/annotations/{media_id}/snapshot')
+def annotation_snapshot(media_id: str, body: AnnotationComplete, user: User, key: Key):
+    from .annotation_export import freeze, replay
+    from .review_workflow_routes import completion_context
+    from .review_source_lock import completion_read
+    prior=replay(user['uid'],key,media_id,body.model_dump())
+    if prior is not None: return prior
+    with completion_read():
+        directory, video, info = completion_context(media_id)
+        return freeze(directory, video, media_id, user['uid'], key, body.model_dump(), info)

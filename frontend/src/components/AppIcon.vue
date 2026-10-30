@@ -14,6 +14,8 @@ const paths: Record<string, string> = {
   help: 'M9 8a3 3 0 0 1 6 0c0 3-3 2-3 5m0 3v1M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0Z',
   check: 'm5 12 4 4L19 6', trash: 'M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7',
   play: 'm7 4 14 8-14 8V4Z', pause: 'M8 4v16M16 4v16', layers: 'm12 3 10 6-10 6L2 9l10-6Zm-10 11 10 6 10-6',
+  copy: 'M9 9h11v11H9V9ZM5 15H4V4h11v1', panel: 'M3 4h18v16H3V4Zm12 0v16', hash: 'M5 9h14M5 15h14M10 3 8 21M16 3l-2 18',
+  prev: 'M15 5 8 12l7 7', next: 'm9 5 7 7-7 7',
 }
 </script>
 <template><svg :width="size || 18" :height="size || 18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path :d="paths[name] || paths.box" /></svg></template>

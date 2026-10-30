@@ -6,7 +6,7 @@
 
 | 文档 | 唯一职责 | 何时阅读 |
 | --- | --- | --- |
-| [WORKFLOW.md](WORKFLOW.md) | A → B → C → F → 训练集；状态、权限、数据流、验收边界 | 所有业务修改前 |
+| [WORKFLOW.md](WORKFLOW.md) | 人工标注 → 集中审查 → F → 训练集；兼容历史 C；状态、权限、数据流、验收边界 | 所有业务修改前 |
 | [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) | 实际代码地图、启动、配置入口和兼容层 | 接手项目、找实现 |
 | [ANNOTATION.md](ANNOTATION.md) | 人工标注、稳定 ID、追踪回退、画布、快捷键与性能 | 改标注体验或追踪 |
 | [API.md](API.md) | 当前路由、结构、并发/幂等/错误规则及源码入口 | 改接口、数据结构 |

@@ -1,8 +1,11 @@
+import {legacyTrackingProbe} from './legacy-tracking-probe.mjs'
 // Real 4K source/workspace APIs. Model responses and lost HTTP replies are injected.
 import fs from 'node:fs'
 import assert from 'node:assert/strict'
 import { publishTrackingFixture, trackingRestartChecks } from './tracking-restart-checks.mjs'
 const {chromium}=await import(process.env.PLAYWRIGHT_MODULE||'playwright')
+// The media list is a drawer that stays closed while a video is open.
+const openAsset=async(target,locator)=>{const toggle=target.getByTestId('toggle-workbench-library');for(let i=0;i<40;i++){if(await locator.isVisible()){try{await locator.click({timeout:1500});return}catch{}}else if(await toggle.isVisible())await toggle.click();await target.waitForTimeout(250)}await locator.click()}
 const fixture=JSON.parse(fs.readFileSync('work/tracking-recovery-fixture.json'))
 assert(fixture.directory.replaceAll('\\','/').includes('/work/e2e-confirm-ux-'))
 const origin=process.env.CONFIRMATION_ORIGIN||'http://127.0.0.1:5387'
@@ -36,7 +39,7 @@ try{
   await page.route('**/api/track/media',async route=>{const r=await route.fetch(),data=await r.json();data.items=data.items.filter(m=>m.mediaId===fixture.mid);await route.fulfill({response:r,json:data})})
   await page.route('**/api/track/rewind',async route=>{if(rewindTimeout){await delay(700);try{await route.fulfill({json:{removedRows:0,deletedFutureSeedFiles:0}})}catch{};return}await route.continue()})
   await page.route('**/api/track',async route=>{
-    const key=route.request().headers()['idempotency-key'],body=route.request().postDataJSON();starts.push({key,body})
+    const key=route.request().headers()['idempotency-key'],body=route.request().postDataJSON();starts.push({key,body});assert.equal(body.edgeDiscovery,true,'edge discovery follows original tracking request and retries')
     if(!receipts.has(key)){
       const last=Math.min(7,body.startFrame+2),taskId='recovery-'+(++job)
       receipts.set(key,{taskId,status:'queued',maxFrames:last-body.startFrame+1});taskStates.set(taskId,{last,start:body.startFrame})
@@ -61,9 +64,10 @@ try{
     await route.continue()
   })
   await page.goto(origin+'/annotate');await attach();await idle()
-  await page.locator('.asset-card').filter({hasText:'4k-recovery.avi'}).click();await idle()
+  await openAsset(page,page.locator('.asset-card').filter({hasText:'4k-recovery.avi'}));await idle()
   check(await page.evaluate(()=>window.ws.selectedMedia.value.width===3840&&window.ws.selectedMedia.value.height===2160),'genuine 4K source retains original image dimensions')
-  rewindTimeout=true;await timeout(true);await button('AI Tracking').click();await page.getByTestId('tracking-error').waitFor();await finish();await timeout(false)
+
+  rewindTimeout=true;await timeout(true);await legacyTrackingProbe(page).click();await page.getByTestId('tracking-error').waitFor();await finish();await timeout(false)
   check((await page.getByTestId('tracking-error').innerText()).includes('整理旧追踪分支')&&(await page.getByTestId('tracking-error').innerText()).includes('请求超时'),'rewind timeout names its exact stage and failed source frame')
   await page.waitForTimeout(3500)
   check(await page.getByTestId('tracking-error').isVisible()&&await page.getByTestId('workspace-save-error').count()===0,'tracking error survives toast expiry and successful autosave')
@@ -79,20 +83,20 @@ try{
   rewindTimeout=false;await button('重试追踪').click();await finish()
   check(await page.getByTestId('tracking-error').count()===0,'explicit successful tracking clears persistent error')
   check(starts[0].body.mediaWidth===3840&&starts[0].body.mediaHeight===2160&&starts[0].body.startFrame===0,'model request keeps 4K pixel grid and original seed frame')
-  pollTimeout=true;await timeout(true);await button('AI Tracking').click();await page.getByTestId('tracking-error').waitFor();await timeout(false)
-  check(await page.evaluate(()=>window.ws.isAiBusy.value)&&await button('正在追踪…').isDisabled(),'poll timeout keeps original job and prevents duplicate model start')
+  pollTimeout=true;await timeout(true);await legacyTrackingProbe(page).click();await page.getByTestId('tracking-error').waitFor();await timeout(false)
+  check(await page.evaluate(()=>window.ws.isAiBusy.value)&&await button('首尾双向追踪').isDisabled(),'poll timeout keeps original job and prevents duplicate model start')
   const startCount=starts.length
   await page.reload();await attach();await idle();await page.getByTestId('tracking-error').waitFor()
   check((await page.getByTestId('tracking-error').innerText()).includes('上次追踪结果尚未确认'),'reload restores pending tracking job without starting inference')
   pollTimeout=false;await button('重新查询追踪任务').click();await finish()
   check(starts.length===startCount&&await page.getByTestId('tracking-error').count()===0,'status retry reconnects same task after refresh without new start')
-  loseStart=true;await button('AI Tracking').click();await page.getByTestId('tracking-error').waitFor()
+  loseStart=true;await legacyTrackingProbe(page).click();await page.getByTestId('tracking-error').waitFor()
   const lost=starts.at(-1);pollTimeout=true;await timeout(true);await button('重试原追踪请求').click();await page.getByTestId('tracking-error').waitFor();await page.waitForFunction(()=>!window.ws.trackingRetryBusy.value);await timeout(false)
   check(await button('重新查询追踪任务').isVisible(),'verified task ID switches ambiguous-start recovery to status-only retry')
   pollTimeout=false;await button('重新查询追踪任务').click();await finish()
   assert.deepEqual(starts.at(-1),lost)
   check(true,'lost start response replays identical task key and input')
-  resultFailure=true;await button('AI Tracking').click();await page.getByTestId('tracking-error').waitFor()
+  resultFailure=true;await legacyTrackingProbe(page).click();await page.getByTestId('tracking-error').waitFor()
   check((await page.getByTestId('tracking-error').innerText()).includes('读取追踪结果'),'finished task with unreadable result remains a visible failure')
   const beforeResultRetry=starts.length;resultFailure=false;await button('重新查询追踪任务').click();await finish()
   check(starts.length===beforeResultRetry,'result retry rereads finished job instead of rerunning model')
@@ -106,7 +110,7 @@ try{
   const download=page.waitForEvent('download');await button('重新读取工作区').click();const backup=await download;await idle()
   check(backup.suggestedFilename().startsWith('annotation-recovery-'),'explicit reload first downloads local annotation backup')
   check(await page.evaluate(()=>!window.ws.editingBlocked.value&&window.ws.currentFrame.value===1),'server reload recovers usable editor and authoritative frame position')
-  modelFailure=true;await button('AI Tracking').click();await page.getByTestId('tracking-error').waitFor();await finish()
+  modelFailure=true;await legacyTrackingProbe(page).click();await page.getByTestId('tracking-error').waitFor();await finish()
   check((await page.getByTestId('tracking-error').innerText()).includes('模型追踪')&&await button('重试追踪').isVisible(),'terminal model failure stays visible and permits a new explicit retry')
   // All branch mutations remain real; the helper installs its own model-only
   // simulation after the recovery suite's fault routes have been removed.

@@ -576,6 +576,10 @@ def track_video(
     start_frame: int | None = None,
     normal_feedback: list[dict[str, Any]] | None = None,
     progress=None,
+    edge_discovery: bool = False,
+    review_mode: bool = False,
+    endpoint_mode: bool = False,
+    continuation_row: dict | None = None,
 ) -> dict[str, Any]:
     """Run SAM3 on the exact original source-frame sequence.
 
@@ -601,6 +605,11 @@ def track_video(
         height,
         source_frame_count,
     )
+    if continuation_row is not None:
+        if not review_mode:
+            raise ValueError('AI continuation requires concentrated review mode')
+        seed_source_frame = int(continuation_row['source_frame_index'])
+        objects = [dict(o) for o in continuation_row['objects']]
     workspace = read_state(Path(annotation_json).parent)
     objects = [obj for obj in objects if not is_deleted(workspace, seed_source_frame, int(obj["object_id"]))]
     if not objects:
@@ -715,11 +724,14 @@ def track_video(
         "objects": seed_rows,
     }]
 
+    if continuation_row is not None:
+        # Preserve actual AI provenance and doubt evidence at the chunk boundary.
+        new_rows[0] = dict(continuation_row)
     # 人工确认的 seed 作为可信历史写入，但不把它当作 AI 输出触发暂停。
-    detector.initialize_seed(
-        seed_source_idx,
-        {int(obj["object_id"]): list(obj["bbox"]) for obj in objects},
-    )
+    if continuation_row is None:
+        detector.initialize_seed(seed_source_idx, {int(obj["object_id"]): list(obj["bbox"]) for obj in objects})
+    else:
+        detector.prime_history([(seed_source_idx, {int(obj['object_id']): list(obj['bbox']) for obj in objects})])
     observation_rows = [{**row, "objects": [obj for obj in row.get("objects", [])
                          if int(obj.get("object_id", 0)) in active_object_ids
                          and not is_deleted(workspace, int(row.get("source_frame_index", row.get("frame_index", -1))), int(obj.get("object_id", 0)))]}
@@ -757,12 +769,37 @@ def track_video(
                                               identity_references=_load_identity_references(workspace, seed_source_idx,
                                                   _load_latest_manual_baselines(Path(annotation_json), seed_source_idx, include_checkpoints=False)))
     if progress: progress(stage='tracking', message='正在追踪', processedFrames=1, lastProcessedFrame=seed_source_idx)
-    outputs = engine.propagate_manual(
-        session,
-        max_frames=requested,
-        start_frame_idx=seed_frame,
-    )
-    with evidence_context as image_evidence:
+    from .edge_entry import EntryPropagation, EdgeReader
+    outputs = EntryPropagation(engine, session, requested)
+    edge_reader = None
+    old_rows = _read_jsonl(Path(output_json)) if edge_discovery else []
+    # IDs reserved by manual annotations (including future edits), tombstones,
+    # seed files and historical results must never be reused by discovery.
+    reserved_ids = set(active_object_ids)
+    def reserve(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in ('objectId', 'object_id') and isinstance(item, int): reserved_ids.add(item)
+                elif key in ('deletedObjectIds', 'deletedTrackingIds') and isinstance(item, list):
+                    reserved_ids.update(int(v) for v in item if str(v).isdigit())
+                else: reserve(item)
+        elif isinstance(value, list):
+            for item in value: reserve(item)
+    if edge_discovery:
+        reserve(workspace); reserve(old_rows)
+        for path in Path(annotation_json).parent.glob('*frame_*.json'):
+            reserve(json.loads(path.read_text(encoding='utf-8')))
+        prior = next((r for r in old_rows if int(r['source_frame_index']) == seed_source_idx), {})
+        edge_reader = EdgeReader(video_file, width, height, source_fps, prior.get('edgeDiscovery'))
+    from .review_evidence import ReviewEvidence
+    review_checker = ReviewEvidence(video_file, seed_source_idx+1) if review_mode else None
+    review_expected_ids = set(active_object_ids) | set((continuation_row or {}).get("reviewEvidence", {}).get("expectedObjectIds", []))
+    edge_backfill = {}
+    entry_origins = {}
+    from contextlib import ExitStack
+    with ExitStack() as resources:
+        if edge_reader is not None: resources.callback(edge_reader.close)
+        image_evidence = resources.enter_context(evidence_context)
         try:
             for output in outputs:
                 frame_idx = int(output.frame_idx)
@@ -771,6 +808,7 @@ def track_video(
                 if frame_idx < seed_frame or frame_idx >= len(source_indices):
                     continue
                 source_idx = source_indices[frame_idx]
+                entries = []
                 identity_evidence = None
                 if image_evidence is not None:
                     detections, mask_regions = decode_regions(session, output)
@@ -793,6 +831,42 @@ def track_video(
                         counts, {oid: item.get('reasons') for oid, item in identity_evidence.items() if item.get('status') == 'risk'})
                 elif frame_idx > seed_frame:
                     detections, _ = engine.decode_tracker_output(session, output)
+                if edge_reader is not None:
+                    occupied = [list(o['bbox']) for o in objects] if frame_idx == seed_frame else [list(d.bbox) for d in detections]
+                    # Deleted/historical objects are exclusions, not fresh births.
+                    occupied += [o['bbox'] for r in old_rows if int(r['source_frame_index']) == source_idx for o in r['objects']]
+                    if frame_idx == seed_frame and prior.get('edgeDiscovery'):
+                        # This source frame was already observed before resume.
+                        edge_reader.prime_frame(source_idx)
+                    else:
+                        missing = frame_idx > seed_frame and not active_object_ids.issubset({int(d.object_id) for d in detections})
+                        entries = edge_reader.observe(source_idx, occupied, allow_new=not missing)
+                    for entry in entries:
+                        samples = entry['samples']
+                        # Never bridge an uncertain gap or resurrect a discarded branch.
+                        first = samples[0]['frame']
+                        if first < seed_source_idx and not all(any(int(r['source_frame_index']) == f for r in old_rows) for f in range(first,seed_source_idx)):
+                            continue
+                        oid = max(reserved_ids, default=0)+1
+                        reserved_ids.add(oid); active_object_ids.add(oid)
+                        object_names[oid] = f'rare sperm {oid}'
+                        origin = {'kind':'edge-entry', 'firstFrame':first, 'confirmedFrame':source_idx,
+                                  'motionVerified':True, 'humanConfirmed':False}
+                        entry_origins[oid] = origin
+                        for sample in samples:
+                            row = {'object_id':oid, 'name':object_names[oid], 'bbox':sample['box'], 'score':sample['score'],
+                                   'source':'edge_detector', 'mask_area':None, 'sam3_object_id':oid, 'entryOrigin':origin}
+                            if sample['frame'] == source_idx:
+                                from .services.sam3_engine import TrackDetection
+                                detections.append(TrackDetection(oid, sample['box'], sample['score']))
+                            else:
+                                edge_backfill.setdefault(sample['frame'], []).append(row)
+                        detector.prime_history([(source_idx, {oid:samples[-1]['box']})])
+                        # Pass prompts as a batch; do not reset existing object state.
+                        logging.getLogger('review.tracking').info('tracking.edge_entry_added media=%s object=%s first=%s confirmed=%s bbox=%s', video_file.parent.name, oid, first, source_idx, samples[-1]['box'])
+                    added = [{'object_id':oid, 'bbox':next(d.bbox for d in detections if int(d.object_id)==oid)} for oid, origin in entry_origins.items() if origin['confirmedFrame']==source_idx] if entries else []
+                    if added: outputs.add(frame_idx, added)
+                    if frame_idx == seed_frame: new_rows[0]['edgeDiscovery'] = edge_reader.gate.snapshot()
                 if frame_idx <= seed_frame:
                     continue
 
@@ -818,6 +892,10 @@ def track_video(
                         else oid,
                     }
                     object_rows.append(obj_row)
+                    if oid in entry_origins:
+                        obj_row['entryOrigin'] = entry_origins[oid]
+                        if source_idx == entry_origins[oid]['confirmedFrame']:
+                            obj_row['source'] = 'edge_detector'
 
                 # ── 异常检测 ──
                 frame_objs_for_detector: dict[int, list[float]] = {}
@@ -872,7 +950,16 @@ def track_video(
                         if af.level in (AnomalyLevel.ANOMALY, AnomalyLevel.DISAPPEARED)
                     ],
                 }
+                if review_checker is not None:
+                    row['reviewEvidence'] = review_checker.observe(source_idx, {oid:box for oid,box in frame_objs_for_detector.items() if oid not in hidden_ids}, identity_evidence)
+                    review_expected_ids.update(active_object_ids)
+                    row['reviewEvidence']['expectedObjectIds'] = sorted(review_expected_ids)
+                    for oid in sorted(review_expected_ids - set(frame_objs_for_detector)):
+                        if not is_deleted(workspace, source_idx, oid):
+                            row['reviewEvidence']['findings'].append(dict(objectId=oid, kind='tracking_lost', message='追踪对象缺失，请查看是否遮挡、出画或跟丢'))
+                    logging.getLogger('review.tracking').info('tracking.review_observation media=%s frame=%s state=%s findings=%s', video_file.parent.name, source_idx, row['reviewEvidence']['state'], len(row['reviewEvidence']['findings']))
                 new_rows.append(row)
+                if edge_reader is not None: row['edgeDiscovery'] = edge_reader.gate.snapshot()
                 last_processed_frame = source_idx
                 analyzed_through_frame = source_idx
                 if progress: progress(stage='tracking', message='正在追踪', processedFrames=len(new_rows), lastProcessedFrame=source_idx)
@@ -882,7 +969,7 @@ def track_video(
                 )
 
                 # HARD 异常 → 在当前异常帧保存结果后立即暂停。
-                if should_pause:
+                if should_pause and not review_mode:
                     from .tracking_pause_policy import classify_pause_reason, select_pause_evidence, summarize_warnings
                     earlier = [row for row in history_rows if int(row.get("source_frame_index", row.get("frame_index", -1))) <= seed_source_idx]
                     source_idx, visible_anomalies, retained_rows = select_pause_evidence(anomaly_report, earlier + new_rows, source_idx)
@@ -962,7 +1049,23 @@ def track_video(
                 close_outputs()
 
     if progress: progress(stage='saving_results', message='正在保存追踪结果')
-    merged_rows = _merge_rows(Path(output_json), new_rows, keep_before_source_frame=min(seed_source_idx, last_processed_frame), pause=result_anomaly_paused)
+    publication_start = min(seed_source_idx, last_processed_frame)
+    # Only publish entries confirmed no later than the retained pause frame.
+    valid_entries = {oid for oid, origin in entry_origins.items() if origin['confirmedFrame'] <= last_processed_frame}
+    backfill = {fi:[o for o in rows if o['object_id'] in valid_entries] for fi,rows in edge_backfill.items()}
+    backfill = {fi:rows for fi,rows in backfill.items() if rows}
+    if backfill:
+        earliest = min(publication_start, min(backfill))
+        earlier_rows = [r for r in old_rows if earliest <= int(r['source_frame_index']) < publication_start]
+        new_rows = earlier_rows + new_rows
+        publication_start = earliest
+        for row in new_rows:
+            row['objects'].extend(backfill.get(int(row['source_frame_index']), []))
+    if review_mode:
+        from .review_evidence import backward_checks
+        if progress: progress(stage='checking', message='正在核验疑点片段')
+        if not endpoint_mode: backward_checks(video_file, engine, new_rows)
+    merged_rows = _merge_rows(Path(output_json), new_rows, keep_before_source_frame=publication_start, pause=result_anomaly_paused)
 
     result = {
         "frames": [{**row, "objects": [obj for obj in row.get("objects", []) if not is_deleted(workspace, int(row["source_frame_index"]), int(obj["object_id"]))]} for row in merged_rows],

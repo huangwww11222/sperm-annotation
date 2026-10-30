@@ -67,6 +67,8 @@ def rows(c, table, column, ids, columns="*"):
     """Table/column identifiers are internal constants; values are parameters."""
     if not ids:
         return []
+    if table in ('concentrated_reviews', 'concentrated_reopens') and not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+        return []
     result = []
     # Keep below SQLite's variable limit for exports containing long videos.
     ids = sorted(set(ids), key=str)
@@ -103,7 +105,9 @@ def capture(c, eid, actor, body, versions):
                 height=m["height"],
                 frameCount=m["frame_count"],
                 baselineId=f["baseline_id"],
-                reviewSessionId=rv["session_id"],
+                reviewSessionId=rv["session_id"] if rv else None,
+                annotationOnly="directFrames" in v,
+                annotationActorId=v.get("annotationActorId"),
                 reviewVersionId=f["review_version_id"],
                 confirmationId=f["confirmation_id"],
                 finalVersionId=f["id"],
@@ -115,6 +119,10 @@ def capture(c, eid, actor, body, versions):
         ("annotation_baselines", "id", [s["baselineId"] for s in sources]),
         ("baseline_frames", "baseline_id", [s["baselineId"] for s in sources]),
         ("review_sessions", "id", [s["reviewSessionId"] for s in sources]),
+        ("review_object_catalog", "session_id", [s["reviewSessionId"] for s in sources]),
+        ("review_annotation_returns", "session_id", [s["reviewSessionId"] for s in sources]),
+        ("concentrated_reviews", "session_id", [s["reviewSessionId"] for s in sources]),
+        ("concentrated_reopens", "session_id", [s["reviewSessionId"] for s in sources]),
         ("review_frames", "session_id", [s["reviewSessionId"] for s in sources]),
         ("frame_submissions", "session_id", [s["reviewSessionId"] for s in sources]),
         ("review_versions", "id", [s["reviewVersionId"] for s in sources]),
@@ -194,6 +202,8 @@ def capture(c, eid, actor, body, versions):
         ("confirmation_reopen_events", "actor_id"),
         ("review_withdrawals", "actor_id"),
         ("review_return_events", "actor_id"),
+        ("review_annotation_returns", "actor_id"),
+        ("review_object_catalog", "actor_id"),
         ("final_versions", "confirmed_by"),
     ]:
         users.update(r[field] for r in tables[table] if r.get(field) is not None)
@@ -221,8 +231,18 @@ def capture(c, eid, actor, body, versions):
             bbox="original-pixel-xyxy",
             workflowTimestampTimezone="UTC",
             annotationResponsibility="baseline-submitter; not per-box manual authorship",
+            reviewChangePresence="JSON null before_bbox means added; JSON null after_bbox means deleted; no geometry metrics for absent sides",
+            finalPresence="final_version_frames contains only present boxes; confirmation_final_records retains every choice including absence",
         ),
     )
+    if any(json.loads(r['before_bbox']) is None or json.loads(r['after_bbox']) is None for r in tables['review_changes']):
+        snapshot['requiredFeatures'] = ['review_presence_v1']
+    if tables['concentrated_reviews']:
+        snapshot.setdefault('requiredFeatures', []).append('concentrated_review_v1')
+    direct = [dict(id=v["final"]["id"], actorId=v["annotationActorId"], frames=v["directFrames"]) for v in versions if "directFrames" in v]
+    if direct:
+        snapshot["annotationExportSnapshots"] = direct
+        snapshot.setdefault("requiredFeatures", []).append("annotation_direct_export_v1")
     payload = packed(snapshot)
     checksum = sha(payload)
     c.execute(

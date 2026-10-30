@@ -3,6 +3,8 @@ import { useLegacyBrowserAPIs } from './legacy-browser-profile.mjs'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 const {chromium}=await import(process.env.PLAYWRIGHT_MODULE||'playwright')
+// The task list is a drawer that stays closed while a task is open.
+const openTask=async(target,selector)=>{const card=target.locator(selector),toggle=target.getByTestId('toggle-workbench-library');for(let i=0;i<40;i++){if(await card.isVisible()){try{await card.click({timeout:1500});return}catch{}}else if(await toggle.isVisible())await toggle.click();await target.waitForTimeout(250)}await card.click()}
 const fixture=JSON.parse(fs.readFileSync('work/confirmation-browser-fixture.json'))
 const origin=process.env.CONFIRMATION_ORIGIN||'http://127.0.0.1:5373'
 const browser=await chromium.launch({channel:process.env.CHROME_CHANNEL || 'chrome',headless:true})
@@ -15,11 +17,11 @@ const idle=()=>page.waitForSelector('.confirmation-page[data-busy="false"]')
 const session=async(sid=fixture.main.sid)=>{const r=await page.request.get(`${origin}/api/confirmation/sessions/${sid}`,{headers:{Authorization:`Bearer ${fixture.token}`}});assert.equal(r.status(),200);return r.json()}
 const changes=async(sid=fixture.main.sid)=>{const r=await page.request.get(`${origin}/api/confirmation/sessions/${sid}/changes`,{headers:{Authorization:`Bearer ${fixture.token}`}});assert.equal(r.status(),200);return (await r.json()).items}
 const final=async(id)=>{const r=await page.request.get(`${origin}/api/final-versions/${id}`,{headers:{Authorization:`Bearer ${fixture.token}`}});assert.equal(r.status(),200);return r.json()}
-const blur=()=>page.getByTestId('workbench-heading').click({position:{x:310,y:12}})
+const blur=()=>page.evaluate(()=>document.activeElement instanceof HTMLElement&&document.activeElement.blur())
 const button=(name)=>page.getByRole('button',{name,exact:true})
 const choose=async(c)=>{await page.getByTestId('choose-'+c.toLowerCase()).click();await idle()}
 const go=async(n)=>{await page.getByRole('textbox',{name:'修改项序号'}).fill(String(n));await button('前往').click();await idle()}
-const open=async(sid)=>{await idle();await page.locator(`[data-session-id="${sid}"]`).click();await idle();if(await page.getByRole('button',{name:'留在上次位置'}).count())await button('留在上次位置').click()}
+const open=async(sid)=>{await idle();await openTask(page,`[data-session-id="${sid}"]`);await idle();if(await page.getByRole('button',{name:'留在上次位置'}).count())await button('留在上次位置').click()}
 try{
  await page.addInitScript(({token})=>{localStorage.setItem('rare-sperm-token',token);localStorage.setItem('rare-sperm-auth',JSON.stringify({id:'3',name:'confirm-C',role:'annotator'}))},fixture)
  await page.goto(origin+'/confirm');await open(fixture.main.sid)
@@ -39,11 +41,11 @@ try{
  check(await page.locator('[data-variant="full"]').getAttribute('viewBox')===full,'zoom keeps full-frame context stable')
  await button('A / B 对照').click();await page.getByRole('slider').fill('5')
  await page.evaluate(()=>scrollTo(0,0));await page.screenshot({path:'output/playwright/confirmation-initial.png',fullPage:true})
- await page.getByRole('textbox',{name:'搜索视频'}).fill('a');await page.keyboard.press('a')
+ await page.getByTestId('toggle-workbench-library').click();await page.getByRole('textbox',{name:'搜索视频'}).fill('a');await page.keyboard.press('a')
  check((await session()).progress.decided===0,'typing A in input does not select')
- await page.getByRole('textbox',{name:'搜索视频'}).fill('');await blur();await page.keyboard.press('Control+a')
+ await page.getByRole('textbox',{name:'搜索视频'}).fill('');await page.getByTestId('toggle-workbench-library').click();await blur();await page.keyboard.press('Control+a')
  check((await session()).progress.decided===0,'Ctrl+A is isolated from A choice')
- await button('快捷键 ?').click();await page.keyboard.press('b')
+ await button('快捷键').click();await page.keyboard.press('b')
  check((await session()).progress.decided===0,'dialog isolates decision shortcuts')
  await page.keyboard.press('Shift+Tab');check(await button('关闭').evaluate(e=>document.activeElement===e),'dialog traps focus')
  await page.keyboard.press('Escape')
@@ -51,10 +53,10 @@ try{
  check((await session()).progress.decided===0,'held keys and IME composition do not select')
  await blur();await page.keyboard.press('b');await idle()
  check((await session()).progress.decided===1,'B shortcut saves immediately')
- check((await page.getByTestId('current-item').innerText()).includes('对象 #2'),'auto-next advances to next pending item')
+ check((await page.getByTestId('current-item').innerText()).includes('对象 2'),'auto-next advances to next pending item')
  await blur();await page.keyboard.press('Meta+z');await idle()
  check((await session()).progress.decided===0,'Cmd+Z restores pending choice')
- check((await page.getByTestId('current-item').innerText()).includes('对象 #1'),'undo returns to affected item')
+ check((await page.getByTestId('current-item').innerText()).includes('对象 1'),'undo returns to affected item')
  await page.getByRole('checkbox').uncheck();await choose('B')
  check((await page.locator('.c-step-nav').innerText()).includes('修改项 1 / 3'),'auto-next off keeps selection')
  const rev=(await changes())[0].decisionRevision;await choose('B');check((await changes())[0].decisionRevision===rev,'same choice does not create extra decision')

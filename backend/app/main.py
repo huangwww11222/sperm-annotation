@@ -788,8 +788,54 @@ def _run_tracking_task(task_id: str, req: TrackRequest, video: Path, seed_file: 
     log.info('tracking.task_started task=%s media=%s start=%s max_frames=%s', task_id, req.mediaId, req.startFrame, req.maxFrames)
     try:
         workspace = annotation_state.read_state(video.parent)
-        result = track_video(str(video), str(seed_file), str(output_file), max_frames=req.maxFrames, bbox_mode="pixel", start_frame=req.startFrame, normal_feedback=workspace.get("normalMotionSamples", []),
-                            progress=lambda **patch: _set_task(task_id, elapsedSeconds=round(time.perf_counter() - began, 1), **patch))
+        options = dict(bbox_mode="pixel", normal_feedback=workspace.get("normalMotionSamples", []),
+                       progress=lambda **patch: _set_task(task_id, elapsedSeconds=round(time.perf_counter() - began, 1), **patch))
+        if req.edgeDiscovery: options['edge_discovery'] = True
+        if req.reviewMode: options['review_mode'] = True
+        if req.terminalAnnotations is not None: options['endpoint_mode'] = True
+        position, continuation = req.startFrame, None
+        while True:
+            result = track_video(str(video), str(seed_file), str(output_file), max_frames=req.maxFrames,
+                                 start_frame=position, **options,
+                                 **({'continuation_row': continuation} if continuation is not None else {}))
+            if not req.reviewMode or result.get('reachedVideoEnd'):
+                break
+            last = result.get('lastProcessedFrame', position)
+            if last <= position:
+                raise RuntimeError('追踪未向前推进，请检查已保存的片段后重试')
+            continuation = next((r for r in result.get('frames', []) if r['source_frame_index'] == last), None)
+            if not continuation or not continuation.get('objects'):
+                raise RuntimeError('当前片段已没有可继续追踪的对象，已保留结果；请检查跟丢位置后重新设置起始框')
+            log.info('tracking.review_continue task=%s frame=%s objects=%s', task_id, last, len(continuation['objects']))
+            position = last
+        if req.terminalAnnotations is not None:
+            from .endpoint_tracking import verify_endpoints
+            from .tracker import get_sam3_engine, MODEL_ID, DEVICE, DTYPE, _merge_rows
+            engine = get_sam3_engine(MODEL_ID, DEVICE, DTYPE)
+            reverse = {} if req.combineResults else None
+            report = verify_endpoints(video, engine, result['frames'], req.terminalAnnotations,
+                                      window_size=max(2, min(16, req.maxFrames)), progress=options['progress'],
+                                      **({'reverse_observations': reverse, 'joint_mode': True} if req.combineResults else {}))
+            if req.combineResults:
+                from .joint_tracking import synthesize_video
+                from copy import deepcopy
+                try:
+                    combined_rows = deepcopy(result['frames'])
+                    joint = synthesize_video(video, combined_rows, reverse, report, workspace, progress=options['progress'])
+                    result['frames'] = combined_rows
+                except Exception as exc:
+                    log.exception('tracking.joint_failed task=%s media=%s', task_id, req.mediaId)
+                    for row in result['frames']:
+                        evidence = row.setdefault('reviewEvidence', {'state':'not_sampled','findings':[]})
+                        evidence['jointCheck'] = {'state':'failed','error':str(exc)}
+                        evidence.setdefault('findings', []).append({'objectId':None,'kind':'check_failed','message':'综合标注未完成，请检查画面或重新生成'})
+                    _merge_rows(output_file, result['frames'], keep_before_source_frame=0)
+                    _set_task(task_id, jointTracking={'state':'failed','error':str(exc)})
+                    raise
+                _set_task(task_id, jointTracking=joint)
+                result['warningSummary'] = []  # Old forward-only geometry diagnostics are stale after synthesis.
+            result['frames'] = _merge_rows(output_file, result['frames'], keep_before_source_frame=0)
+            _set_task(task_id, endpointVerification=report)
         anomaly_paused = result.get("anomaly_paused")
         # The real tracker publishes pause metadata with the JSONL intent;
         # finish an interrupted publication before reporting a successful task.
@@ -926,7 +972,19 @@ def start_tracking(req: TrackRequest, user: dict[str, Any] = Depends(current_use
     video = find_video(directory)
     if not video:
         raise HTTPException(404, "视频文件不存在，请重新上传")
-    video_frame_count = int(_probe_video(video).get("frameCount") or 0)
+    video_info = _probe_video(video)
+    video_frame_count = int(video_info.get("frameCount") or 0)
+    if req.terminalAnnotations is not None:
+        from .endpoint_tracking import validate_endpoints
+        if req.startFrame != 0 or not req.reviewMode:
+            raise HTTPException(422, '首尾双向追踪必须从首帧开始，并使用集中审查模式')
+        try:
+            validate_endpoints(workspace, req.annotations, req.terminalAnnotations,
+                               video_info['width'], video_info['height'], video_frame_count)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+    if req.combineResults and req.terminalAnnotations is None:
+        raise HTTPException(422, '综合标注需要人工首尾帧，请先完成首尾标注')
     effective_frames = _effective_track_frames(req.startFrame, video_frame_count, req.maxFrames)
     if effective_frames < 1:
         raise HTTPException(400, "startFrame 已超出视频末尾")
@@ -1092,7 +1150,8 @@ def tracking_result(media_id: str, frameIndex: int | None = Query(default=None),
     if not directory.is_dir() or not find_video(directory):
         raise HTTPException(404, {'code':'MEDIA_NOT_FOUND', 'message':'原视频不存在，请核对素材库或联系管理员'})
     file = directory / RESULT_FILE_NAME
-    rows = annotation_state.read_rows(directory, validate_geometry=True)
+    from .endpoint_tracking import project_endpoints
+    rows = project_endpoints(annotation_state.read_rows(directory, validate_geometry=True))
     if not file.is_file():
         if required is True:
             logging.getLogger('review.tracking').error('tracking.expected_result_missing media=%s', media_id)
@@ -1100,6 +1159,15 @@ def tracking_result(media_id: str, frameIndex: int | None = Query(default=None),
         return {'format':'sam3-tracking-results-jsonl', 'state':'not_generated', 'frames':[], 'count':0}
     workspace = annotation_state.read_state(directory)
     rows = [{**row, "objects": [obj for obj in row.get("objects", []) if not annotation_state.is_deleted(workspace, int(row.get("source_frame_index", row.get("frame_index", 0))), int(obj.get("object_id", obj.get("objectId", 0))))]} for row in rows]
+    from .endpoint_tracking import terminal_aliases
+    for row in rows:
+        aliases = terminal_aliases(row)
+        if aliases:
+            fi = row['source_frame_index']
+            manuals = {o['objectId'] for o in workspace.get('manualAnnotations', []) if o.get('frameIndex') == fi}
+            replaced = {canonical for tail_id, canonical in aliases.items()
+                        if tail_id in manuals or annotation_state.is_deleted(workspace, fi, tail_id)}
+            row['objects'] = [o for o in row['objects'] if o['object_id'] not in replaced]
     meta = {}
     meta_file = directory / "media.json"
     if meta_file.is_file():
@@ -1110,7 +1178,15 @@ def tracking_result(media_id: str, frameIndex: int | None = Query(default=None),
     source_fps = float(meta.get("fps") or 0.0)
     frames = _tracker_rows_to_frames(rows, source_fps)
     if frameIndex is None:
-        return {"format": "sam3-tracking-results-jsonl", "state":"available", "frames": frames, "count": len(frames)}
+        terminal = next(((r.get('reviewEvidence') or {}).get('endpointCheck') for r in rows
+                         if 'terminalAnnotations' in ((r.get('reviewEvidence') or {}).get('endpointCheck') or {})), None)
+        checks = [(r.get('reviewEvidence') or {}).get('jointCheck') for r in rows]
+        joint_state = {'state':'checked' if all(c and c.get('state')=='checked' for c in checks) else 'failed',
+                       'checkedFrames':sum(bool(c and c.get('state')=='checked') for c in checks)} if any(checks) else None
+        return {"format": "sam3-tracking-results-jsonl", "state":"available", "frames": frames, "count": len(frames),
+                **({'jointTracking':joint_state} if joint_state else {}),
+                **({'terminalIdentity': {'frameIndex': terminal['anchorFrame'], 'anchorHash': terminal['anchorHash'],
+                                        'matches': {**terminal['matches'],**terminal.get('unmatchedAliases',{})}}} if terminal and terminal['state']=='checked' else {})}
     return next(
         (f for f in frames if int(f.get("frameIndex", -1)) == frameIndex),
         {"frameIndex": frameIndex, "timestampMs": 0, "annotations": []},
@@ -1124,16 +1200,20 @@ def tracking_result_file(media_id: str, required: bool = Query(default=False), u
     if not directory.is_dir() or not find_video(directory):
         raise HTTPException(404, {'code':'MEDIA_NOT_FOUND', 'message':'原视频不存在，请核对素材库或联系管理员'})
     file = directory / RESULT_FILE_NAME
-    rows = annotation_state.read_rows(directory, validate_geometry=True)
+    from .endpoint_tracking import project_endpoints
+    rows = project_endpoints(annotation_state.read_rows(directory, validate_geometry=True))
     if not file.is_file():
         if required is True:
             logging.getLogger('review.tracking').error('tracking.expected_result_missing media=%s operation=result_file', media_id)
             raise HTTPException(409, {'code':'TRACKING_RESULTS_MISSING', 'message':'追踪任务应已生成结果，但结果文件缺失，请检查任务日志与存储'})
         raise HTTPException(404, {'code':'TRACKING_RESULTS_NOT_GENERATED', 'message':'尚未生成追踪结果，请先完成 AI Tracking'})
     workspace = annotation_state.read_state(directory)
+    from .endpoint_tracking import terminal_aliases
     for row in rows:
         fi = int(row.get("source_frame_index", row.get("frame_index", 0)))
         row["objects"] = [obj for obj in row.get("objects", []) if not annotation_state.is_deleted(workspace, fi, int(obj.get("object_id", obj.get("objectId", 0))))]
+        deleted_aliases={canonical for original,canonical in terminal_aliases(row).items() if annotation_state.is_deleted(workspace,fi,original)}
+        row["objects"]=[o for o in row["objects"] if o["object_id"] not in deleted_aliases]
         row["anomalies"] = [obj for obj in row.get("anomalies", []) if not annotation_state.is_deleted(workspace, fi, int(obj.get("object_id", obj.get("objectId", 0))))]
     return Response("\n".join(json.dumps(row, ensure_ascii=False) for row in rows), media_type="application/x-ndjson", headers={"Content-Disposition": f'inline; filename="{RESULT_FILE_NAME}"'})
 
@@ -1256,6 +1336,45 @@ def video_frame(media_id: str, frame_index: int, user: dict[str, Any] = Depends(
         raise HTTPException(exc.status, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(500, f"读取第 {frame_index} 帧失败：{exc}") from exc
+
+
+class HeadBoxRequest(BaseModel):
+    frameIndex: int
+    x: float
+    y: float
+
+
+@app.post("/api/track/head-box/{media_id}")
+def head_box(media_id: str, req: HeadBoxRequest, user: dict[str, Any] = Depends(current_user)):
+    import math
+    import cv2
+    import numpy as np
+    from . import head_click
+    from .video_frames import frames, FrameReadError
+    if req.frameIndex < 0 or not all(math.isfinite(v) for v in (req.x, req.y)):
+        raise HTTPException(422, '帧号或点击坐标无效')
+    file = find_video(media_dir(media_id))
+    if not file:
+        raise HTTPException(404, '视频不存在')
+    started = time.monotonic()
+    try:
+        image = cv2.imdecode(np.frombuffer(frames.read(file, req.frameIndex), dtype=np.uint8), cv2.IMREAD_COLOR)
+        if image is None:
+            raise HTTPException(500, '源帧读取失败')
+        h, w = image.shape[:2]
+        if not (0 <= req.x < w and 0 <= req.y < h):
+            raise HTTPException(422, '点击坐标超出原图')
+        result = head_click.propose(image, req.x, req.y)
+        logging.getLogger('review.annotation.head_click').info('proposal media=%s frame=%s bbox=%s elapsed_ms=%.0f', media_id, req.frameIndex, result['bbox'], (time.monotonic()-started)*1000)
+        return {**result, 'frameIndex': req.frameIndex, 'width': w, 'height': h}
+    except (head_click.ProposalError, FrameReadError) as exc:
+        logging.getLogger('review.annotation.head_click').warning('proposal_rejected media=%s frame=%s reason=%s', media_id, req.frameIndex, exc)
+        raise HTTPException(exc.status, str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logging.getLogger('review.annotation.head_click').exception('proposal_failed media=%s frame=%s', media_id, req.frameIndex)
+        raise HTTPException(503, '头部检测失败，请稍后重试或手动画框；管理员可查看 annotation.head_click 日志。') from exc
 
 
 @app.get("/api/track/overlay/{media_id}")

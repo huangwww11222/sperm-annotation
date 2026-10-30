@@ -2,6 +2,10 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 const {chromium}=await import(process.env.PLAYWRIGHT_MODULE||'playwright')
+// The task list is a drawer that stays closed while a task is open.
+const openTask=async(target,selector)=>{const card=target.locator(selector),toggle=target.getByTestId('toggle-workbench-library');for(let i=0;i<40;i++){if(await card.isVisible()){try{await card.click({timeout:1500});return}catch{}}else if(await toggle.isVisible())await toggle.click();await target.waitForTimeout(250)}await card.click()}
+// The media list is a drawer that stays closed while a video is open.
+const openAsset=async(target,locator)=>{const toggle=target.getByTestId('toggle-workbench-library');for(let i=0;i<40;i++){if(await locator.isVisible()){try{await locator.click({timeout:1500});return}catch{}}else if(await toggle.isVisible())await toggle.click();await target.waitForTimeout(250)}await locator.click()}
 const fixture=JSON.parse(fs.readFileSync('work/real-4k-browser-fixture.json'))
 const origin=process.env.CONFIRMATION_ORIGIN||'http://127.0.0.1:5387'
 const browser=await chromium.launch({channel:'chrome',headless:true}),page=await browser.newPage({viewport:{width:1366,height:768}})
@@ -22,7 +26,7 @@ try{
   await page.route('**/api/track/media',async route=>{const r=await route.fetch(),d=await r.json();d.items=d.items.filter(m=>fixture.assets.some(x=>x.mid===m.mediaId));await route.fulfill({response:r,json:d})})
   await page.goto(origin+'/annotate');await attach();await idle()
   for(const asset of fixture.assets){
-    await page.locator('.asset-card').filter({hasText:asset.name}).click();await idle()
+    await openAsset(page,page.locator('.asset-card').filter({hasText:asset.name}));await idle()
     const state=await page.evaluate(()=>({w:window.ws.selectedMedia.value.width,h:window.ws.selectedMedia.value.height,fps:window.ws.videoFps.value}))
     check(state.w===asset.width&&state.h===asset.height&&state.fps===asset.fps,asset.name+': native dimensions and source FPS load')
     for(const fi of [Math.floor(asset.frameCount/2),asset.frameCount-1,0]){
@@ -31,7 +35,7 @@ try{
     }
   }
   const long=fixture.assets.reduce((a,b)=>a.frameCount>b.frameCount?a:b)
-  await page.locator('.asset-card').filter({hasText:long.name}).click();await idle()
+  await openAsset(page,page.locator('.asset-card').filter({hasText:long.name}));await idle()
   const telemetry=await page.evaluate(async()=>{
     const ws=window.ws,mid=ws.currentMediaId.value;window.originalAnnotations=ws.annotationsByMedia.value[mid]
     const rows=Array.from({length:50000},(_,i)=>({id:'stress-ai-'+i,objectId:100+i%80,frameIndex:Math.floor(i/80),name:'sperm '+(100+i%80),source:'ai',bbox:{x:10+i%20,y:20,width:1,height:1}}))
@@ -62,7 +66,7 @@ try{
   failRead=false;await button('重新读取工作区').click();await idle()
   check(await page.evaluate(()=>!window.ws.editingBlocked.value&&window.ws.currentObjects.value.length===3),'explicit reload restores server AI results after compact local caching')
   await page.goto(origin+'/confirm');await cIdle()
-  await page.locator(`[data-session-id="${fixture.confirmation}"]`).click();await cIdle()
+  await openTask(page,`[data-session-id="${fixture.confirmation}"]`);await cIdle()
   if(await button('留在上次位置').count())await button('留在上次位置').click()
   const mid=fixture.assets.reduce((a,b)=>a.frameCount<b.frameCount?a:b).mid
   const imageReads=()=>reads.filter(u=>u.includes('/track/frame/'+mid+'/')).length

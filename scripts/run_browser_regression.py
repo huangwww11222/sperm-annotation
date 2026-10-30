@@ -19,7 +19,7 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 SUITES = [
     ('critical-workflows', []),
-    ('workflow-transitions', ['confirmation_browser_fixture', 'workflow_transitions_browser_fixture']),
+    ('workflow-transitions', ['confirmation_browser_fixture', 'workflow_transitions_browser_fixture', 'review_presence_browser_fixture']),
     ('annotation-ux', ['confirmation_browser_fixture', 'annotation_ux_fixture']),
     ('tracking-recovery', ['confirmation_browser_fixture', 'tracking_recovery_fixture']),
     ('review-failure', ['confirmation_browser_fixture', 'review_browser_fixture']),
@@ -63,22 +63,10 @@ def preserve_review_logs(base):
         target.write_text(content, encoding='utf-8')
 
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--python', default=sys.executable)
-    p.add_argument('--backend-image', help='Run backend and fixtures in this already-built image')
-    p.add_argument('--channel', default='chrome')
-    p.add_argument('--critical-only', action='store_true', help='Diagnostic subset; never reports full regression passed')
-    args = p.parse_args()
-    os.chdir(ROOT)
-    (ROOT/'work').mkdir(exist_ok=True)
+def run_regression(args, selected):
+    # The caller owns the lock before any setup; even failures before the
+    # service lifecycle (for example unavailable ports) release only that lock.
     (ROOT/'output/playwright').mkdir(parents=True, exist_ok=True)
-    # Fixtures use fixed output filenames, so concurrent runners must not share them.
-    lock = ROOT/'work/browser-regression.lock'
-    try:
-        lock.mkdir()
-    except FileExistsError:
-        raise SystemExit('Another browser regression owns work/browser-regression.lock; check it before retrying')
     run_id = uuid.uuid4().hex[:10]
     base = ROOT/'work'/('e2e-confirm-ux-regression-'+run_id)
     base.mkdir()
@@ -106,13 +94,13 @@ def main():
     wrapper.write_text('#!/bin/sh\nexec '+shlex.join(python)+' "$@"\n')
     wrapper.chmod(0o700)
     env['TEST_PYTHON'] = python[0] if os.name == 'nt' and not args.backend_image else str(wrapper)
-    selected = SUITES[:1] if args.critical_only else SUITES
-    report = {'scope':'critical-only' if args.critical_only else 'mandatory',
+    report = {'scope':'critical-only' if args.critical_only else 'only:'+','.join(args.only) if args.only else 'mandatory',
               'gitHead':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
               'workingTree':subprocess.check_output(['git','status','--short'],text=True).splitlines(),
               'backendMode':'container' if args.backend_image else 'local',
               'backendRuntime':args.backend_image or python[0], 'browserChannel':args.channel,
-              'model':'simulated; no GPU validation', 'requiredSuites':[s for s,_ in selected],
+              'model':'simulated; no GPU validation', 'requiredSuites':[s for s,_ in SUITES],
+              'selectedSuites':[s for s,_ in selected], 'fullRegressionPassed':False,
               'suites':[], 'status':'running'}
     processes, handles = [], []
 
@@ -200,8 +188,35 @@ def main():
             report['diagnosticsError'] = str(error)
             save_report()
             print('Could not preserve backend review logs: '+str(error), file=sys.stderr)
-        lock.rmdir()
+        # Do not mark a full pass before the runner's own service cleanup has
+        # completed. A passing child suite alone is not a passing full run.
+        report['fullRegressionPassed'] = report['status'] == 'passed' and report['scope'] == 'mandatory'
+        save_report()
         print('Regression evidence: '+str(base/'run.json'), flush=True)
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--python', default=sys.executable)
+    p.add_argument('--backend-image', help='Run backend and fixtures in this already-built image')
+    p.add_argument('--channel', default='chrome')
+    selection = p.add_mutually_exclusive_group()
+    selection.add_argument('--critical-only', action='store_true', help='Diagnostic subset; never reports full regression passed')
+    selection.add_argument('--only', action='append', default=[], metavar='SUITE', choices=[name for name, _ in SUITES], help='Diagnostic: run only these suites; never reports full regression passed')
+    args = p.parse_args()
+    selected = SUITES[:1] if args.critical_only else [s for s in SUITES if s[0] in args.only] if args.only else SUITES
+    os.chdir(ROOT)
+    (ROOT/'work').mkdir(exist_ok=True)
+    # Fixtures use fixed output filenames, so concurrent runners must not share them.
+    lock = ROOT/'work/browser-regression.lock'
+    try:
+        lock.mkdir()
+    except FileExistsError:
+        raise SystemExit('Another browser regression owns work/browser-regression.lock; check it before retrying')
+    try:
+        run_regression(args, selected)
+    finally:
+        lock.rmdir()
 
 
 if __name__ == '__main__':

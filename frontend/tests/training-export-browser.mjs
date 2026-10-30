@@ -5,6 +5,8 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import { execFileSync } from 'node:child_process'
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright')
+// The task list is a drawer that stays closed while a task is open.
+const openTask=async(target,selector)=>{const card=target.locator(selector),toggle=target.getByTestId('toggle-workbench-library');for(let i=0;i<40;i++){if(await card.isVisible()){try{await card.click({timeout:1500});return}catch{}}else if(await toggle.isVisible())await toggle.click();await target.waitForTimeout(250)}await card.click()}
 const fixture = JSON.parse(fs.readFileSync('work/confirmation-browser-fixture.json'))
 const origin = process.env.CONFIRMATION_ORIGIN || 'http://127.0.0.1:5373'
 const browser = await chromium.launch({ channel: process.env.CHROME_CHANNEL || 'chrome', headless: true })
@@ -38,11 +40,11 @@ try {
     localStorage.setItem('rare-sperm-auth',JSON.stringify({id:'3',name:'confirm-C',role:'annotator'}))
   },fixture)
   await page.goto(origin+'/annotate')
-  check(await button('导出训练数据集').count()===0,'manual annotation page no longer exposes training export')
+  check(await button('导出训练数据集').count()===1,'annotation page exposes the new snapshot-based training export entry')
   const old = await api('/export/dataset','POST',{mediaId:'raw',annotations:[]})
   check(old.status()===410,'old direct endpoint cannot export unreviewed data')
-  await button('对比确认').click();await idle()
-  await page.locator(`[data-session-id="${fixture.main.sid}"]`).click();await idle()
+  await page.goto(origin+'/confirm') /* archived workflow route */;await idle()
+  await openTask(page,`[data-session-id="${fixture.main.sid}"]`);await idle()
   check(await exportButton().count()===0,'pending confirmation has no training-export entry')
   await button('领取并开始确认').click();await idle()
   for (const c of ['b','a','b']) {await page.getByTestId('choose-'+c).click();await idle()}
@@ -136,14 +138,14 @@ with zipfile.ZipFile(sys.argv[1]) as z:
   check((await api('/datasets/exports/'+await taskId())).status()===200,'new confirmed version can export normally')
   const currentJob = await taskId()
   await button('关闭').click()
-  await page.locator(`[data-session-id="${fixture.zero.sid}"]`).click();await idle()
+  await openTask(page,`[data-session-id="${fixture.zero.sid}"]`);await idle()
   await button('领取并开始确认').click();await idle()
   await page.getByTestId('complete-video').click();await button('确认完成').click();await idle()
   await openExport()
   check(await page.locator('.training-export-job').count()===0,'switching confirmed videos does not reuse another video export job')
   check(await page.getByRole('combobox',{name:'数据集格式'}).inputValue()==='yolo','new video starts with its own default export settings')
   await button('关闭').click()
-  await page.locator(`[data-session-id="${fixture.main.sid}"]`).click();await idle();await openExport()
+  await openTask(page,`[data-session-id="${fixture.main.sid}"]`);await idle();await openExport()
   check(await taskId()===currentJob,'returning to a video restores only its own export job')
   await statisticsExportChecks(page,fixture,origin)
   check(errors.length===0,'no uncaught browser errors across export and recovery flows')

@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 const { chromium }=await import(process.env.PLAYWRIGHT_MODULE || 'playwright')
+// The task list is a drawer that stays closed while a task is open.
+const openTask=async(target,selector)=>{const card=target.locator(selector),toggle=target.getByTestId('toggle-workbench-library');for(let i=0;i<40;i++){if(await card.isVisible()){try{await card.click({timeout:1500});return}catch{}}else if(await toggle.isVisible())await toggle.click();await target.waitForTimeout(250)}await card.click()}
 const fixture=JSON.parse(fs.readFileSync('work/browser-fixture.json'))
 const origin=process.env.REVIEW_ORIGIN || 'http://127.0.0.1:5373'
 const browser=await chromium.launch({channel:process.env.CHROME_CHANNEL || 'chrome',headless:true})
@@ -14,7 +16,7 @@ const saved=()=>page.waitForFunction(()=>!document.querySelector('[data-testid="
 async function drag(dx){await page.locator('[data-box="1"] rect').hover();const r=await page.locator('[data-box="1"] rect').boundingBox();await page.mouse.move(r.x+r.width/2,r.y+r.height/2);await page.mouse.down();await page.mouse.move(r.x+r.width/2+dx,r.y+r.height/2,{steps:3});await page.mouse.up();await saved()}
 try {
  await page.addInitScript(({token})=>{localStorage.setItem('rare-sperm-token',token);localStorage.setItem('rare-sperm-auth',JSON.stringify({id:'2',name:'review-B'}))},fixture)
- await page.goto(origin+'/review');await page.locator(`[data-session-id="${fixture.sid}"]`).click();await page.locator('.review-drawing').waitFor();await saved()
+ await page.goto(origin+'/review');await openTask(page,`[data-session-id="${fixture.sid}"]`);await page.locator('.review-drawing').waitFor();await saved()
  const initial=await getFrame()
  await page.locator('[data-row="1"]').click()
  const handle=await page.locator('[data-handle="br"]').boundingBox()
@@ -27,9 +29,9 @@ try {
  const box=await page.locator('[data-box="1"] rect').boundingBox()
  await page.mouse.move(box.x+20,box.y+20);await page.mouse.down();await page.mouse.move(box.x+40,box.y+30);await page.keyboard.press('Escape');await page.mouse.up()
  check((await getFrame()).frameRevision===beforeCancel.frameRevision&&!await page.getByRole('button',{name:'放弃本帧草稿'}).count(),'Escape cancels active drag')
- await page.getByRole('button',{name:'快捷键 ⓘ'}).click();await page.getByRole('dialog').waitFor()
+ await page.getByRole('button',{name:'快捷键',exact:true}).click();await page.getByRole('dialog').waitFor()
  await page.keyboard.press('Tab');check(await page.getByRole('dialog').evaluate(e=>e.contains(document.activeElement)),'help dialog traps keyboard focus')
- await page.keyboard.press('Escape');check(await page.getByRole('button',{name:'快捷键 ⓘ'}).evaluate(e=>e===document.activeElement),'dialog restores keyboard focus')
+ await page.keyboard.press('Escape');check(await page.getByRole('button',{name:'快捷键',exact:true}).evaluate(e=>e===document.activeElement),'dialog restores keyboard focus')
  await page.setViewportSize({width:1180,height:760})
  await page.route('**/frames/*/draft',r=>r.abort('failed'))
  await drag(18);await page.getByRole('alert').waitFor()

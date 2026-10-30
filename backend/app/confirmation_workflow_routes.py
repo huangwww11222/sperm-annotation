@@ -18,6 +18,7 @@ final_router = APIRouter(
     prefix="/api/final-versions", tags=["final-versions"], route_class=LoggedRoute
 )
 ResponseMode = Annotated[Literal['full','delta'], Header(alias='X-Confirmation-Response')]
+Contract = Annotated[str, Header(alias='X-Review-Contract')]
 
 
 class Decision(Model):
@@ -69,28 +70,28 @@ def claim(sid: str, user: User, key: Key, response_mode: ResponseMode='full'):
 
 
 @router.put("/sessions/{sid}/changes/{change_id}/decision")
-def decide(sid: str, change_id: str, body: Decision, user: User, key: Key, response_mode: ResponseMode='full'):
-    return flow.write("decide", sid, user["uid"], key, body.model_dump(), change_id, response_mode)
+def decide(sid: str, change_id: str, body: Decision, user: User, key: Key, response_mode: ResponseMode='full', contract: Contract='2'):
+    return flow.write("decide", sid, user["uid"], key, body.model_dump(), change_id, response_mode, client_contract=contract)
 
 
 @router.post("/sessions/{sid}/undo")
-def undo(sid: str, body: Undo, user: User, key: Key, response_mode: ResponseMode='full'):
-    return flow.write("undo", sid, user["uid"], key, body.model_dump(), response_mode=response_mode)
+def undo(sid: str, body: Undo, user: User, key: Key, response_mode: ResponseMode='full', contract: Contract='2'):
+    return flow.write("undo", sid, user["uid"], key, body.model_dump(), response_mode=response_mode, client_contract=contract)
 
 
 @router.post("/sessions/{sid}/finalize")
-def finish(sid: str, body: Version, user: User, key: Key, response_mode: ResponseMode='full'):
-    return flow.write("finish", sid, user["uid"], key, body.model_dump(), response_mode=response_mode)
+def finish(sid: str, body: Version, user: User, key: Key, response_mode: ResponseMode='full', contract: Contract='2'):
+    return flow.write("finish", sid, user["uid"], key, body.model_dump(), response_mode=response_mode, client_contract=contract)
 
 
 @router.post("/sessions/{sid}/reopen")
-def reopen(sid: str, body: Version, user: User, key: Key, response_mode: ResponseMode='full'):
-    return flow.write("reopen", sid, user["uid"], key, body.model_dump(), response_mode=response_mode)
+def reopen(sid: str, body: Version, user: User, key: Key, response_mode: ResponseMode='full', contract: Contract='2'):
+    return flow.write("reopen", sid, user["uid"], key, body.model_dump(), response_mode=response_mode, client_contract=contract)
 
 
 @router.post("/sessions/{sid}/return")
-def return_frame(sid: str, body: ReturnFrame, user: User, key: Key, response_mode: ResponseMode='full'):
-    return flow.write("return", sid, user["uid"], key, body.model_dump(), response_mode=response_mode)
+def return_frame(sid: str, body: ReturnFrame, user: User, key: Key, response_mode: ResponseMode='full', contract: Contract='2'):
+    return flow.write("return", sid, user["uid"], key, body.model_dump(), response_mode=response_mode, client_contract=contract)
 
 
 @router.put("/sessions/{sid}/cursor")

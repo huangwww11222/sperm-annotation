@@ -74,6 +74,21 @@ def migrate(conn):
       id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES review_sessions(id),
       actor_id INTEGER NOT NULL REFERENCES users(id), created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS review_annotation_returns (
+      id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES review_sessions(id),
+      actor_id INTEGER NOT NULL REFERENCES users(id), reason TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS review_object_catalog (
+      session_id TEXT NOT NULL REFERENCES review_sessions(id), object_id INTEGER NOT NULL,
+      class_key TEXT NOT NULL, origin TEXT NOT NULL,
+      actor_id INTEGER REFERENCES users(id), created_at TEXT NOT NULL,
+      PRIMARY KEY(session_id, object_id)
+    );
+    CREATE TABLE IF NOT EXISTS review_object_allocators (
+      session_id TEXT PRIMARY KEY REFERENCES review_sessions(id),
+      next_object_id INTEGER NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS review_return_events (
       id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES review_sessions(id),
       confirmation_id TEXT NOT NULL REFERENCES confirmation_sessions(id),
@@ -95,6 +110,8 @@ def migrate(conn):
        JOIN frame_submissions s ON s.id=f.submission_id
        AND s.session_id=f.session_id AND s.frame_index=f.frame_index
        WHERE f.state='submitted' """)
+    from .concentrated_review import migrate as migrate_concentrated
+    migrate_concentrated(conn)
     conn.commit()
 
 
@@ -165,30 +182,91 @@ def editable(c, s, uid):
         raise ReviewError("LEGACY_TASK_READ_ONLY", reason)
 
 
-def normalize_patch(objects, patch, width, height):
+def object_catalog(c, s):
+    """Initialize one immutable A identity directory, then retain every allocated ID.
+
+    Creating a directory is metadata only: it cannot submit a frame or create a
+    change. An abandoned new object remains reserved, so stale clients cannot
+    silently attach its identity to a different sperm later.
+    """
+    if not c.execute("SELECT 1 FROM review_object_allocators WHERE session_id=?", (s['id'],)).fetchone():
+        identities = {}
+        for frame in c.execute("SELECT objects_json FROM baseline_frames WHERE baseline_id=? ORDER BY frame_index", (s['baseline_id'],)):
+            for obj in json.loads(frame[0]):
+                oid, label = obj['objectId'], obj.get('classKey', 'sperm')
+                if oid in identities and identities[oid] != label:
+                    raise ReviewError('INVALID_BASELINE', '原标注同一对象的类别不一致，不能补标', 422)
+                identities[oid] = label
+        c.executemany("INSERT OR IGNORE INTO review_object_catalog VALUES (?,?,?,?,?,?)",
+                      [(s['id'], oid, label, 'baseline', None, now()) for oid, label in identities.items()])
+        c.execute("INSERT INTO review_object_allocators VALUES (?,?)", (s['id'], max(identities, default=0) + 1))
+    return {r['object_id']: dict(objectId=r['object_id'], classKey=r['class_key'], origin=r['origin'])
+            for r in c.execute("SELECT * FROM review_object_catalog WHERE session_id=? ORDER BY object_id", (s['id'],))}
+
+
+def get_objects(sid, uid):
+    with closing(connect()) as c, c:
+        c.execute('BEGIN IMMEDIATE')
+        s = session_row(c, sid)
+        return {'items': list(object_catalog(c, s).values())}
+
+
+def normalize_patch(objects, patch, width, height, catalog=None):
     a = {o["objectId"]: o for o in objects}
     if len(a) != len(objects):
         raise ReviewError("INVALID_BASELINE", "原标注存在重复对象 ID", 422)
     seen, result = set(), []
     for p in patch:
-        oid = p["objectId"]
-        if oid in seen or oid not in a:
-            raise ReviewError("UNKNOWN_OBJECT", "只能修改已有对象，且对象不能重复", 422)
+        if not isinstance(p, dict):
+            raise ReviewError('INVALID_PATCH', '标注修改格式无效', 422)
+        oid = p.get("objectId")
+        op = p.get('op', 'update')
+        if type(oid) is not int or oid <= 0 or oid in seen:
+            raise ReviewError("UNKNOWN_OBJECT", "对象 ID 必须有效且不能重复", 422)
+        if op not in ('update', 'add', 'delete'):
+            raise ReviewError('INVALID_OPERATION', '不支持的审查操作', 422)
         seen.add(oid)
-        values = p["bbox"]
-        if len(values) != 4 or any(not math.isfinite(x) for x in values):
+        reference = (catalog or a).get(oid)
+        if reference is None or (op == 'add') == (oid in a):
+            raise ReviewError('UNKNOWN_OBJECT', '补标必须选择视频已有对象或先分配新对象，已有框请使用调整或删除', 422)
+        if p.get('classKey') is not None and p['classKey'] != reference.get('classKey', 'sperm'):
+            raise ReviewError('CLASS_MISMATCH', '不能更改已有对象类别', 422)
+        if op == 'delete':
+            if p.get('bbox') is not None:
+                raise ReviewError('INVALID_PATCH', '删除操作不能附带替代标注框', 422)
+            result.append({'objectId': oid, 'op': 'delete'})
+            continue
+        if op == 'add' and (catalog is None or not p.get('classKey')):
+            raise ReviewError('CLASS_REQUIRED', '补标必须提供目录中的对象类别', 422)
+        values = p.get("bbox")
+        if not isinstance(values, list) or len(values) != 4 or any(isinstance(x, bool) or not isinstance(x, (float, int)) or not math.isfinite(x) for x in values):
             raise ReviewError("INVALID_BBOX", "框坐标必须是四个有限数值", 422)
         b = [round(float(v), 3) for v in values]
         if not (0 <= b[0] < b[2] <= width and 0 <= b[1] < b[3] <= height):
             raise ReviewError("INVALID_BBOX", "标注框必须位于图像内且宽高大于零", 422)
-        if b != [round(float(v), 3) for v in a[oid]["bbox"]]:
+        if op == 'add':
+            result.append({'objectId': oid, 'op': 'add', 'bbox': b, 'classKey': reference['classKey']})
+        elif b != [round(float(v), 3) for v in a[oid]["bbox"]]:
             result.append({"objectId": oid, "bbox": b})
     return sorted(result, key=lambda p: p["objectId"])
 
 
 def apply_patch(objects, patch):
-    by_id = {p["objectId"]: p["bbox"] for p in patch}
-    return [{**o, "bbox": by_id.get(o["objectId"], o["bbox"])} for o in objects]
+    by_id = {o['objectId']: dict(o) for o in objects}
+    for p in patch:
+        oid, op = p['objectId'], p.get('op', 'update')
+        if op == 'delete':
+            by_id.pop(oid, None)
+        elif op == 'add':
+            by_id[oid] = dict(objectId=oid, bbox=p['bbox'], classKey=p['classKey'])
+        else:
+            by_id[oid] = {**by_id[oid], 'bbox': p['bbox']}
+    return [by_id[oid] for oid in sorted(by_id)]
+
+
+def materialize(s, fi, objects, patch):
+    return [{**o, 'annotationId': f"{s['baseline_id']}:f{fi}:o{o['objectId']}"}
+            for o in apply_patch(objects, patch)]
 
 
 def box_metrics(a, b):
@@ -270,19 +348,49 @@ def session_data(c, s, uid):
             (s["id"],),
         )
     ]
+    submitted = [
+        r[0]
+        for r in c.execute(
+            "SELECT frame_index FROM review_frames WHERE session_id=? AND state='submitted' ORDER BY frame_index",
+            (s["id"],),
+        )
+    ]
     rv = c.execute(
-        "SELECT id FROM review_versions WHERE session_id=? ORDER BY created_at DESC LIMIT 1",
+        "SELECT id FROM review_versions WHERE session_id=? ORDER BY rowid DESC LIMIT 1",
         (s["id"],),
     ).fetchone()
     active = s["state"] in ("pending", "in_progress") and not reason
     own = s["reviewer_id"] == uid
     can_claim = active and s["reviewer_id"] is None
+    returned = c.execute('SELECT * FROM review_annotation_returns WHERE session_id=? ORDER BY rowid DESC LIMIT 1', (s['id'],)).fetchone()
+    withdraw_allowed = can_withdraw(c, s, uid)
+    withdrawal_reason = None
+    if not withdraw_allowed:
+        if s['state'] == 'returned_to_annotation':
+            withdrawal_reason = '任务已退回人工标注，可修改后重新送审。'
+        elif s['state'] == 'withdrawn':
+            withdrawal_reason = '任务已撤回。'
+        elif s['state'] == 'reviewed':
+            withdrawal_reason = '审查已完成，不能撤回；需修改时请在对比确认中退回本帧重审。'
+        elif s['submitted_by'] != uid:
+            withdrawal_reason = '只有原送审者可以撤回送审。'
+        else:
+            withdrawal_reason = '审查已被领取或已完成，不能直接撤回；大范围问题请联系当前审查员退回重新标注。'
+    from .concentrated_review import info as concentrated_info
+    concentrated = concentrated_info(c, s["id"])
+    if concentrated and s["state"] == "reviewed":
+        withdrawal_reason = "审查已完成，不能撤回；请由审查员在审查页重新审查本帧。"
     return dict(
+        workflow="concentrated" if concentrated else "legacy",
+        finalVersionId=concentrated["final_version_id"] if concentrated else None,
         id=s["id"],
         baselineId=s["baseline_id"],
         state=s["state"],
         revision=s["revision"],
         reviewerId=s["reviewer_id"],
+        submittedBy=s['submitted_by'],
+        withdrawalBlockedReason=withdrawal_reason,
+        returnAnnotation=dict(reason=returned['reason'], actorId=returned['actor_id'], createdAt=returned['created_at']) if returned else None,
         mediaId=s["media_id"],
         frameCount=s["frame_count"],
         submittedFrames=p["submittedFrames"],
@@ -300,12 +408,14 @@ def session_data(c, s, uid):
             cursorRevision=cursor["revision"] if cursor else 0,
             firstUnsubmittedFrameIndex=pending,
             draftFrameIndexes=drafts,
+            submittedFrameIndexes=submitted,
         ),
         permissions=dict(
             canClaim=can_claim,
             canEdit=active and own,
             canComplete=active and own and p["unsubmittedFrames"] == 0,
-            canWithdraw=can_withdraw(c, s, uid),
+            canWithdraw=withdraw_allowed,
+            canReturnAnnotation=active and own,
         ),
         returnRequests=[dict(frameIndex=r["frame_index"], reason=r["reason"], confirmationId=r["confirmation_id"])
                         for r in c.execute("SELECT * FROM review_return_events WHERE session_id=? AND resolved_review_version_id IS NULL", (s["id"],))],
@@ -327,8 +437,13 @@ def submission_status(media_id, uid):
         ids = [r[0] for r in c.execute("""SELECT s.id FROM review_sessions s
             JOIN annotation_baselines a ON a.id=s.baseline_id
             JOIN media_revisions m ON m.id=a.media_revision_id
-            WHERE m.media_id=? AND s.state!='withdrawn' ORDER BY s.rowid DESC""", (media_id,))]
-        return {"items": [session_data(c, session_row(c, sid), uid) for sid in ids]}
+            WHERE m.media_id=? AND s.state NOT IN ('withdrawn','returned_to_annotation') ORDER BY s.rowid DESC""", (media_id,))]
+        history_ids = [r[0] for r in c.execute('''SELECT s.id FROM review_sessions s
+            JOIN annotation_baselines a ON a.id=s.baseline_id
+            JOIN media_revisions m ON m.id=a.media_revision_id
+            WHERE m.media_id=? AND s.state IN ('withdrawn','returned_to_annotation') ORDER BY s.rowid DESC''', (media_id,))]
+        return {"items": [session_data(c, session_row(c, sid), uid) for sid in ids],
+                'history': [session_data(c, session_row(c, sid), uid) for sid in history_ids]}
 
 
 def get_session(sid, uid):
@@ -366,18 +481,21 @@ def frame_data(c, s, fi, uid):
     )
     committed = json.loads(sub["patch_json"]) if sub else []
     draft = json.loads(f["patch_json"] or "[]") if f["state"] == "draft" else None
-    b = apply_patch(a, draft if draft is not None else committed)
+    b = materialize(s, fi, a, draft if draft is not None else committed)
     # Completed sessions read immutable version frames when available.
     if s["state"] == "reviewed":
         frozen = c.execute(
             """SELECT vf.objects_json FROM review_version_frames vf JOIN review_versions v ON v.id=vf.version_id
-            WHERE v.session_id=? AND vf.frame_index=? ORDER BY v.created_at DESC LIMIT 1""",
+            WHERE v.session_id=? AND vf.frame_index=? ORDER BY v.rowid DESC LIMIT 1""",
             (s["id"], fi),
         ).fetchone()
         if frozen:
             b = json.loads(frozen[0])
-    metrics = [box_metrics(x["bbox"], y["bbox"]) for x, y in zip(a, b)]
+    a_by_id, b_by_id = {o['objectId']: o for o in a}, {o['objectId']: o for o in b}
+    metrics = [box_metrics(a_by_id[o['objectId']]['bbox'], o['bbox']) if o['objectId'] in a_by_id else None for o in b]
     changed = [m for m in metrics if m]
+    added = len(b_by_id.keys() - a_by_id.keys())
+    deleted = len(a_by_id.keys() - b_by_id.keys())
     permissions = session_data(c, s, uid)["permissions"]
     return dict(
         sessionId=s["id"],
@@ -394,9 +512,10 @@ def frame_data(c, s, fi, uid):
         if sub
         else None,
         metrics=dict(
-            totalBoxes=len(a),
-            modifiedBoxes=len(changed),
-            unmodifiedBoxes=len(a) - len(changed),
+            totalBoxes=len(b),
+            modifiedBoxes=len(changed) + added + deleted,
+            updatedBoxes=len(changed), addedBoxes=added, deletedBoxes=deleted,
+            unmodifiedBoxes=len(b) - len(changed) - added,
             meanModifiedIou=sum(m["iou"] for m in changed) / len(changed)
             if changed
             else None,
@@ -417,7 +536,28 @@ def get_frame(sid, fi, uid):
         return frame_data(c, session_row(c, sid), fi, uid)
 
 
-def write(action, sid, uid, key, body, fi=None):
+def require_contract(c, s, action, fi, body, contract):
+    if str(contract) == '3':
+        return
+    structural = action in ('add_object', 'return_annotation')
+    if action in ('draft', 'submit', 'discard', 'finish'):
+        payloads = [body.get('patch', [])]
+        query = 'SELECT patch_json,submission_id FROM review_frames WHERE session_id=?'
+        args = [s['id']]
+        if action != 'finish':
+            query += ' AND frame_index=?'; args.append(fi)
+        for row in c.execute(query, args):
+            payloads.append(json.loads(row['patch_json'] or '[]'))
+            if row['submission_id']:
+                committed = c.execute('SELECT patch_json FROM review_submission_payloads WHERE submission_id=?', (row['submission_id'],)).fetchone()
+                if committed:
+                    payloads.append(json.loads(committed[0]))
+        structural = structural or any(p.get('op') in ('add', 'delete') for patch in payloads for p in patch)
+    if structural:
+        raise ReviewError('CONTRACT_UPGRADE_REQUIRED', '此任务包含补标或删除，请刷新页面使用新版审查界面', 428)
+
+
+def write(action, sid, uid, key, body, fi=None, contract='3'):
     """Replay before CAS: a lost success response can be retried safely."""
     h = digest([action, sid, fi, body])
     try:
@@ -442,6 +582,7 @@ def write(action, sid, uid, key, body, fi=None):
                 )
                 return json.loads(prior["response_json"])
             s = session_row(c, sid)
+            require_contract(c, s, action, fi, body, contract)
             if action == "withdraw":
                 if body["expectedSessionRevision"] != s["revision"]:
                     raise ReviewError("SESSION_REVISION_CONFLICT", "任务已更新，请刷新后撤回")
@@ -452,6 +593,9 @@ def write(action, sid, uid, key, body, fi=None):
                 c.execute("INSERT INTO review_withdrawals VALUES (?,?,?,?)", ("withdraw_" + uuid.uuid4().hex, sid, uid, now()))
                 c.execute("UPDATE review_sessions SET state='withdrawn',revision=revision+1 WHERE id=?", (sid,))
                 result = {"session": session_data(c, session_row(c, sid), uid)}
+            elif action == "reopen_review":
+                from .concentrated_review import reopen
+                result = reopen(c, s, uid, body)
             elif action == "claim":
                 if s["reviewer_id"] not in (None, uid):
                     raise ReviewError(
@@ -487,7 +631,32 @@ def write(action, sid, uid, key, body, fi=None):
                 result = {"revision": rev + 1, "frameIndex": fi}
             else:
                 editable(c, s, uid)
-                if action == "finish":
+                if action in ('add_object', 'return_annotation'):
+                    if body.get('expectedSessionRevision') != s['revision']:
+                        raise ReviewError('SESSION_REVISION_CONFLICT', '任务已更新，请刷新后重试')
+                    if action == 'add_object':
+                        catalog = object_catalog(c, s)
+                        classes = {obj['classKey'] for obj in catalog.values()} or {'rare sperm'}
+                        category = body.get('classKey')
+                        if category is None:
+                            if len(classes) != 1:
+                                raise ReviewError('CLASS_REQUIRED', '该视频包含多个类别，请先选择新增对象的类别', 422)
+                            category = next(iter(classes))
+                        if not isinstance(category, str) or category not in classes:
+                            raise ReviewError('INVALID_CLASS', '只能选择本视频已有类别，不能新增或改写类别', 422)
+                        oid = c.execute('SELECT next_object_id FROM review_object_allocators WHERE session_id=?', (sid,)).fetchone()[0]
+                        c.execute('UPDATE review_object_allocators SET next_object_id=next_object_id+1 WHERE session_id=?', (sid,))
+                        c.execute('INSERT INTO review_object_catalog VALUES (?,?,?,?,?,?)', (sid, oid, category, 'review', uid, now()))
+                        c.execute('UPDATE review_sessions SET revision=revision+1 WHERE id=?', (sid,))
+                        result = {'session': session_data(c, session_row(c, sid), uid), 'object': dict(objectId=oid, classKey=category, origin='review')}
+                    else:
+                        reason = body.get('reason')
+                        if not isinstance(reason, str) or not reason.strip() or len(reason.strip()) > 2000:
+                            raise ReviewError('RETURN_REASON_REQUIRED', '请填写不超过2000字的退回原因', 422)
+                        c.execute('INSERT INTO review_annotation_returns VALUES (?,?,?,?,?)', ('rta_' + uuid.uuid4().hex, sid, uid, reason.strip(), now()))
+                        c.execute("UPDATE review_sessions SET state='returned_to_annotation',revision=revision+1 WHERE id=?", (sid,))
+                        result = {'session': session_data(c, session_row(c, sid), uid)}
+                elif action == "finish":
                     if body["expectedSessionRevision"] != s["revision"]:
                         raise ReviewError(
                             "SESSION_REVISION_CONFLICT", "审查任务已更新，请刷新后完成"
@@ -516,7 +685,7 @@ def write(action, sid, uid, key, body, fi=None):
                         new_state = "submitted" if f["submission_id"] else "unreviewed"
                     else:
                         patch = normalize_patch(
-                            a, body["patch"], s["width"], s["height"]
+                            a, body["patch"], s["width"], s["height"], object_catalog(c, s)
                         )
                         new_state = (
                             "submitted"
@@ -526,7 +695,8 @@ def write(action, sid, uid, key, body, fi=None):
                             else "draft"
                         )
                     recheck = c.execute("SELECT 1 FROM review_return_events WHERE session_id=? AND frame_index=? AND resolved_review_version_id IS NULL", (sid, fi)).fetchone()
-                    if recheck and action != "submit" and f["state"] != "submitted":
+                    direct_recheck = c.execute("SELECT 1 FROM concentrated_reopens WHERE session_id=? AND frame_index=? AND invalidated_submission_id=?", (sid, fi, f["submission_id"])).fetchone()
+                    if (recheck or direct_recheck) and action != "submit" and f["state"] != "submitted":
                         # Restoring prior geometry still requires explicit submission.
                         new_state = "draft" if patch != committed else "unreviewed"
                     sub_id = f["submission_id"]
@@ -641,29 +811,34 @@ def finish(c, s, uid):
                 (f["submission_id"],),
             ).fetchone()[0]
         )
-        b = apply_patch(a, patch)
+        # Validate the frozen payload again rather than trusting an old draft or
+        # array position. Removed and added objects have no counterpart geometry.
+        normalized = normalize_patch(a, patch, s['width'], s['height'], object_catalog(c, s))
+        b = materialize(s, f['frame_index'], a, normalized)
         frames.append({"frameIndex": f["frame_index"], "objects": b})
-        for before, after in zip(a, b):
-            m = box_metrics(before["bbox"], after["bbox"])
-            if m:
-                aa, bb = before["bbox"], after["bbox"]
+        before_ids, after_ids = {o['objectId']: o for o in a}, {o['objectId']: o for o in b}
+        for oid in sorted(before_ids.keys() | after_ids.keys()):
+            before, after = before_ids.get(oid), after_ids.get(oid)
+            aa, bb = before['bbox'] if before else None, after['bbox'] if after else None
+            m = box_metrics(aa, bb) if aa is not None and bb is not None else None
+            if aa != bb:
                 changes.append(
                     (
                         "chg_" + uuid.uuid4().hex,
                         vid,
                         f["frame_index"],
-                        before["objectId"],
-                        before["annotationId"],
+                        oid,
+                        (before or after)["annotationId"],
                         packed(aa),
                         packed(bb),
-                        packed([(aa[0] + aa[2]) / 2, (aa[1] + aa[3]) / 2]),
-                        packed([(bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2]),
-                        m["iou"],
-                        m["centerShiftPx"],
-                        bb[0] - aa[0],
-                        bb[1] - aa[1],
-                        m["deltaWidth"],
-                        m["deltaHeight"],
+                        packed([(aa[0] + aa[2]) / 2, (aa[1] + aa[3]) / 2]) if aa else None,
+                        packed([(bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2]) if bb else None,
+                        m["iou"] if m else None,
+                        m["centerShiftPx"] if m else None,
+                        bb[0] - aa[0] if m else None,
+                        bb[1] - aa[1] if m else None,
+                        m["deltaWidth"] if m else None,
+                        m["deltaHeight"] if m else None,
                         uid,
                         f["submission_id"],
                     )
@@ -694,7 +869,11 @@ def finish(c, s, uid):
         "UPDATE review_sessions SET state='reviewed',revision=revision+1,changed_count=? WHERE id=?",
         (len({x[2] for x in changes}), sid),
     )
-    carry_confirmations(c, sid, vid, cid)
+    from .concentrated_review import info as concentrated_info, finalize as accept_review
+    if concentrated_info(c, sid):
+        accept_review(c, s, cid, uid)
+    else:
+        carry_confirmations(c, sid, vid, cid)
     return dict(
         session=session_data(c, session_row(c, sid), uid),
         reviewVersionId=vid,

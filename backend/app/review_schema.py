@@ -98,7 +98,7 @@ CREATE TABLE IF NOT EXISTS review_changes (
   frame_index     INTEGER NOT NULL,
   object_id       INTEGER NOT NULL,
   annotation_id   TEXT NOT NULL,
-  before_bbox     TEXT NOT NULL,               -- JSON [x1,y1,x2,y2]
+  before_bbox     TEXT NOT NULL,               -- JSON [x1,y1,x2,y2] or null (review addition/deletion)
   after_bbox      TEXT NOT NULL,
   before_center   TEXT,                        -- JSON [cx, cy]
   after_center    TEXT,

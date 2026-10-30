@@ -1,6 +1,6 @@
 export type Box = [number, number, number, number]
 export interface ReviewObject { objectId: number; annotationId: string; classKey?: string; bbox: Box }
-export interface Patch { objectId: number; bbox: Box }
+export interface Patch { objectId: number; bbox?: Box; op?: 'update'|'add'|'delete'; classKey?: string }
 export const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v))
 // JSON object key order is not meaningful; Python responses sort keys.
 const canonical = (v: unknown): unknown => Array.isArray(v) ? v.map(canonical) : v && typeof v === 'object'
@@ -8,8 +8,15 @@ const canonical = (v: unknown): unknown => Array.isArray(v) ? v.map(canonical) :
 export const equal = (a: unknown, b: unknown) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b))
 export const normalized = (b: Box): Box => b.map(v => Math.round(v * 1000) / 1000) as Box
 export function patches(a: ReviewObject[], b: ReviewObject[]): Patch[] {
-  return b.filter((o, i) => !equal(normalized(o.bbox), normalized(a[i].bbox)))
-    .map(o => ({ objectId: o.objectId, bbox: normalized(o.bbox) })).sort((x,y) => x.objectId-y.objectId)
+  const original=new Map(a.map(o=>[o.objectId,o])),effective=new Map(b.map(o=>[o.objectId,o]))
+  const result:Patch[]=[]
+  for(const o of a)if(!effective.has(o.objectId))result.push({objectId:o.objectId,op:'delete'})
+  for(const o of b){
+    const before=original.get(o.objectId)
+    if(!before)result.push({objectId:o.objectId,op:'add',classKey:o.classKey||'sperm',bbox:normalized(o.bbox)})
+    else if(!equal(normalized(o.bbox),normalized(before.bbox)))result.push({objectId:o.objectId,bbox:normalized(o.bbox)})
+  }
+  return result.sort((x,y)=>x.objectId-y.objectId)
 }
 export function metrics(a: Box, b: Box) {
   if (equal(a,b)) return null

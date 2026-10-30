@@ -94,7 +94,7 @@ def test_zip_matches_script_schema_read_only_and_excludes_private_data(statistic
         with db.connect() as conn:
             assert manifest["sourceSystemId"] == conn.execute("SELECT source_system_id FROM audit_source_identity").fetchone()[0]
         assert set(archive.namelist()) == {spec.filename for spec in export.EXPORT_SPECS} | {"manifest.json"}
-        assert len(manifest["files"]) == 17
+        assert len(manifest["files"]) == len(export.EXPORT_SPECS)
         for item in manifest["files"]:
             content = archive.read(item["name"])
             assert hashlib.sha256(content).hexdigest() == item["sha256"]
@@ -188,7 +188,7 @@ def test_optional_tables_can_be_omitted_explicitly(statistics_client):
     with zip_data(statistics_client, eid) as archive:
         manifest = json.loads(archive.read("manifest.json"))
         assert manifest["omittedOptionalTables"] == ["confirmation_actions", "confirmation_reopen_events"]
-        assert len(manifest["files"]) == 15
+        assert len(manifest["files"]) == len(export.EXPORT_SPECS) - 2
 
 
 def test_paginated_source_reading_avoids_fetchall(statistics_client, monkeypatch):

@@ -1,6 +1,8 @@
-import type { TrackingFrameResult } from '../types/annotation'
+import type { AnnotationObject, TrackingFrameResult } from '../types/annotation'
 
 export interface TrackingResultEnvelope {
+  jointTracking?: {state:'checked'|'failed';checkedFrames:number}
+  terminalIdentity?: {frameIndex:number;anchorHash:string;matches:Record<string,number>}
   format?: string
   state?: 'available' | 'not_generated'
   frames: TrackingFrameResult[]
@@ -15,10 +17,19 @@ const finite = (value: unknown): value is number => typeof value === 'number' &&
 export function validateTrackingResult(value: unknown): asserts value is TrackingResultEnvelope | TrackingFrameResult {
   const invalid = () => { throw new Error('追踪结果结构损坏，请检查服务器结果文件并重新读取') }
   if (!record(value)) return invalid()
+  if(value.jointTracking!==undefined){
+    const j=value.jointTracking
+    if(!record(j)||!['checked','failed'].includes(String(j.state))||!index(j.checkedFrames))return invalid()
+  }
+  if(value.terminalIdentity!==undefined){
+    const t=value.terminalIdentity
+    if(!record(t)||!index(t.frameIndex)||typeof t.anchorHash!=='string'||!/^[a-f0-9]{64}$/.test(t.anchorHash)||!record(t.matches)||!Object.entries(t.matches).every(([k,v])=>/^[1-9]\d*$/.test(k)&&index(v)&&v>0)||new Set(Object.values(t.matches)).size!==Object.keys(t.matches).length)return invalid()
+  }
   const envelope = 'frames' in value
   if (envelope && (!Array.isArray(value.frames) || !index(value.count) || value.count !== value.frames.length)) return invalid()
   if ('state' in value && value.state !== 'available' && value.state !== 'not_generated') return invalid()
   const frames = envelope ? value.frames as unknown[] : [value]
+  if(record(value.jointTracking) && (Number(value.jointTracking.checkedFrames)>frames.length || (value.jointTracking.state==='checked' && value.jointTracking.checkedFrames!==frames.length)))return invalid()
   if (value.state === 'not_generated' && (!envelope || frames.length !== 0)) return invalid()
   const frameIds = new Set<number>()
   for (const frame of frames) {
@@ -34,4 +45,17 @@ export function validateTrackingResult(value: unknown): asserts value is Trackin
       objects.add(obj.objectId)
     }
   }
+}
+
+/** Reconcile only the explicitly supplied terminal anchors, once per run.
+ * Original ID and coordinates remain in the server's anchor snapshot. This
+ * makes global deletion and later continuation use the same biological ID.
+ */
+export function reconcileTerminalIdentities(objects:AnnotationObject[], terminal:TrackingResultEnvelope['terminalIdentity']):AnnotationObject[]{
+  if(!terminal)return objects
+  return objects.map(o=>{
+    if(o.source!=='manual'||o.frameIndex!==terminal.frameIndex||o.endpointAnchorHash===terminal.anchorHash||o.objectId==null)return o
+    const canonical=terminal.matches[String(o.objectId)]
+    return canonical==null?o:{...o,objectId:canonical,endpointOriginalObjectId:o.objectId,endpointAnchorHash:terminal.anchorHash}
+  })
 }

@@ -39,3 +39,16 @@
 }
 /* Focus must win over responsive and remembered collapsed columns. */
 .workbench-layout.immersive{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr);gap:0}
+/* B/C focus enlarges the image while keeping submit/confirmation within reach. */
+.workbench-page.is-focused{position:fixed;inset:0;z-index:50;height:100vh;min-height:0;padding:12px;background:var(--app-bg);overflow:hidden}
+.workbench-page.is-focused .workbench-layout,.workbench-page.is-focused .workbench-layout.library-collapsed{grid-template-columns:minmax(0,1fr) 288px;grid-template-rows:minmax(0,1fr);gap:12px}
+.workbench-page.is-focused .workbench-library{display:none}
+.workbench-page.is-focused .workbench-canvas{grid-column:1;grid-row:1}
+.workbench-page.is-focused .workbench-inspector{grid-column:2;grid-row:1;min-height:0}
+@media(max-width:1200px){.workbench-page.is-focused .workbench-layout,.workbench-page.is-focused .workbench-layout.library-collapsed{grid-template-columns:minmax(0,1fr) 264px;gap:10px}}
+@media(max-width:700px){
+ .workbench-page.is-focused{overflow:auto;padding:8px}
+ .workbench-page.is-focused .workbench-layout,.workbench-page.is-focused .workbench-layout.library-collapsed{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(510px,auto) auto;flex:none}
+ .workbench-page.is-focused .workbench-inspector{grid-column:1;grid-row:2}
+ .workbench-page.is-focused .workbench-canvas{min-height:510px}
+}

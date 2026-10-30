@@ -106,8 +106,10 @@ def summary(r):
 
 def bundle(c, selected, destination):
     files, records = {}, []
+    features = set()
     for r in selected:
         snapshot, checksum = audit.load(c, r["id"])
+        features.update(snapshot.get('requiredFeatures', []))
         sp = f"audits/{snapshot['auditId']}.json"
         files[sp] = audit.packed(snapshot).encode()
         manifest = json.loads(r["manifest_json"]) if r["manifest_json"] else None
@@ -139,6 +141,8 @@ def bundle(c, selected, destination):
             for k, v in sorted(files.items())
         ],
     )
+    if features:
+        manifest['requiredFeatures'] = sorted(features)
     with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as z:
         for name, data in sorted(files.items()):
             z.writestr(name, data)

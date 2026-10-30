@@ -31,7 +31,7 @@ class SimulatedModel:
 
     def make_tracker_session(self, frames):
         count=sum(1 for _ in frames)
-        return SimpleNamespace(count=count, source_start=frames.meta['source_frame_indices'][0], objects=[])
+        return SimpleNamespace(count=count, source_start=frames.meta['source_frame_indices'][0] if hasattr(frames,'meta') else 0, objects=[])
 
     def add_manual_boxes(self, session, frame, objects):
         session.objects = objects
@@ -69,6 +69,9 @@ class SimulatedModel:
 
 
 assert os.environ.get('BROWSER_SIMULATED_MODEL') == '1', 'Explicit test-only model opt-in required'
+from app import head_click
+head_click.detect_frame = lambda image: []  # Explicitly simulated detector; never load local weights.
+head_click.detect_regions = lambda image, boxes: [[238,188,262,212,.99]] if image.shape[:2]==(480,640) else []  # Test-only circle localization.
 main.SAM3_ENABLED = True
 tracker.get_sam3_engine = lambda *args, **kwargs: SimulatedModel()
 
