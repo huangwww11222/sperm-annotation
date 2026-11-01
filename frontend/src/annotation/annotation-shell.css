@@ -60,7 +60,8 @@
 .review-chip.passed{background:var(--b-soft);color:var(--success)}
 .review-chip.stale{background:var(--warning-soft);color:var(--warning)}
 .asset-review{display:inline-block;margin-left:6px;font-weight:500;color:var(--muted)}
-.asset-review.passed{color:var(--success)}.asset-review.stale{color:var(--warning)}.asset-review.open{color:var(--accent)}
+.error-banner.package-import-report{color:var(--text);background:var(--surface-subtle);border-color:var(--line)}
+.asset-review.passed{color:var(--success)}.asset-review.stale{color:var(--warning)}.asset-review.open,.asset-review.asset-tracking{color:var(--accent)}
 .review-candidate-circle{position:absolute;min-width:28px;min-height:28px;transform:translate(-50%,-50%);border:2px solid #ffb547;border-radius:50%;box-shadow:0 0 0 1px #19242dbb;pointer-events:none;z-index:31;box-sizing:border-box;animation:review-pulse .8s ease-out 2}
 .review-candidate-circle.clickable{pointer-events:auto;cursor:zoom-in;z-index:32}
 .review-last-box{position:absolute;border:2px dashed #9aa7b2;pointer-events:none;z-index:30;box-sizing:border-box}

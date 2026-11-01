@@ -55,7 +55,7 @@ storage/
 
 精确帧 JPEG 先写临时文件再原子替换；命中缓存读取为响应字节，避免返回路径后被 LRU 清理。只清理 `.frame_cache/frame_*.jpg`，源变化清理旧签名的这些 JPEG；不删除视频、标注、预览临时文件或其他运维数据。最多缓存 2 个解码器，后台长时追踪/导出另用顺序解码；不共享来源写锁。浏览器缓存服务器视频的人工框，AI 正文不再重复写入 localStorage；人工 pending 原请求、删除撤销快照及业务审计仍保存。
 
-Tracking JSONL 同样先写临时文件再原子替换，发布失败保留旧分支。长时视频解码、模型推理和按需预览编码不占用来源锁，结果/预览发布才使用短锁；追踪运行期间工作区只允许浏览状态保存，框、人工基准、删除规则写入仍拒绝。预览生成在 `.frame_cache/overlay-*.mp4` 临时文件进行，成功且输入签名未变化才发布；它及 meta 文件是可重建缓存，不影响 A/B/F 或训练集原图。任务内存与前端待查询记录不代表推理跨重启恢复，启动幂等回执在当前进程内有效。
+Tracking JSONL 同样先写临时文件再原子替换，发布失败保留旧分支。长时视频解码、模型推理和按需预览编码不占用来源锁，结果/预览发布才使用短锁；追踪运行期间该视频的工作区只允许浏览状态保存，框、人工基准、删除规则写入仍拒绝；锁只按 mediaId 生效，其他视频照常写入。预览生成在 `.frame_cache/overlay-*.mp4` 临时文件进行，成功且输入签名未变化才发布；它及 meta 文件是可重建缓存，不影响 A/B/F 或训练集原图。任务内存与前端待查询记录不代表推理跨重启恢复，启动幂等回执在当前进程内有效。
 
 覆盖重新标注不受历史审查记录限制（历史 A 不可变，不受影响）；覆盖后已通过的审查失效。重置使用 SQL 写事务、工作区 revision 与幂等键，移动旧 workspace/seed/results/overlay 到恢复目录，写入空工作区并删除该 media_id 的活动人工查询记录；原视频、media.json、历史 A 保留。成功后清理临时旧文件，失败回滚；启动按 journal 和成功回执协调进程中断后的文件状态，不能当作普通缓存直接删除。新的 generationId 使前端丢弃旧框/撤销/校准缓存，并在重放待重试草稿前识别轮次变化；仅已确认的覆盖允许丢弃旧请求，普通冲突不能静默覆盖。旧版本或旧无版本客户端不能写回已舍弃状态。新增字段和表均为兼容增量迁移，存储运行契约保持 1。
 
@@ -93,7 +93,7 @@ seed 的临时写入或替换失败保留旧文件，临时文件清理后可重
 
 ## SQLite 数据关系
 
-`backend/app/db.py` 的查询接口保留可选 `user_id` / `media_id` / `source` 过滤；同名视频按 `media_id` 区分。合并分支时不要恢复同名重复函数（`scripts/check_repository.py` 会检查重复定义）。
+`backend/app/db.py` 的查询接口保留可选 `user_id` / `media_id` / `source` 过滤；同名视频按 `media_id` 区分。新素材编号跳过已存在目录，也跳过 `annotation_reviews`、`annotation_review_exclusions`、`annotation_export_snapshots`、`media_revisions` 中仍有记录的编号（删除视频不删这些历史），因此删除后再上传同名视频得到 `stem_001` 等新编号。导入标注包的素材在 `media.json` 额外记录 `importedFrom`。合并分支时不要恢复同名重复函数（`scripts/check_repository.py` 会检查重复定义）。
 
 完整 DDL 在 [review_schema.py](../backend/app/review_schema.py)、[review_workflow.py](../backend/app/review_workflow.py)、[confirmation_workflow.py](../backend/app/confirmation_workflow.py)、[training_export.py](../backend/app/training_export.py)。启动时增量建表，保留历史数据。
 

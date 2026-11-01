@@ -58,6 +58,7 @@
 | --- | --- |
 | `POST /api/auth/register`、`/api/auth/login`；`GET /api/auth/me` | 真实账号与 JWT |
 | `POST /api/track/upload`；`GET /api/track/media` | 原视频上传、可用媒体 |
+| `POST /api/track/import-package` | multipart `file`：含原视频的训练数据集 ZIP。201 `{imported:[{mediaId,videoName,…,objects,emptyFrames}],skipped:[{videoName,reason,mediaId?}]}`；非 ZIP 或非本工具 manifest v2 返回 422，超过 `MAX_PACKAGE_BYTES`（默认 8 GiB）返回 413。规则见 WORKFLOW“导入标注包” |
 | `DELETE /api/track/media/{mediaId}` | 删除视频目录；需要登录。成功返回 `deleted: true, mediaId`；AI 运行、基准引用、新旧存储同名目录返回 409；文件系统失败返回 500 并记录日志，不能伪报成功 |
 | `GET /api/track/video/{mediaId}`、`/api/track/frame/{mediaId}/{fi}` | 原视频、真实指定帧 |
 | `GET / PUT /api/track/workspace/{mediaId}` | 可恢复工作区 |
@@ -86,7 +87,7 @@
 
 旧无版本请求携带的 `deletedTrackingIds` 只能是当前已有历史删除标记的子集（也可省略）；服务端保留完整当前集合，不删除既有标记。尝试新增历史删除标记同样返回 428，不能利用旧字段绕过版本校验。带版本及幂等键的当前客户端可正常删除和撤销。
 
-`POST /api/track` 新前端另携带 `Idempotency-Key`，同账号原键/输入在当前后端进程内返回同一个 taskId，原键用于不同输入返回 409；覆盖轮次仍校验，不能借回执绕过 generationId。旧无键客户端保持兼容。状态 GET 含 `stage`（queued/decoding/preparing_model/tracking/saving_results/paused/completed）、处理帧数与原始 `lastProcessedFrame`，不暴露请求 hash/key。模型失败在任务状态返回 failed 与具体 message，短 HTTP 超时不等于后台任务已失败。工作区浏览状态可在追踪中保存；改人工框、基准或删除规则返回 409。rewind 成功的 `overlayRegenerated` 为 false，不重编码源视频；结果发布原子完成。普通 rewind 将结果截断与被丢弃未来的身份/关系认可退休一起纳入两文件恢复日志，API 使用真实账号的内部 SQL 回执判断提交；不递增人工工作区 revision，不导致随后正常保存/续追的版本冲突。
+`POST /api/track` 新前端另携带 `Idempotency-Key`，同账号原键/输入在当前后端进程内返回同一个 taskId，原键用于不同输入返回 409；覆盖轮次仍校验，不能借回执绕过 generationId。旧无键客户端保持兼容。状态 GET 含 `stage`（queued/decoding/preparing_model/tracking/saving_results/paused/completed）、处理帧数与原始 `lastProcessedFrame`，不暴露请求 hash/key。模型失败在任务状态返回 failed 与具体 message，短 HTTP 超时不等于后台任务已失败。追踪只锁定所属视频：该视频已有排队或运行任务时再次 `POST /api/track` 返回 409，其他视频可以提交并排队（GPU 单 worker 依次执行，状态为 `queued`）。该视频的工作区浏览状态可在追踪中保存；改人工框、基准或删除规则返回 409，其他视频不受影响。rewind 成功的 `overlayRegenerated` 为 false，不重编码源视频；结果发布原子完成。普通 rewind 将结果截断与被丢弃未来的身份/关系认可退休一起纳入两文件恢复日志，API 使用真实账号的内部 SQL 回执判断提交；不递增人工工作区 revision，不导致随后正常保存/续追的版本冲突。
 
 删除规则是 `deletedObjectIds:number[]`（整视频）和 `deletedFrameObjects:[{objectId,frameIndex}]`（单帧）；`deletedTrackingIds` 仅保留历史兼容。规则同时作用于人工/AI、seed、追踪读取、人工记录查询、审查与导出。单帧删除不关闭后续该对象的追踪；整视频删除不允许该对象进入后续 seed。原追踪文件不物理抹除，撤销通过恢复工作区及移除对应删除标记实现。A/B/F 不随删除或撤销改变。
 

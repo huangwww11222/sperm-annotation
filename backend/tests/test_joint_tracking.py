@@ -191,7 +191,7 @@ def test_joint_request_requires_endpoints_before_seed_write(tmp_path,monkeypatch
     from app.schemas import TrackRequest
     from fastapi import HTTPException
     monkeypatch.setattr(main,'require_tracking_enabled',lambda:None)
-    monkeypatch.setattr(main,'tracking_is_busy',lambda:False)
+    monkeypatch.setattr(main,'tracking_is_busy',lambda *_:False)
     monkeypatch.setattr(main,'media_dir',lambda *a:tmp_path)
     monkeypatch.setattr(main,'find_video',lambda *a:tmp_path/'video.avi')
     monkeypatch.setattr(main,'_probe_video',lambda *a:dict(frameCount=9,width=200,height=100))

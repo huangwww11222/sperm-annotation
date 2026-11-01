@@ -78,5 +78,5 @@ def reset_annotations(media_id: str, body: ResetAnnotations, user: User, key: Ke
         directory = main.media_dir(media_id)
         if not directory.is_dir() or not main.find_video(directory):
             raise ReviewError("MEDIA_NOT_FOUND", "素材不存在", 404)
-        return media_reimport.reset(directory, user["uid"], key, body.model_dump(), main.tracking_is_busy)
+        return media_reimport.reset(directory, user["uid"], key, body.model_dump(), lambda: main.tracking_is_busy(media_id))
     return run()

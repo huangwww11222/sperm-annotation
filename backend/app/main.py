@@ -22,7 +22,7 @@ from starlette.concurrency import run_in_threadpool
 
 from .auth import current_user, current_video_user, clear_video_session, set_video_session, hash_password, sign_jwt, verify_password
 from .config import (
-    DATASET_EXPORT_DIR, DB_FILE, DEVICE, DTYPE, HOST, JWT_SECRET, LEGACY_TRACK_DATA_DIR, MAX_VIDEO_BYTES, MODEL_ID, PORT,
+    DATASET_EXPORT_DIR, DB_FILE, DEVICE, DTYPE, HOST, JWT_SECRET, LEGACY_TRACK_DATA_DIR, MAX_PACKAGE_BYTES, MAX_VIDEO_BYTES, MODEL_ID, PORT,
     TRACK_DATA_DIR, TRACK_FRAMES, SAM3_ENABLED,
 )
 from .db import create_user, delete_annotation, get_user, get_user_by_id, init_db, insert_annotations, list_annotations
@@ -70,16 +70,38 @@ def require_tracking_enabled() -> None:
     if not SAM3_ENABLED:
         raise HTTPException(503, "此服务器未启用 AI Tracking。请联系部署人员配置 SAM3 模型并启用 GPU 部署；人工标注、审查和导出仍可使用。")
 
-def tracking_is_busy() -> bool:
+def tracking_is_busy(media_id: str | None = None) -> bool:
+    """Any queued/running task, or only those of one video. Writes lock just the
+    video being tracked; other videos stay editable while tasks queue on the GPU."""
     with TASK_LOCK:
-        return any(item.get("status") in {"queued", "running"} for item in TASKS.values())
+        return any(item.get("status") in {"queued", "running"} and (media_id is None or item.get("mediaId") == media_id)
+                   for item in TASKS.values())
+
+
+MEDIA_HISTORY_TABLES = ("annotation_reviews", "annotation_review_exclusions", "annotation_export_snapshots", "media_revisions")
+
+
+def _media_id_has_history(media_id: str) -> bool:
+    """Review rounds, exclusions and export snapshots are keyed by mediaId and outlive a
+    deleted video. A new video must never reuse such an ID and inherit a review pass."""
+    import sqlite3
+    from contextlib import closing
+    from .db import connect
+    with closing(connect()) as conn:
+        for table in MEDIA_HISTORY_TABLES:
+            try:
+                if conn.execute(f"SELECT 1 FROM {table} WHERE media_id=? LIMIT 1", (media_id,)).fetchone():
+                    return True
+            except sqlite3.OperationalError:
+                continue  # Table not migrated yet on this installation.
+    return False
 
 
 def allocate_media_id(stem: str) -> str:
-    """同名视频不覆盖旧目录：首次为 stem，后续依次 stem_001、stem_002...。"""
+    """同名视频不覆盖旧目录，也不复用已删除视频仍留有审查记录的编号：首次为 stem，后续依次 stem_001、stem_002...。"""
     candidate = stem
     index = 1
-    while media_dir(candidate).exists():
+    while media_dir(candidate).exists() or _media_id_has_history(candidate):
         candidate = f"{stem}_{index:03d}"
         index += 1
     return candidate
@@ -211,10 +233,10 @@ def _px(obj: dict[str, Any], width: float | None, height: float | None) -> dict[
 @app.post("/api/annotation/annotations/manual", status_code=201)
 @source_write
 def save_manual(req: ManualAnnotationRequest, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
-    if tracking_is_busy():
-        raise HTTPException(409, "SAM3 Tracking 正在运行，暂时禁止人工标注")
     if not req.mediaId:
         raise HTTPException(400, "缺少 mediaId")
+    if tracking_is_busy(req.mediaId):
+        raise HTTPException(409, "该视频正在 AI 追踪，暂时禁止人工标注")
     if not req.objects:
         raise HTTPException(400, "objects 为空")
     width, height = _num(req.mediaWidth), _num(req.mediaHeight)
@@ -421,7 +443,7 @@ async def save_upload(upload: UploadFile, target: Path) -> int:
     return await run_in_threadpool(_save_upload_stream,upload.file,target)
 
 
-def _save_upload_stream(stream, target: Path) -> int:
+def _save_upload_stream(stream, target: Path, limit: int = MAX_VIDEO_BYTES) -> int:
     total = 0
     with target.open("wb") as out:
         while True:
@@ -429,8 +451,8 @@ def _save_upload_stream(stream, target: Path) -> int:
             if not chunk:
                 break
             total += len(chunk)
-            if total > MAX_VIDEO_BYTES:
-                raise HTTPException(413, f"视频超过大小限制 {MAX_VIDEO_BYTES} bytes")
+            if total > limit:
+                raise HTTPException(413, f"文件超过大小限制 {limit} bytes")
             out.write(chunk)
     return total
 
@@ -454,6 +476,21 @@ async def upload_video(file: UploadFile = File(...), user: dict[str, Any] = Depe
             if any(float(video_meta.get(key) or 0) <= 0 for key in ("frameCount", "width", "height", "fps")):
                 raise HTTPException(400, "上传文件不可读取，或无法获得有效的帧数、尺寸、FPS 元数据")
             return await run_in_threadpool(publish_upload,target, filename, video_meta, user["uid"])
+    finally:
+        await file.close()
+
+
+@app.post("/api/track/import-package", status_code=201)
+async def import_annotation_package(file: UploadFile = File(...), user: dict[str, Any] = Depends(current_user)):
+    """Import a training ZIP exported with original videos; each video arrives unreviewed."""
+    from .package_import import import_package
+    TRACK_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        with tempfile.TemporaryDirectory(prefix="_import-", dir=TRACK_DATA_DIR) as tmp:
+            package = Path(tmp) / "package.zip"
+            if await run_in_threadpool(_save_upload_stream, file.file, package, MAX_PACKAGE_BYTES) <= 0:
+                raise HTTPException(400, "文件为空")
+            return await run_in_threadpool(import_package, package, int(user["uid"]), Path(tmp))
     finally:
         await file.close()
 
@@ -518,8 +555,8 @@ def _commit_upload(target, filename, video_meta, uid, snapshot, existing, sha):
 @app.post("/api/track/annotations", status_code=201)
 @source_write
 def save_frame_annotations(req: dict[str, Any], user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
-    if tracking_is_busy():
-        raise HTTPException(409, "SAM3 Tracking 正在运行，暂时禁止人工标注")
+    if tracking_is_busy(str(req.get("mediaId") or "")):
+        raise HTTPException(409, "该视频正在 AI 追踪，暂时禁止人工标注")
     frame = req.get("frameIndex", -1)
     annotations = req.get("annotations")
     if not req.get("mediaId") or type(frame) is not int or frame < 0 or not isinstance(annotations, list) or not annotations:
@@ -706,7 +743,7 @@ def save_workspace_state(media_id: str, payload: dict[str, Any], user: dict[str,
         clean = {**previous, **{k: v for k, v in payload.items() if k not in annotation_state.SERVER_FIELDS and not k.startswith("_")}}
         annotation_state.validate_deletions(clean)
         annotation_state.validate_workspace_geometry(clean, source_media_info(directory))
-        if tracking_is_busy() and any(clean.get(field, []) != previous.get(field, []) for field in ("manualAnnotations", "manualBaselines", "deletedObjectIds", "deletedFrameObjects", "deletedTrackingIds")):
+        if tracking_is_busy(media_id) and any(clean.get(field, []) != previous.get(field, []) for field in ("manualAnnotations", "manualBaselines", "deletedObjectIds", "deletedFrameObjects", "deletedTrackingIds")):
             raise HTTPException(409, "AI Tracking 正在运行，暂时不能修改标注或删除范围")
         if payload.get("expectedRevision") is None:
             for field in ("deletedObjectIds", "deletedFrameObjects"):
@@ -745,8 +782,8 @@ def preview_annotation_deletion(media_id: str, object_id: int, user: dict[str, A
         raise HTTPException(422, "objectId 必须大于 0")
     if not directory.is_dir() or not find_video(directory):
         raise HTTPException(404, "素材不存在")
-    if tracking_is_busy():
-        raise HTTPException(409, "AI Tracking 正在运行，请等待完成再删除")
+    if tracking_is_busy(media_id):
+        raise HTTPException(409, "该视频正在 AI 追踪，请等待完成再删除")
     return annotation_state.deletion_preview(directory, object_id)
 
 
@@ -756,8 +793,8 @@ def save_tracking_feedback(media_id: str, payload: dict[str, Any], user: dict[st
     directory = media_dir(media_id)
     if not directory.is_dir() or not find_video(directory):
         raise HTTPException(404, "素材不存在")
-    if tracking_is_busy():
-        raise HTTPException(409, "AI Tracking 正在运行，请等待完成再确认")
+    if tracking_is_busy(media_id):
+        raise HTTPException(409, "该视频正在 AI 追踪，请等待完成再确认")
     return annotation_state.write_state(directory, media_id, int(user["uid"]), idempotency_key if isinstance(idempotency_key, str) else "", payload, "feedback", lambda previous: annotation_state.feedback_state(previous, directory, payload, int(user["uid"])))
 
 
@@ -886,9 +923,9 @@ def rewind_tracking(req: dict[str, Any], user: dict[str, Any] = Depends(current_
     # The frontend rewinds before starting inference. Reject disabled AI here
     # as well, so switching to CPU mode cannot truncate prior tracking results.
     require_tracking_enabled()
-    if tracking_is_busy():
-        raise HTTPException(409, "已有 SAM3 Tracking 任务正在运行，请等待完成")
     media_id = str(req.get("mediaId") or "").strip()
+    if tracking_is_busy(media_id):
+        raise HTTPException(409, "该视频已有追踪任务在排队或运行，请等待完成")
     try:
         start_frame = int(req.get("startFrame"))
     except (TypeError, ValueError):
@@ -913,7 +950,7 @@ def restart_tracking_branch(media_id: str, payload: dict[str, Any], user: dict[s
     from .tracking_restart import restart
     require_tracking_enabled()
     directory = media_dir(media_id)
-    return restart(directory, int(user["uid"]), idempotency_key, payload, source_media_info(directory), tracking_is_busy)
+    return restart(directory, int(user["uid"]), idempotency_key, payload, source_media_info(directory), lambda: tracking_is_busy(media_id))
 
 
 @app.post("/api/track", status_code=202)
@@ -933,8 +970,8 @@ def start_tracking(req: TrackRequest, user: dict[str, Any] = Depends(current_use
             annotation_state.require_generation(annotation_state.read_state(media_dir(req.mediaId)), req.generationId)
             logging.getLogger('review.tracking').info('tracking.start_replay task=%s media=%s', prior['taskId'], req.mediaId)
             return {'taskId': prior['taskId'], 'status': 'queued', 'maxFrames': prior['maxFrames'], 'trackFrames': prior['maxFrames']}
-    if tracking_is_busy():
-        raise HTTPException(409, "已有 SAM3 Tracking 任务正在运行，请等待完成")
+    if tracking_is_busy(req.mediaId):
+        raise HTTPException(409, "该视频已有追踪任务在排队或运行，请等待完成")
     if not req.annotations:
         raise HTTPException(400, "没有 Tracking seed bbox")
 
@@ -1270,9 +1307,9 @@ def delete_media(media_id: str, user: dict[str, Any] = Depends(current_user)) ->
     logger = logging.getLogger("review.media")
     if not media_id or media_id in {".", ".."} or Path(media_id).name != media_id or "\\" in media_id:
         raise HTTPException(400, "素材 ID 无效")
-    if tracking_is_busy():
+    if tracking_is_busy(media_id):
         logger.warning("media.delete_rejected media=%s user=%s reason=tracking_busy", media_id, user["uid"])
-        raise HTTPException(409, "SAM3 Tracking 正在运行，无法删除素材")
+        raise HTTPException(409, "该视频正在 AI 追踪，无法删除素材")
     directory = media_dir(media_id)
     if not directory.is_dir():
         raise HTTPException(404, "素材不存在")
@@ -1384,7 +1421,7 @@ def tracking_overlay(media_id: str, user: dict[str, Any] = Depends(current_user)
     video = find_video(directory)
     if not video or not (directory / RESULT_FILE_NAME).is_file():
         raise HTTPException(404, '原视频或追踪结果不存在')
-    file = prepare(video, directory / RESULT_FILE_NAME, tracking_is_busy)
+    file = prepare(video, directory / RESULT_FILE_NAME, lambda: tracking_is_busy(media_id))
     return FileResponse(file, media_type="video/mp4", filename=OVERLAY_FILE_NAME, content_disposition_type="inline")
 
 

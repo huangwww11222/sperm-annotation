@@ -26,6 +26,11 @@ const jsonRequest = async <T>(path: string, init: RequestInit = {}): Promise<T> 
   return data as T
 }, init.signal)
 
+export interface PackageImportResult {
+  imported: (TrackUploadResponse & { objects: number; emptyFrames: number })[]
+  skipped: { videoName: string; reason: string; mediaId?: string }[]
+}
+
 export interface TrackUploadResponse {
   mediaId: string
   videoName: string
@@ -256,6 +261,23 @@ export const trackApi = {
       throw Object.assign(new Error((data as any)?.message || (data as any)?.detail || `视频上传失败 (${res.status})`), {status:res.status,code:data.code,duplicate:data.duplicate as DuplicateVideo|undefined})
     }
     return data as TrackUploadResponse
+  },
+
+  async importPackage(file: File): Promise<PackageImportResult> {
+    const form = new FormData()
+    form.append('file', file, file.name)
+    const res = await fetch('/api/track/import-package', {
+      method: 'POST',
+      headers: { ...(tokenStore.get() ? { Authorization: `Bearer ${tokenStore.get()}` } : {}) },
+      body: form,
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      if (res.status === 401) notifyAuthExpired()
+      throw Object.assign(new Error((data as any)?.detail || `标注包导入失败 (${res.status})`), {status:res.status})
+    }
+    if (!Array.isArray((data as any).imported) || !Array.isArray((data as any).skipped)) throw new Error('服务器未返回有效导入结果，请刷新素材列表确认')
+    return data as PackageImportResult
   },
 
   async saveFrameAnnotations(input: {

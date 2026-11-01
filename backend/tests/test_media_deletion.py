@@ -120,9 +120,16 @@ def test_review_baseline_keeps_source_immutable(media):
 
 def test_tracking_blocks_delete(media, monkeypatch):
     client, root = media
-    monkeypatch.setattr(main, 'TASKS', {'test': {'status': 'running'}})
+    monkeypatch.setattr(main, 'TASKS', {'test': {'status': 'running', 'mediaId': root.name}})
     assert client.delete('/api/track/media/' + root.name).status_code == 409
     assert root.exists()
+
+
+def test_tracking_another_video_does_not_block_delete(media, monkeypatch):
+    client, root = media
+    monkeypatch.setattr(main, 'TASKS', {'test': {'status': 'running', 'mediaId': 'other-video'}})
+    assert client.delete('/api/track/media/' + root.name).status_code == 200
+    assert not root.exists()
 
 
 def test_legacy_copy_cannot_reappear_after_deleting_shadowing_directory(media):

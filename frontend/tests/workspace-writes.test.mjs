@@ -253,29 +253,36 @@ findTrackingOperation(trackingTree)
 assert(trackingOperation?.body, 'the actual tracking operation must be available to the cleanup harness')
 const trackingFinalizer = trackingOperation.body.statements.find(node => ts.isTryStatement(node))?.finallyBlock
 assert(trackingFinalizer, 'the actual tracking operation must finish with cleanup')
+const abandonedRule = trackingOperation.body.statements.find(node => ts.isVariableStatement(node) && node.getText(trackingTree).includes('const restartAbandoned'))
+assert(abandonedRule, 'the actual restart ownership rule must be available to the cleanup harness')
 const delayedTrackingCleanup = ts.transpileModule(
-  `(async () => { try { await responseGate } finally ${trackingFinalizer.getText(trackingTree)} })()`,
+  `(async () => { ${abandonedRule.getText(trackingTree)} try { await responseGate } finally ${trackingFinalizer.getText(trackingTree)} })()`,
   { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
 ).outputText
-function trackingCleanupHarness({ restart = true, activeJobs = true } = {}) {
+function trackingCleanupHarness({ restart = true, launched = false, unconfirmedJob = false } = {}) {
   const gate = deferred(), scheduled = []
   const context = {
     responseGate: gate.promise,
     restartIntent: restart ? { actorId: 'actor-A' } : undefined,
+    launched,
     restartSerial: 7,
     restartEpoch: 7,
     currentActor: 'actor-A',
     mediaId: 'media-A',
     currentMediaId: { value: 'media-A' },
-    trackingJobs: new Map(activeJobs ? [['current-job', { taskId: 'current-job' }]] : []),
-    isAiBusy: { value: true },
-    trackingRetryBusy: { value: true },
-    trackingProgress: { value: '正在查询当前任务' },
+    // media-B tracks in the background; its state must survive media-A cleanup.
+    trackingJobs: new Map([['media-B', { taskId: 'job-B' }], ...(unconfirmedJob ? [['media-A', { taskId: 'job-A' }]] : [])]),
+    trackingMedia: new Set(['media-A', 'media-B']),
+    trackingProgressByMedia: { value: { 'media-A': '正在追踪第 3 帧', 'media-B': '排队中' } },
     scheduleWorkspaceStateSave: mediaId => scheduled.push(mediaId),
   }
   context.useAuth = () => ({ user: { value: { id: context.currentActor } } })
   const completion = runInNewContext(delayedTrackingCleanup, context)
   return { context, scheduled, completion, resolve: gate.resolve }
+}
+const otherVideoIntact = context => {
+  assert(context.trackingMedia.has('media-B') && context.trackingJobs.has('media-B'), 'another video keeps tracking')
+  assert.equal(context.trackingProgressByMedia.value['media-B'], '排队中', 'another video keeps its progress')
 }
 
 for (const [reason, switchContext] of [
@@ -283,34 +290,54 @@ for (const [reason, switchContext] of [
   ['restart was cancelled or page unmounted', context => { context.restartEpoch++ }],
   ['media changed', context => { context.currentMediaId.value = 'media-B' }],
 ]) {
-  test(`a late restarted tracking response preserves the current UI when ${reason}`, async () => {
+  test(`a late unlaunched restart releases only its own video when ${reason}`, async () => {
     const h = trackingCleanupHarness()
     switchContext(h.context)
     h.resolve(); await h.completion
-    assert.equal(h.context.isAiBusy.value, true, 'the current job must remain busy')
-    assert.equal(h.context.trackingRetryBusy.value, true, 'a stale operation must not release the current retry lock')
-    assert.equal(h.context.trackingProgress.value, '正在查询当前任务', 'a stale operation must not erase current progress')
+    assert(!h.context.trackingMedia.has('media-A'), 'the operation owns and releases its video')
+    otherVideoIntact(h.context)
     assert.deepEqual(h.scheduled, [], 'a stale operation must not schedule a save')
   })
 }
 
-test('a matching restart still clears its retry state and schedules its completed workspace', async () => {
-  const h = trackingCleanupHarness({ activeJobs: false })
+test('a launched restart keeps running after the user opens another video and does not save the hidden video', async () => {
+  const h = trackingCleanupHarness({ launched: true })
+  h.context.restartEpoch++; h.context.currentMediaId.value = 'media-B'
   h.resolve(); await h.completion
-  assert.equal(h.context.isAiBusy.value, false)
-  assert.equal(h.context.trackingRetryBusy.value, false)
-  assert.equal(h.context.trackingProgress.value, '')
+  assert(!h.context.trackingMedia.has('media-A'))
+  otherVideoIntact(h.context)
+  assert.deepEqual(h.scheduled, [])
+})
+
+test('a matching restart clears its state and schedules its completed workspace', async () => {
+  const h = trackingCleanupHarness()
+  h.resolve(); await h.completion
+  assert(!h.context.trackingMedia.has('media-A'))
+  assert.equal(h.context.trackingProgressByMedia.value['media-A'], undefined)
+  otherVideoIntact(h.context)
   assert.deepEqual(h.scheduled, ['media-A'])
 })
 
-test('ordinary tracking retains its existing cleanup behavior', async () => {
-  const h = trackingCleanupHarness({ restart: false, activeJobs: false })
-  h.context.currentActor = 'actor-B'
-  h.context.restartEpoch++
+test('an unconfirmed job keeps its video locked against saving', async () => {
+  const h = trackingCleanupHarness({ restart: false, unconfirmedJob: true })
+  h.resolve(); await h.completion
+  assert(h.context.trackingJobs.has('media-A'), 'the original request stays available for retry')
+  assert.deepEqual(h.scheduled, [])
+})
+
+test('ordinary tracking finishing in the background releases its video without saving it', async () => {
+  const h = trackingCleanupHarness({ restart: false })
   h.context.currentMediaId.value = 'media-B'
   h.resolve(); await h.completion
-  assert.equal(h.context.isAiBusy.value, false)
-  assert.equal(h.context.trackingRetryBusy.value, false)
-  assert.equal(h.context.trackingProgress.value, '')
+  assert(!h.context.trackingMedia.has('media-A'))
+  otherVideoIntact(h.context)
+  assert.deepEqual(h.scheduled, [])
+})
+
+test('ordinary tracking on the open video saves its workspace', async () => {
+  const h = trackingCleanupHarness({ restart: false })
+  h.context.currentActor = 'actor-B'; h.context.restartEpoch++
+  h.resolve(); await h.completion
+  assert(!h.context.trackingMedia.has('media-A'))
   assert.deepEqual(h.scheduled, ['media-A'])
 })

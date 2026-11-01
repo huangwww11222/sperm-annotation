@@ -50,12 +50,38 @@ def test_slow_inference_does_not_block_workspace_reads_or_view_saves(controls, m
 
 def test_model_busy_rejects_changes_to_manual_geometry_but_allows_view_state(controls, monkeypatch):
     client, root, state = controls
-    monkeypatch.setattr(main, 'TASKS', {'test': {'status': 'running'}})
+    monkeypatch.setattr(main, 'TASKS', {'test': {'status': 'running', 'mediaId': root.name}})
     changed = json.loads(json.dumps(state))
     changed['manualAnnotations'][0]['bbox']['width'] += 5
     response = save(client, changed)
     assert response.status_code == 409
     assert save(client, {**state, 'currentFrame': 1}, key='view-only').status_code == 200
+
+
+def test_tracking_another_video_leaves_this_video_editable(controls, monkeypatch):
+    # Several annotators share one GPU: a queued or running task locks only its own video.
+    client, root, state = controls
+    monkeypatch.setattr(main, 'TASKS', {'test': {'status': 'running', 'mediaId': 'other-video'}})
+    changed = json.loads(json.dumps(state))
+    changed['manualAnnotations'][0]['bbox']['width'] += 5
+    assert save(client, changed).status_code == 200
+
+
+def test_second_video_queues_behind_running_task_but_same_video_is_rejected(controls, monkeypatch):
+    client, root, state = controls
+    state.update(pausedAnomalies=[], lastPausedContext=None)
+    (root / 'workspace_state.json').write_text(json.dumps(state))
+    monkeypatch.setattr(main, 'SAM3_ENABLED', True)
+    submissions = []
+    class Executor:
+        def submit(self, *args): submissions.append(args)
+    monkeypatch.setattr(main, 'TRACK_EXECUTOR', Executor())
+    monkeypatch.setattr(main, 'TASKS', {'other': {'status': 'running', 'mediaId': 'other-video'}})
+    body = {'mediaId': root.name, 'startFrame': 0, 'annotations': [{'object_id': 7, 'bbox': [10, 10, 30, 30]}]}
+    queued = client.post('/api/track', json=body, headers={'Idempotency-Key': 'queued-behind-other'})
+    assert queued.status_code == 202 and queued.json()['status'] == 'queued' and len(submissions) == 1
+    again = client.post('/api/track', json=body, headers={'Idempotency-Key': 'second-same-video'})
+    assert again.status_code == 409 and len(submissions) == 1
 
 
 def test_real_4k_segment_keeps_source_frame_numbers_and_pixel_boxes(tmp_path, monkeypatch, caplog):

@@ -39,6 +39,8 @@ DEVICE = os.getenv("SAM3_DEVICE", "cuda")
 DTYPE = os.getenv("SAM3_DTYPE", "bfloat16")
 
 MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024
+# 导入标注包（含原视频、图片和标签的训练数据集 ZIP）的上传上限。
+MAX_PACKAGE_BYTES = int(os.getenv("MAX_PACKAGE_BYTES", str(4 * MAX_VIDEO_BYTES)))
 # 每次点击 AI Tracking 最多处理的帧数。
 # 修改这里即可全局调整，例如改成 10；前后端都会自动使用这个值。
 TRACK_FRAMES = int(os.getenv("SAM3_TRACK_FRAMES", "120"))

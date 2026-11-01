@@ -200,47 +200,47 @@ onUnmounted(() => { alive = false; stopPolling(); emit('open', false); emit('bus
       <div class="c-modal-mask" @click.self="close">
         <section ref="dialog" class="c-modal training-export-dialog" role="dialog" aria-modal="true" aria-labelledby="training-export-title">
           <h2 id="training-export-title">{{ annotationOnly?'导出训练数据集':'导出已确认训练数据集' }}</h2>
-          <p>{{ mediaName }}{{ extraIds.length ? ` 等 ${ids.length} 个视频` : '' }} · {{ annotationOnly?'使用当前已保存并确认导出的标注快照。':'仅使用当前已完成审查与对比确认的最终版本。' }}</p>
+          <p class="training-export-sub">{{ mediaName }}{{ extraIds.length ? ` 等 ${ids.length} 个视频` : '' }} · {{ annotationOnly?'审查通过的标注':'已确认的最终版本' }}</p>
           <div v-if="summary" class="training-export-summary">
-            <span><b>{{ summary.frameCount }}</b>全部帧</span>
-            <span><b>{{ summary.objectCount }}</b>最终标注框</span>
-            <span><b>{{ summary.emptyFrames }}</b>空帧</span>
-            <span><b>{{ summary.classNames.length }}</b>类别</span>
+            <span><b>{{ summary.frameCount }}</b> 帧</span>
+            <span><b>{{ summary.objectCount }}</b> 框</span>
+            <span><b>{{ summary.emptyFrames }}</b> 空帧</span>
+            <span class="training-export-classes" :title="`类别：${summary.classNames.join(' · ')}`">{{ summary.classNames.join(' · ') }}</span>
           </div>
-          <p v-if="summary" class="training-export-classes">类别：{{ summary.classNames.join(' · ') }}</p>
           <div v-if="error" role="alert" class="confirmation-error">
             <span>{{ error }}</span><button :disabled="busy" @click="retry">重试导出请求</button>
           </div>
           <template v-if="summary">
-            <label class="training-export-field">输出格式
-              <select v-model="format" aria-label="数据集格式" :disabled="busy || working || !!error">
-                <option value="yolo">YOLO（默认）</option>
-                <option value="coco">COCO</option>
-                <option value="both">YOLO + COCO</option>
-              </select>
-            </label>
-            <label class="training-export-field">划分方式
-              <select v-model="splitMode" aria-label="划分方式" :disabled="busy || working || !!error" @change="modeChanged">
-                <option value="video">按视频划分（推荐）</option>
-                <option value="frame">按帧划分（仅调试）</option>
-              </select>
-            </label>
-            <label class="training-export-field">{{ splitMode === 'video' ? '训练 / 验证 / 测试' : '训练 / 验证集划分' }}
-              <select v-model="preset" aria-label="训练验证比例" :disabled="busy || working || !!error">
-                <option v-for="[train, test] in presets" :key="`${train}/${test}`" :value="`${train}/${test}`">
-                  {{ percent(train) }} / {{ percent(1 - train - test) }}{{ splitMode === 'video' ? ` / ${percent(test)}` : '' }}
-                </option>
-              </select>
-            </label>
+            <div class="training-export-options">
+              <label class="training-export-field">格式
+                <select v-model="format" aria-label="数据集格式" :disabled="busy || working || !!error">
+                  <option value="yolo">YOLO</option>
+                  <option value="coco">COCO</option>
+                  <option value="both">YOLO + COCO</option>
+                </select>
+              </label>
+              <label class="training-export-field" title="按视频：同一视频的帧只进一个集合，验证/测试反映模型在没见过的视频上的效果。按帧：相邻帧几乎相同，验证指标偏高，仅用于调试。">划分
+                <select v-model="splitMode" aria-label="划分方式" :disabled="busy || working || !!error" @change="modeChanged">
+                  <option value="video">按视频（推荐）</option>
+                  <option value="frame">按帧（调试）</option>
+                </select>
+              </label>
+              <label class="training-export-field">{{ splitMode === 'video' ? '训练/验证/测试' : '训练/验证' }}
+                <select v-model="preset" aria-label="训练验证比例" :disabled="busy || working || !!error">
+                  <option v-for="[train, test] in presets" :key="`${train}/${test}`" :value="`${train}/${test}`">
+                    {{ percent(train) }} / {{ percent(1 - train - test) }}{{ splitMode === 'video' ? ` / ${percent(test)}` : '' }}
+                  </option>
+                </select>
+              </label>
+            </div>
             <div v-if="annotationOnly && others.length" class="training-export-videos">
-              <strong>合并其他已导出的视频</strong>
-              <small>列出你在标注页导出过、之后没有再修改的视频。标注有变化的视频需要回到该视频重新导出。</small>
+              <strong title="你在标注页导出过、之后没有再修改的视频。标注有变化的视频需回到该视频重新导出。">一起导出其他视频</strong>
               <label v-for="o in others" :key="o.finalVersionId" :title="o.reason || ''">
                 <input v-model="extraIds" type="checkbox" :value="o.finalVersionId" :disabled="busy || working || !!error || !o.valid" />
                 <span>{{ o.name }} · {{ o.frameCount }} 帧</span><em v-if="!o.valid">{{ o.reason }}</em>
               </label>
             </div>
-            <div v-if="splitMode === 'video' && summary.videos" class="training-export-videos">
+            <div v-if="splitMode === 'video' && summary.videos && summary.videos.length > 1" class="training-export-videos">
               <strong>每个视频的去向</strong>
               <label v-for="v in summary.videos" :key="v.finalVersionId">
                 <span>{{ videoName(v.finalVersionId) }} · {{ v.frameCount }} 帧</span>
@@ -251,14 +251,20 @@ onUnmounted(() => { alive = false; stopPolling(); emit('open', false); emit('bus
               </label>
             </div>
             <p v-if="planError" role="alert" class="confirmation-error">{{ planError }}</p>
-            <p v-if="splitMode === 'video' && summary.splitFrames">
-              训练 {{ summary.splitFrames.train }} 帧（{{ videoCount('train') }} 个视频）、验证 {{ summary.splitFrames.val }} 帧（{{ videoCount('val') }} 个）、测试 {{ summary.splitFrames.test }} 帧（{{ videoCount('test') }} 个）。
-              同一视频的所有帧只进一个集合，验证和测试反映模型在没见过的视频上的效果。自动划分按视频内容固定，重复或分批导出时去向不变；视频少时比例会有偏差，可手动指定。
-              <template v-if="ids.length === 1">只导出一个视频时，整段视频进入同一个集合，{{ annotationOnly && others.length ? '请勾选上面的其他视频一起导出，或' : '请' }}之后用合并脚本与其他视频合并。</template>
+            <p v-if="splitMode === 'video' && summary.splitFrames" class="training-export-plan" title="自动划分按视频内容固定，重复或分批导出时去向不变；视频少时比例会有偏差，可手动指定。">
+              训练 {{ summary.splitFrames.train }} · 验证 {{ summary.splitFrames.val }} · 测试 {{ summary.splitFrames.test }} 帧
+              <template v-if="summary.videos?.length === 1">
+                <select :aria-label="`${videoName(summary.videos[0].finalVersionId)} 的划分`" :value="overrides[summary.videos[0].finalVersionId] || ''" :disabled="busy || working || !!error" @change="setOverride(summary.videos[0].finalVersionId, ($event.target as HTMLSelectElement).value)">
+                  <option value="">整段自动进{{ summary.videos[0].split ? splitNames[summary.videos[0].split] : '' }}</option>
+                  <option value="train">整段进训练</option><option value="val">整段进验证</option><option value="test">整段进测试</option>
+                </select>
+              </template>
             </p>
-            <p v-else>预计训练 {{ trainCount }} 帧、验证 {{ summary.frameCount - trainCount }} 帧。按帧序划分，相邻帧几乎相同，验证指标会偏高，只适合调试。</p>
-            <label class="training-export-check"><input v-model="includeVideos" type="checkbox" :disabled="busy || working || !!error" />同时导出原视频（放在 videos/，体积会明显增大）</label>
-            <p v-if="format !== 'coco'">ZIP 包含 images/、labels/、data.yaml 和版本追溯信息。解压后使用 data.yaml 训练。</p>
+            <p v-else-if="summary" class="training-export-plan">训练 {{ trainCount }} · 验证 {{ summary.frameCount - trainCount }} 帧</p>
+            <label class="training-export-check" title="原视频放在 videos/，ZIP 可在“导入标注包”里导回标注工具复查和修改。">
+              <input v-model="includeVideos" type="checkbox" :disabled="busy || working || !!error" />
+              <span>包含原视频 <small>可导回标注工具复查，体积较大</small></span>
+            </label>
           </template>
           <div v-if="job" class="training-export-job" aria-live="polite">
             <template v-if="working">
@@ -290,20 +296,25 @@ onUnmounted(() => { alive = false; stopPolling(); emit('open', false); emit('bus
 <style src="./export-dialog.css"></style>
 <style scoped>
 .training-export-host { min-height: 0; padding: 0; }
-.training-export-dialog { width: 570px; }
-.training-export-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding: 12px; margin-bottom: 12px; background: var(--surface-subtle); border-radius: 5px; text-align: center; color: var(--muted); }
-.training-export-summary b { display: block; color: var(--accent); font-size: 20px; }
-.training-export-classes { overflow-wrap: anywhere; }
-.training-export-field { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 14px 0; color: var(--text); }
-.training-export-field select { background: var(--surface-subtle); border: 1px solid var(--line); border-radius: 5px; padding: 7px 10px; color: var(--text); }
+.training-export-dialog { width: 520px; }
+.training-export-sub { color: var(--muted); margin-bottom: 12px; overflow-wrap: anywhere; }
+.training-export-summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px; padding: 10px 12px; margin-bottom: 14px; background: var(--surface-subtle); border-radius: 5px; color: var(--muted); }
+.training-export-summary b { color: var(--accent); font-size: 17px; }
+.training-export-classes { flex: 1; min-width: 0; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.training-export-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.training-export-field { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px; }
+.training-export-field select, .training-export-plan select { background: var(--surface-subtle); border: 1px solid var(--line); border-radius: 5px; padding: 6px 8px; color: var(--text); font-size: 13px; min-width: 0; }
+.training-export-plan { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin: 12px 0 0; color: var(--text); }
 .training-export-job { display: flex; flex-direction: column; gap: 10px; background: var(--surface-subtle); border: 1px solid var(--line); border-radius: 5px; padding: 12px; margin-top: 14px; }
 .training-export-job p { margin-bottom: 0; }
 .training-export-id { overflow-wrap: anywhere; }
-.training-export-videos { display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow-y: auto; padding: 10px 12px; margin: 10px 0; background: var(--surface-subtle); border: 1px solid var(--line); border-radius: 5px; }
-.training-export-videos small, .training-export-videos em { color: var(--muted); font-style: normal; }
+.training-export-videos { display: flex; flex-direction: column; gap: 6px; max-height: 200px; overflow-y: auto; padding: 10px 12px; margin: 12px 0 0; background: var(--surface-subtle); border: 1px solid var(--line); border-radius: 5px; }
+.training-export-videos em { color: var(--muted); font-style: normal; }
 .training-export-videos label { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--text); }
 .training-export-videos label span { flex: 1; overflow-wrap: anywhere; }
 .training-export-videos select { background: var(--surface); border: 1px solid var(--line); border-radius: 5px; padding: 4px 8px; color: var(--text); }
-.training-export-check { display: flex; gap: 8px; align-items: center; margin: 12px 0; color: var(--text); }
-.training-export-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; margin-top: 14px; }
+.training-export-check { display: flex; gap: 8px; align-items: center; margin: 12px 0 0; color: var(--text); }
+.training-export-check small { color: var(--muted); margin-left: 4px; }
+.training-export-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; margin-top: 16px; }
+@media (max-width: 560px) { .training-export-options { grid-template-columns: 1fr; } }
 </style>

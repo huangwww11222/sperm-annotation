@@ -155,7 +155,7 @@ def test_busy_source_rejects_without_truncation_and_old_reviews_do_not_lock(rest
     from app.review_repository import create_review_session, freeze_baseline, upsert_media_revision
     directory = restart_case[1]
     original = (directory / "tracker_results.json").read_bytes()
-    monkeypatch.setattr(main, "TASKS", {"busy": {"status": "running"}})
+    monkeypatch.setattr(main, "TASKS", {"busy": {"status": "running", "mediaId": "control-video"}})
     assert restart(restart_case).status_code == 409
     assert (directory / "tracker_results.json").read_bytes() == original
     # Retired review history no longer locks tracking restarts.

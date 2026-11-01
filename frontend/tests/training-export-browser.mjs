@@ -1,7 +1,7 @@
 import { reviewLocationChecks } from './review-location-checks.mjs'
 import { useLegacyBrowserAPIs } from './legacy-browser-profile.mjs'
 import { statisticsExportChecks } from './statistics-export-checks.mjs'
-import { passReview } from './legacy-tracking-probe.mjs'
+import { passReview, legacyTrackingProbe } from './legacy-tracking-probe.mjs'
 // Annotation → review → export on disposable fixture videos and isolated test servers.
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -338,6 +338,55 @@ with zipfile.ZipFile(sys.argv[1]) as z:
   const again = await reviewState(VIDEO.mid)
   check(again.review.round === 2 && again.review.items.some(i => i.kind === 'changed') && !again.review.items.some(i => i.kind === 'coverage'), 're-review lists the changed frames instead of the whole checklist')
   check(!again.review.items.some(i=>i.source==='reverse' && i.startFrame===20), 'a reverse location already adopted does not reappear when a new checklist is generated')
+
+  // Another site imports the merged package: the portrait video is new there, the other already exists.
+  check((await api('/track/media/'+PORTRAIT.mid, 'DELETE')).ok(), 'portrait removed so the package brings it back as a new video')
+  const shipped = python(`
+import zipfile,json,sys
+with zipfile.ZipFile(sys.argv[1]) as z:
+ m=json.loads(z.read('manifest.json'))
+ s=next(s for s in m['sources'] if s['videoFile'] and s['videoFile'].endswith('${PORTRAIT.name}'))
+ f=json.loads(z.read('provenance/'+s['finalVersionId']+'.json'))['frames']
+ print(json.dumps({'objects':sum(len(x['objects']) for x in f)}))
+`, 'output/playwright/training-merged.zip')
+  await page.goto(origin+'/annotate'); await attach(); await openVideo(VIDEO.name, VIDEO.mid)
+  await page.getByTestId('package-input').setInputFiles('output/playwright/training-merged.zip')
+  await page.getByTestId('package-import-report').waitFor()
+  const report = await page.getByTestId('package-import-report').innerText()
+  check(report.includes('导入 1 个视频') && report.includes(VIDEO.name) && report.includes('未覆盖'), 'package import adds the missing video and refuses to overwrite the existing one')
+  const imported = await page.evaluate(() => window.ws.selectedMedia.value)
+  check(imported.name === PORTRAIT.name && imported.serverMediaId !== VIDEO.mid, 'imported video opens in the workbench')
+  const importedState = await json('/track/workspace/'+imported.serverMediaId)
+  check(importedState.manualAnnotations.length === shipped.objects && importedState.manualAnnotations.every(o => o.source === 'manual'), 'every exported box returns as an editable manual annotation')
+  await ready()
+  check((await page.getByTestId('header-review-status').innerText()) === '待审查' && await exportButton().isDisabled(), 'imported video starts unreviewed and cannot be exported before review here')
+  await page.screenshot({ path: 'output/playwright/package-import.png' })
+
+  // Tracking one video locks only that video; another can be opened and edited meanwhile.
+  let release = false
+  const fakeStart = route => route.fulfill({ status: 202, json: { taskId: 'background-1', status: 'queued', maxFrames: 3 } })
+  const fakeStatus = route => route.fulfill({ json: release ? { status: 'success', stage: 'completed', processedFrames: 3, lastProcessedFrame: 22, reachedVideoEnd: false } : { status: 'queued', stage: 'queued' } })
+  const fakeRewind = route => route.fulfill({ json: { removedRows: 0, deletedFutureSeedFiles: 0 } })
+  await page.route('**/api/track', fakeStart); await page.route('**/api/track/status/background-1', fakeStatus); await page.route('**/api/track/rewind', fakeRewind)
+  try {
+    await openVideo(VIDEO.name, VIDEO.mid)
+    const jump = page.getByRole('spinbutton', { name: '跳转帧号' }); await jump.fill('21'); await jump.press('Enter')
+    await page.waitForFunction(() => window.ws.currentFrame.value === 20); await ready()
+    await legacyTrackingProbe(page).click()
+    await page.waitForFunction(() => window.ws.isAiBusy.value && window.ws.trackingProgress.value.includes('排队'))
+    check(await page.locator('.canvas-status').innerText().then(t => t.includes('可切换到其他视频')), 'queued tracking tells the user other videos stay available')
+    await openVideo(PORTRAIT.name, imported.serverMediaId)
+    check(await page.evaluate(() => !window.ws.isAiBusy.value && !window.ws.editingBlocked.value), 'another video is editable while the first one tracks')
+    check(await page.locator('.asset-card').filter({ hasText: VIDEO.name }).getByTestId('asset-tracking').count() === 1, 'media list marks the video that is still tracking')
+    const before = importedState.manualAnnotations.length
+    await page.evaluate(() => window.ws.addObject({ x: 50, y: 50 }, { x: 48, y: 48, width: 4, height: 3 }))
+    await poll(async () => (await json('/track/workspace/'+imported.serverMediaId)).manualAnnotations.length === before + 1, 'manual box on the other video saved during tracking')
+    check(true, 'manual annotation saves on another video while the model job runs')
+    release = true
+    await page.waitForFunction(() => !window.ws.isTrackingMedia([...window.ws.mediaAssets.value].find(m => m.serverMediaId === 'ux-video').id))
+    check(await page.locator('.asset-card').filter({ hasText: VIDEO.name }).getByTestId('asset-tracking').count() === 0 && await page.evaluate(() => window.ws.selectedMedia.value.name) === PORTRAIT.name, 'background job finishes without pulling the user back to its video')
+  } finally { await page.unroute('**/api/track', fakeStart); await page.unroute('**/api/track/status/background-1', fakeStatus); await page.unroute('**/api/track/rewind', fakeRewind) }
+
   check(errors.length === 0, 'no uncaught browser errors across review and export')
   console.log(`SUCCESS ${checks} checks`)
 } finally {

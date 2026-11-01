@@ -101,7 +101,7 @@ def test_busy_or_changed_revision_does_not_remove_files(imports, monkeypatch):
     mid = upload(client, content).json()['mediaId']; directory = seed_workspace(client, mid)
     before = (directory / 'workspace_state.json').read_bytes()
     assert reset(client, mid, revision=0).status_code == 409
-    monkeypatch.setattr(main, 'TASKS', {'task': {'status': 'queued'}})
+    monkeypatch.setattr(main, 'TASKS', {'task': {'status': 'queued', 'mediaId': mid}})
     assert reset(client, mid).status_code == 409
     assert (directory / 'workspace_state.json').read_bytes() == before
     assert (directory / 'tracker_results.json').is_file()

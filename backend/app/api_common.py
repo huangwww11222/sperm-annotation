@@ -129,9 +129,9 @@ def media_context(media_id, allow_tracking=False):
     from .main import media_dir, find_video, tracking_is_busy
     from .tracker import _probe_video
 
-    if not allow_tracking and tracking_is_busy():
+    if not allow_tracking and tracking_is_busy(media_id):
         raise workflow.ReviewError(
-            "SOURCE_BUSY", "Tracking 正在运行，请等待完成后再操作"
+            "SOURCE_BUSY", "该视频正在 AI 追踪，请等待完成后再操作"
         )
     directory = media_dir(media_id)
     video = find_video(directory)

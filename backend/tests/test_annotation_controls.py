@@ -223,7 +223,7 @@ def test_corrupt_tracking_is_not_an_empty_successful_deletion_preview(controls):
 
 def test_tracking_queued_allows_ui_state_but_rejects_new_deletion(controls, monkeypatch):
     client, root, state = controls
-    monkeypatch.setattr(main, "TASKS", {"queued-test": {"status": "queued"}})
+    monkeypatch.setattr(main, "TASKS", {"queued-test": {"status": "queued", "mediaId": "control-video"}})
     assert save(client, {**state, "currentFrame": 2}).status_code == 200
     state["deletedObjectIds"] = [7]
     assert save(client, state, 1, "delete-while-queued").status_code == 409

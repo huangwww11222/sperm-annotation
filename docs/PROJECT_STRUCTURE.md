@@ -26,6 +26,7 @@ Vue 3 + TypeScript + Vite；FastAPI + SQLite；SAM3 在后端按需加载。前�
 | 框绘制/坐标/缓存 | `components/AnnotationOverlay.vue`、`annotation/geometry.ts`、`annotation/frameCache.ts` |
 | 审查 | `pages/AnnotatePage.vue`（`mode="review"`）、`components/AnnotationReviewPanel.vue`、`stores/annotationReview.ts`、`api/annotationReviewApi.ts`；后端 `annotation_review.py`（清单、加严抽检、通过与修改记录、导出门槛）与 `annotation_review_routes.py`；共享请求与日志 `api_common.py` |
 | 重复视频与覆盖重新标注 | `stores/workspace.ts`、`backend/app/media_reimport.py`、`main.py`；文件恢复日志与轮次保护见 STORAGE_LAYOUT |
+| 导入标注包 | `backend/app/package_import.py`（训练 ZIP → 新素材 + 人工工作区）、`main.py` 的 `/api/track/import-package`；前端 `stores/workspace.ts` 的 `importPackage` 与素材库“标注包”按钮 |
 | 追踪疑点证据 | `backend/app/review_evidence.py` / `endpoint_tracking.py` 写入Tracking行；当前 `annotation_review.frame_findings/reverse_items/detector_items` 提取并分组，旧 `concentrated_review` 仅保留历史数据层 |
 | 人工首尾与独立反追 | `backend/app/endpoint_tracking.py`：端点校验、反向有界窗口、多帧身份匹配与只读证据；`main.py` 编排、`annotation_completion.py` 有效尾框合并 |
 | 三路综合标注 | `backend/app/joint_tracking.py`：已有身份内关联、连续路径选择、统一几何与不确定片段；`head_click.detect_regions` 批量ROI推理；新首尾请求 combineResults=true |
