@@ -188,7 +188,7 @@ try {
     await legacyTrackingProbe(page).click()
     await poll(async()=>(await api('/track/result/'+mid)).frames.length===3,'tracking result before malformed response')
     await ready();assert.equal(await page.locator('.object-select').count(),1)
-    await poll(async()=>(await api('/track/workspace/'+mid)).currentFrame===2,'tracking end position saved before refresh')
+    await poll(async()=>await page.getByRole('spinbutton',{name:'跳转帧号'}).inputValue()==='3','tracking end position restored in this client before refresh')
     const matcher='**/api/track/result/'+mid+'*'
     await page.route(matcher,route=>route.fulfill({status:200,json:{
       format:'sam3-tracking-results-jsonl',state:'available',frames:null,count:3}}))

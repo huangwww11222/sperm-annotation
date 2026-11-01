@@ -72,13 +72,14 @@ capture.release()
     // Pause publication precedes the editor's debounced cursor save. Waiting
     // for a real terminal position prevents reload from restoring old frame 0.
     await poll(async()=>await page.getByRole('spinbutton',{name:'跳转帧号'}).inputValue()===String(paused.lastPausedContext.frameIndex+1),'UI navigated to first risk frame')
-    await state(mid,value=>value.currentFrame===paused.lastPausedContext.frameIndex,'pause position durably saved before refresh')
+    // The viewing position is per-client state (not shared), saved in this tab before refresh.
+    await poll(async()=>(await page.evaluate((id)=>{const k=Object.keys(sessionStorage).find(k=>k.startsWith('annotation-view:')&&k.includes(':'+id+':'));return k?JSON.parse(sessionStorage.getItem(k)):null},mid))?.currentFrame===paused.lastPausedContext.frameIndex,'pause position saved in this client before refresh')
     return work(mid)
   }
   async function completed(mid) {
     await poll(async()=> (await result(mid)).frames.length===8 && await page.getByTestId('tracking-feedback').count()===0,'policy resumed to the original eighth frame')
     await ready();check((await work(mid)).lastPausedContext===null,'completed branch has no stale pause')
-    await poll(async()=>(await work(mid)).currentFrame===7,'end position saved')
+    await poll(async()=>await page.getByRole('spinbutton',{name:'跳转帧号'}).inputValue()==='8','end position kept in the current client')
   }
   const visible = locator => locator.evaluate(element=>{
     const rect=element.getBoundingClientRect(),middle=document.elementFromPoint(rect.x+rect.width/2,rect.y+rect.height/2)

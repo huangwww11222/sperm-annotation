@@ -702,6 +702,61 @@ def _legacy_workspace_state(directory: Path, media_id: str) -> dict[str, Any] | 
     return state
 
 
+_WORKSPACE_STAMPS: dict[str, tuple[tuple[int, int], int, Any, Any]] = {}
+_STAMP_LOCK = threading.Lock()
+
+
+def _file_stamp(path: Path) -> list[int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return [stat.st_mtime_ns, stat.st_size]
+
+
+@app.get("/api/track/workspace/{media_id}/stamp")
+def get_workspace_stamp(media_id: str, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+    """Cheap collaboration poll: who changed what, without the global source lock.
+
+    Workspace and tracking files are replaced atomically, so an unlocked read sees a
+    whole old or new file. The revision is parsed only when the file stamp changed.
+    """
+    directory = media_dir(media_id)
+    if not directory.is_dir():
+        raise HTTPException(404, "素材不存在")
+    path = directory / WORKSPACE_STATE_FILE_NAME
+    stamp = _file_stamp(path)
+    revision, generation, updated_by = 0, None, None
+    if stamp:
+        key = (stamp[0], stamp[1])
+        with _STAMP_LOCK:
+            cached = _WORKSPACE_STAMPS.get(media_id)
+        if cached and cached[0] == key:
+            _, revision, generation, updated_by = cached
+        else:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                revision, generation, updated_by = int(payload.get("revision", 0)), payload.get("generationId"), payload.get("updatedBy")
+            except (OSError, ValueError, TypeError) as exc:
+                raise HTTPException(503, "工作区正在写入，请稍后重试") from exc
+            with _STAMP_LOCK:
+                _WORKSPACE_STAMPS[media_id] = (key, revision, generation, updated_by)
+    with TASK_LOCK:
+        task = next((t for t in TASKS.values() if t.get("mediaId") == media_id and t.get("status") in {"queued", "running"}), None)
+    tracking = None
+    if task:
+        from .db import get_user_by_id
+        owner = get_user_by_id(int(task["userId"])) if task.get("userId") is not None else None
+        tracking = {"userId": task.get("userId"), "userName": owner["username"] if owner else None, "status": task["status"]}
+    editor = None
+    if updated_by is not None:
+        from .db import get_user_by_id
+        row = get_user_by_id(int(updated_by))
+        editor = row["username"] if row else None
+    return {"mediaId": media_id, "revision": revision, "generationId": generation, "updatedBy": updated_by,
+            "updatedByName": editor, "trackingStamp": _file_stamp(directory / RESULT_FILE_NAME), "tracking": tracking}
+
+
 @app.get("/api/track/workspace/{media_id}")
 @source_write
 def get_workspace_state(media_id: str, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:

@@ -167,7 +167,11 @@ try{
   // before restoration starts; require the original frame to actually return.
   await page.waitForFunction(()=>window.ws.currentFrame.value===35&&!window.ws.workspaceRestoring.value&&!window.ws.exactFrameLoading.value)
   check((await state()).frame===35,'refresh resumes the last selected video and exact frame');await selectMedia('ux-video.avi');await go(35)
-  check(JSON.stringify((await state()).objects)===JSON.stringify(persisted),'manual geometry survives reload from the real workspace endpoint')
+  // Object identity is independent of insertion order. Compare every original
+  // field by stable ID; a manual override can change Map insertion order.
+  const byId=objects=>[...objects].sort((a,b)=>(a.objectId-b.objectId)||a.id.localeCompare(b.id))
+  assert.deepEqual(byId((await state()).objects),byId(persisted))
+  check(true,'manual geometry and identity survive reload from the real workspace endpoint')
   await selectMedia('ux-portrait.avi');check(Math.abs((await rect()).width/(await rect()).height-450/800)<.01,'portrait media uses the correct source aspect ratio')
   await page.setViewportSize({width:1180,height:760});await page.waitForTimeout(150)
   check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'compact desktop layout has no horizontal document overflow')

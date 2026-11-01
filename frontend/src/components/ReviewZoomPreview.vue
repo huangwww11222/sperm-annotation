@@ -4,12 +4,16 @@ import { nextTick, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 const props = withDefaults(defineProps<{
   source: HTMLImageElement | HTMLVideoElement | null
   box: number[] | null
+  /** Optional second box (pixel xyxy) drawn dashed, e.g. another user's version. */
+  compare?: number[] | null
+  /** Draw both boxes as rectangles (solid = box, dashed = compare). */
+  comparing?: boolean
   mediaWidth: number
   mediaHeight: number
   filter?: string
   size?: number
   frameKey?: string | number
-}>(), { filter: '', size: 160, frameKey: '' })
+}>(), { compare: null, comparing: false, filter: '', size: 160, frameKey: '' })
 const canvas = ref<HTMLCanvasElement | null>(null)
 const waiting = ref(true)
 
@@ -26,11 +30,15 @@ function sourceReady() {
 }
 
 function draw() {
-  const source = props.source, ctx = canvas.value?.getContext('2d'), box = props.box
+  const source = props.source, ctx = canvas.value?.getContext('2d')
+  const valid = (b: number[] | null | undefined): b is number[] => !!b && b.length === 4 && b.every(Number.isFinite) && b[2] > b[0] && b[3] > b[1]
+  const compare = valid(props.compare) ? props.compare : null
+  // With a comparison, centre the crop on both boxes so neither is cut off.
+  const box = valid(props.box) && compare ? [Math.min(props.box[0], compare[0]), Math.min(props.box[1], compare[1]), Math.max(props.box[2], compare[2]), Math.max(props.box[3], compare[3])] : valid(props.box) ? props.box : compare
   waiting.value = true
   ctx?.clearRect(0, 0, props.size, props.size)
   if (!sourceReady()) return
-  if (!source || !ctx || !box || box.length !== 4 || !box.every(Number.isFinite) || props.mediaWidth <= 0 || props.mediaHeight <= 0) return
+  if (!source || !ctx || !box || props.mediaWidth <= 0 || props.mediaHeight <= 0) return
   const [x1, y1, x2, y2] = box
   const boxW = x2 - x1, boxH = y2 - y1
   if (boxW <= 0 || boxH <= 0) return
@@ -48,6 +56,16 @@ function draw() {
   try { ctx.drawImage(source, sx, sy, crop, crop, 0, 0, side, side) } catch { ctx.restore(); return }
   ctx.restore()
   waiting.value = false
+  if (props.comparing) {
+    const rect = (b: number[], color: string, dash: number[]) => {
+      ctx.save(); ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.setLineDash(dash)
+      ctx.strokeRect((b[0] - sx) / crop * side, (b[1] - sy) / crop * side, (b[2] - b[0]) / crop * side, (b[3] - b[1]) / crop * side)
+      ctx.restore()
+    }
+    if (valid(props.box)) rect(props.box, '#ffb547', [])
+    if (compare) rect(compare, '#5fd3f3', [5, 4])
+    return
+  }
   const targetCx = (cx - sx) / crop * side, targetCy = (cy - sy) / crop * side
   const radiusX = boxW / crop * side / 2, radiusY = boxH / crop * side / 2
   ctx.save()
@@ -65,7 +83,7 @@ async function redraw() {
   draw()
 }
 
-watch(() => [props.source, props.box, props.mediaWidth, props.mediaHeight, props.filter, props.frameKey], redraw, { deep: true })
+watch(() => [props.source, props.box, props.compare, props.comparing, props.mediaWidth, props.mediaHeight, props.filter, props.frameKey], redraw, { deep: true })
 watch(() => props.source, bindSource, { immediate: true })
 onBeforeUnmount(() => bindSource(null))
 onMounted(redraw)

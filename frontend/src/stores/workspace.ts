@@ -10,7 +10,7 @@ import type { AnnotationObject, AnnotationTool, EffectResult, MediaAsset, SavedA
 // 登录、人工标注、视频目录、SAM3 Tracking 均走真实后端
 import { httpAnnotationApi } from '../api/httpAnnotationApi'
 import { trackApi, type DuplicateVideo, type PackageImportResult, type TrackUploadResponse, type TrackStatusResponse, type ObjectDeletionSummary, type NormalMotionSample, type TrackingWarningSummary, type TrackingFeedbackEvent, type TrackingFeedbackResponse, type TrackingFeedbackInput, type TrackingRestartInput } from '../api/trackApi'
-import { WorkspaceWrites, type WorkspaceDraft } from '../annotation/workspaceWrites'
+import { WorkspaceWrites, WorkspaceMergeConflict, sharedWorkspace, mergeWorkspace, workspaceEqual, alignWorkspaceIds, type MergeChoice, type WorkspaceDraft } from '../annotation/workspaceWrites'
 import { useAuth } from './auth'
 import { annotationReviewApi } from '../api/annotationReviewApi'
 import type { TrackingFrameObject, TrackingFrameResult } from '../types/annotation'
@@ -91,6 +91,13 @@ const createWorkspace = () => {
   const statusMessage = ref('就绪')
   const saveState = ref<'idle'|'saving'|'saved'|'error'>('idle')
   const saveError = ref('')
+  const collaborationErrors=shallowRef<Record<string,WorkspaceMergeConflict>>({})
+  const collaborationConflict=computed(()=>collaborationErrors.value[currentMediaId.value]??null)
+  const collaborationBusy=ref(false)
+  // Another account's tracking job on the open video: editing waits for it, like our own.
+  const remoteTracking=ref<Record<string,{userName:string|null;status:string}>>({})
+  const currentRemoteTracking=computed(()=>trackingMedia.has(currentMediaId.value)?null:remoteTracking.value[currentMediaId.value]??null)
+  const lastEditors=ref<Record<string,string|null>>({})
   const messageOf = (error: unknown, fallback: string) => typeof (error as {message?:unknown})?.message === 'string' ? (error as {message:string}).message : fallback
   type TrackingJob = {mediaId:string;startFrame:number;input:Parameters<typeof trackApi.run>[0];key:string;taskId?:string;maxFrames?:number}
   const trackingJobs = reactive(new Map<string, TrackingJob>())
@@ -115,6 +122,8 @@ const createWorkspace = () => {
   const workspaceViews = new Map<string, Record<string, unknown>>()
   const saveTickets = new Map<string, number>()
   const workspaceWrites = new WorkspaceWrites()
+  const storageWarning = ref('')
+  workspaceWrites.onStorageWarning = message => { storageWarning.value = message }
   const workspaceReadError = ref('')
   type TrackingRestartIntent = { actorId: string; mediaId: string; serverMediaId: string; key: string; body: TrackingRestartInput; phase: 'restart' | 'start' | 'conflict' }
   const pendingRestart = ref<TrackingRestartIntent | null>(null)
@@ -173,20 +182,34 @@ const createWorkspace = () => {
   const annotationsByMedia = shallowRef<Record<string, AnnotationObject[]>>(loadAnnotations())
   const workspaceGenerations = new Map<string,string|undefined>()
 
-  const persistLocalAnnotations = () => {
+  const draftSuppressed=new Set<string>() // videos whose local draft is being discarded
+  const persistLocalAnnotations = async (dirtyMedia: Set<string>) => {
+    const actor=useAuth().user.value?.id
     const serverIds = new Set(mediaAssets.value.filter(m => m.serverMediaId).map(m => m.id))
     const compact = Object.fromEntries(Object.entries(annotationsByMedia.value).map(([mid, objects]) =>
-      [mid, serverIds.has(mid) ? objects.filter(o => o.source === 'manual') : objects]))
-    localStorage.setItem('annotationsByMedia', JSON.stringify(compact))
+      [mid, serverIds.has(mid) ? [] : objects]))
+    for(const media of mediaAssets.value){
+      if(actor!==useAuth().user.value?.id)return
+      if(!media.serverMediaId||!dirtyMedia.has(media.id)||draftSuppressed.has(media.id))continue
+      const base=workspaceWrites.getBaseline(media.serverMediaId)
+      if(!base)continue
+      const draft=sharedWorkspace(buildWorkspaceState(media.id))
+      if(!workspaceEqual(base,draft))await workspaceWrites.saveDraft(media.serverMediaId,base,draft).catch(error=>{console.warn('[annotation.local_draft_failed]',error);storageWarning.value='本机草稿缓存不可用：修改仍直接保存到服务器，但刷新前未保存的修改无法恢复，请勿关闭页面'})
+    }
+    if(actor===useAuth().user.value?.id)localStorage.setItem('annotationsByMedia', JSON.stringify(compact))
   }
 
   // 自动持久化到 localStorage（debounce 300ms）
   let saveTimer: ReturnType<typeof setTimeout> | null = null
-  watch(annotationsByMedia, () => {
+  const localDirtyMedia=new Set<string>()
+  watch(annotationsByMedia, (value,previous) => {
+    for(const id of Object.keys(value))if(value[id]!==previous?.[id])localDirtyMedia.add(id)
     if (saveTimer) clearTimeout(saveTimer)
-    saveTimer = setTimeout(() => {
-      try { persistLocalAnnotations() } catch (error) { console.error('[annotation.local_save_failed]', error); saveError.value = '本机缓存写入失败，请保持页面打开并检查存储空间' }
-      if (!workspaceRestoreInProgress) scheduleWorkspaceStateSave(selectedMediaId.value)
+    saveTimer = setTimeout(async () => {
+      const actor=useAuth().user.value?.id,dirty=new Set(localDirtyMedia)
+      localDirtyMedia.clear()
+      try { await persistLocalAnnotations(dirty) } catch (error) { console.error('[annotation.local_save_failed]', error); if(actor===useAuth().user.value?.id)saveError.value = '本机缓存写入失败，请保持页面打开并检查存储空间' }
+      if (actor===useAuth().user.value?.id && !workspaceRestoreInProgress) scheduleWorkspaceStateSave(selectedMediaId.value)
     }, 300)
   })
 
@@ -389,7 +412,7 @@ const createWorkspace = () => {
   const duplicateImport = ref<(DuplicateVideo & {key:string;pending:boolean;error:string})|null>(null)
   const importError = ref('')
   let finishDuplicate: ((result:TrackUploadResponse|null)=>void)|null=null
-  const editingBlocked = computed(() => submissionBusy.value || mediaImportBusy.value || !!duplicateImport.value || objectDeletionBusy.value || trackingFeedbackBusy.value || trackingRestartBusy.value || !!pendingRestart.value || !!pendingDeletion.value || !!pendingFeedback.value || !!workspaceReadError.value || isAiBusy.value || !!deletingMediaId.value || exactFrameLoading.value || isPlaying.value || workspaceRestoring.value || !!frameError.value)
+  const editingBlocked = computed(() => !!collaborationConflict.value || collaborationBusy.value || !!currentRemoteTracking.value || submissionBusy.value || mediaImportBusy.value || !!duplicateImport.value || objectDeletionBusy.value || trackingFeedbackBusy.value || trackingRestartBusy.value || !!pendingRestart.value || !!pendingDeletion.value || !!pendingFeedback.value || !!workspaceReadError.value || isAiBusy.value || !!deletingMediaId.value || exactFrameLoading.value || isPlaying.value || workspaceRestoring.value || !!frameError.value)
   const workspaceRestoring = ref(false)
   const selectedObject = computed(() => currentObjects.value.find((item) => item.id === selectedObjectId.value) ?? null)
   const selectedEffect = computed(() => effectResults.value.find((item) => item.id === selectedEffectId.value) ?? effectResults.value[0] ?? null)
@@ -447,8 +470,9 @@ const createWorkspace = () => {
     snapshotUndo()
     const objectId = getNextObjectId(mediaId)
     const name = numberedObjectName(objectNameInput.value.trim() || 'rare sperm', objectId)
+    const creationId=`manual-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
     const object: AnnotationObject = {
-      id: `manual-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      id: creationId, creationId,
       objectId,
       name,
       source: 'manual',
@@ -490,7 +514,7 @@ const createWorkspace = () => {
     const stamp=Date.now()
     const added:AnnotationObject[]=boxes.map((item,index)=>({
       id:`manual-adopt-${stamp}-${index}`,
-      objectId,name,source:'manual',origin:'review_adopted',reviewAdoptionKey:adoptionKey,bbox:{...item.bbox},
+      objectId,name,source:'manual',origin:'review_adopted',reviewAdoptionKey:adoptionKey,creationId:adoptionKey,bbox:{...item.bbox},
       frameIndex:item.frameIndex,timestampMs:Math.round(frameToTime(item.frameIndex)*1000),
     }))
     annotationsByMedia.value={...annotationsByMedia.value,[mediaId]:[...existing,...added]}
@@ -829,6 +853,7 @@ const createWorkspace = () => {
     )
     const state = {
       format: 'annotation-workspace-v1' as const,
+      generationId:workspaceGenerations.get(mediaId),
       frontendMediaId: media.id,
       updatedAt: new Date().toISOString(),
       currentFrame: includeUiState ? currentFrame.value : 0,
@@ -858,12 +883,121 @@ const createWorkspace = () => {
     return state
   }
 
+  const viewKey=(mediaId:string)=>`annotation-view:${useAuth().user.value?.id??'unknown'}:${mediaAssets.value.find(m=>m.id===mediaId)?.serverMediaId??mediaId}:${workspaceGenerations.get(mediaId)??'legacy'}`
+  const savePersonalView=(mediaId:string)=>{
+    try{sessionStorage.setItem(viewKey(mediaId),JSON.stringify({currentFrame:currentFrame.value,display:{brightness:brightness.value,contrast:contrast.value,zoom:zoom.value},editor:{activeTool:activeTool.value,objectNameInput:objectNameInput.value,selectedObjectId:selectedObjectId.value}}))}
+    catch(error){console.warn('[annotation.view_cache_failed]',{mediaId,error})}
+  }
+  const applySharedWorkspace=(mediaId:string,state:WorkspaceDraft)=>{
+    const manual=(annotationsByMedia.value[mediaId]??[]).filter(o=>o.source==='manual')
+    if(workspaceEqual(manual,state.manualAnnotations??[]) && workspaceEqual(deletedObjectIds.value[mediaId]??[],state.deletedObjectIds??[]) && workspaceEqual(deletedFrameObjects.value[mediaId]??[],state.deletedFrameObjects??[]) && workspaceEqual([...(deletedTrackingIds.value[mediaId]??[])],state.deletedTrackingIds??[]))return
+    // Undo restores whole-frame snapshots. A snapshot taken before this sync lacks the
+    // colleague's boxes, so undoing it would delete their work on the next save.
+    const frameOf=(o:{frameIndex?:number})=>o.frameIndex??0
+    // JSON round trip: page objects carry undefined fields that saved copies drop.
+    const before=new Map((clone(manual) as AnnotationObject[]).map(o=>[`${frameOf(o)}:${o.objectId}`,o]))
+    const after=new Map((clone(state.manualAnnotations??[]) as AnnotationObject[]).map(o=>[`${frameOf(o)}:${o.objectId}`,o]))
+    const touched=new Set<number>()
+    for(const key of new Set([...before.keys(),...after.keys()]))if(!workspaceEqual(before.get(key),after.get(key)))touched.add(Number(key.split(':')[0]))
+    const oldFrameDeletions=deletedFrameObjects.value[mediaId]??[],newFrameDeletions=state.deletedFrameObjects??[]
+    const has=(list:FrameDeletion[],d:FrameDeletion)=>list.some(x=>x.frameIndex===d.frameIndex&&x.objectId===d.objectId)
+    for(const d of [...oldFrameDeletions,...newFrameDeletions])if(!has(oldFrameDeletions,d)||!has(newFrameDeletions,d))touched.add(d.frameIndex)
+    const wholeVideo=!workspaceEqual(deletedObjectIds.value[mediaId]??[],state.deletedObjectIds??[])||!workspaceEqual([...(deletedTrackingIds.value[mediaId]??[])],state.deletedTrackingIds??[])
+    // Same content after normalization (e.g. our own save coming back): leave the page,
+    // its object order and its undo history untouched.
+    if(!touched.size&&!wholeVideo)return
+    for(const key of [...histories.keys()])if(key.startsWith(`${mediaId}:`)&&(wholeVideo||touched.has(Number(key.slice(mediaId.length+1)))))histories.delete(key)
+    if(wholeVideo){delete videoDeletionHistory.value[mediaId];rememberControls(mediaId)}
+    historyRevision.value++
+    workspaceRestoreInProgress=true
+    try{
+      deletedObjectIds.value[mediaId]=state.deletedObjectIds??[]
+      deletedFrameObjects.value[mediaId]=state.deletedFrameObjects??[]
+      deletedTrackingIds.value[mediaId]=new Set(state.deletedTrackingIds??[])
+      // Update in place so unchanged boxes keep their position and identity on the page.
+      const keyOf=(o:AnnotationObject)=>`${frameOf(o)}:${o.objectId}`
+      const incoming=new Map(((state.manualAnnotations??[]) as AnnotationObject[]).map(o=>[keyOf(o),o]))
+      const used=new Set<string>(),next:AnnotationObject[]=[]
+      for(const o of annotationsByMedia.value[mediaId]??[]){
+        if(o.source!=='manual'){next.push(o);continue}
+        const key=keyOf(o)
+        if(!incoming.has(key)||used.has(key))continue
+        used.add(key);next.push(touched.has(frameOf(o))?incoming.get(key)!:o)
+      }
+      for(const [key,o] of incoming)if(!used.has(key))next.push(o)
+      annotationsByMedia.value={...annotationsByMedia.value,[mediaId]:dedupeAnnotationObjects(next).filter(o=>!isObjectDeleted(mediaId,o.objectId,o.frameIndex??0))}
+    }finally{workspaceRestoreInProgress=false}
+  }
+  const resolveCollaboration=async(choices:Record<string,MergeChoice>)=>{
+    const mediaId=currentMediaId.value,media=selectedMedia.value
+    if(!media?.serverMediaId||collaborationBusy.value)return
+    collaborationBusy.value=true
+    try{
+      const result=await workspaceWrites.resolve(media.serverMediaId,choices)
+      if(currentMediaId.value!==mediaId)return
+      if(result&&'workspace' in result)applySharedWorkspace(mediaId,result.workspace as WorkspaceDraft)
+      const errors={...collaborationErrors.value};delete errors[mediaId];collaborationErrors.value=errors
+      workspaceReadError.value='';saveError.value='';saveState.value='saved'
+    }catch(error){
+      if(error instanceof WorkspaceMergeConflict)collaborationErrors.value={...collaborationErrors.value,[mediaId]:error}
+      if(currentMediaId.value===mediaId)saveError.value=messageOf(error,'合并未完成，请重试；草稿已保留')
+      console.warn('[annotation.collaboration_resolve_failed]',{mediaId,error})
+    }finally{collaborationBusy.value=false}
+  }
+  let synchronizing=false
+  const trackingStamps=new Map<string,string>()
+  // Returns true when the open video was updated from the server, false when it is
+  // current, undefined when the check was skipped or failed.
+  const syncWorkspace=async()=>{
+    const media=selectedMedia.value,mediaId=currentMediaId.value,actor=useAuth().user.value?.id
+    if(typeof document!=='undefined'&&document.visibilityState==='hidden')return
+    if(!media?.serverMediaId||synchronizing||workspaceRestoring.value)return
+    synchronizing=true
+    try{
+      const stamp=await trackApi.getWorkspaceStamp(media.serverMediaId)
+      if(actor!==useAuth().user.value?.id||mediaId!==currentMediaId.value)return
+      const others={...remoteTracking.value}
+      if(stamp.tracking&&!trackingMedia.has(mediaId)&&!trackingJobs.has(mediaId))others[mediaId]={userName:stamp.tracking.userName,status:stamp.tracking.status};else delete others[mediaId]
+      remoteTracking.value=others
+      lastEditors.value={...lastEditors.value,[mediaId]:stamp.updatedByName??null}
+      const interacting=()=>editingBlocked.value||headBoxBusy.value||!!draggingObjectId||!!tempBbox.value||saveState.value==='saving'||saveState.value==='error'||workspaceSaveTimers.has(mediaId)||saveQueues.has(mediaId)
+      let changed=false
+      const trackingKey=JSON.stringify(stamp.trackingStamp)
+      const previousTracking=trackingStamps.get(mediaId)
+      if(previousTracking===undefined)trackingStamps.set(mediaId,trackingKey)
+      else if(previousTracking!==trackingKey&&!stamp.tracking&&!isTrackingMedia(mediaId)&&!interacting()){
+        // Someone else re-ran tracking: refresh the AI boxes; manual work is kept.
+        await loadTrackingResult(mediaId,true)
+        if(mediaId!==currentMediaId.value)return
+        trackingStamps.set(mediaId,trackingKey);changed=true
+      }
+      if(stamp.revision===workspaceWrites.getRevision(media.serverMediaId)||interacting())return changed
+      const base=workspaceWrites.getBaseline(media.serverMediaId)
+      if(!base)return changed
+      const observed=annotationsByMedia.value[mediaId]
+      const remote=await trackApi.getWorkspaceState(media.serverMediaId)
+      if(actor!==useAuth().user.value?.id||mediaId!==currentMediaId.value||interacting())return changed
+      if(observed!==annotationsByMedia.value[mediaId] || base!==workspaceWrites.getBaseline(media.serverMediaId))return changed
+      if(base.generationId!==remote.generationId)return changed // Reset requires the existing explicit generation recovery.
+      if(remote.revision!==workspaceWrites.getRevision(media.serverMediaId)){
+        // Unsaved local edits are merged by the save path instead.
+        if(!workspaceEqual(sharedWorkspace(buildWorkspaceState(mediaId)),sharedWorkspace(base)))return changed
+        applySharedWorkspace(mediaId,remote);workspaceWrites.setBaseline(media.serverMediaId,remote)
+        return true
+      }
+      return changed
+    }catch(error){console.warn('[annotation.collaboration_sync_failed]',{mediaId,error})}
+    finally{synchronizing=false}
+  }
+
   persistWorkspaceState = async (mediaId: string, useCurrentUiState = false) => {
+    const actor=useAuth().user.value?.id
     if (deletingMediaId.value === mediaId || pendingDeletion.value || pendingFeedback.value || pendingRestart.value) return
     const media = mediaAssets.value.find(item => item.id === mediaId)
     if (!media?.serverMediaId || workspaceRestoreInProgress || (workspaceRestoring.value && mediaId === currentMediaId.value)) return
     if (workspaceReadError.value) throw new Error(workspaceReadError.value)
     const state = buildWorkspaceState(mediaId, useCurrentUiState)
+    if(mediaId===currentMediaId.value)savePersonalView(mediaId)
     const ticket = (saveTickets.get(mediaId) || 0) + 1
     saveTickets.set(mediaId, ticket)
     if (mediaId === currentMediaId.value) saveState.value = 'saving'
@@ -871,10 +1005,21 @@ const createWorkspace = () => {
     const task = prior.catch(() => {}).then(() => workspaceWrites.write(media.serverMediaId!, 'workspace', state))
     saveQueues.set(mediaId, task)
     try {
-      await task
+      const result=await task
+      if(actor!==useAuth().user.value?.id)return
+      if(result && 'workspace' in result && result.workspace && mediaId===currentMediaId.value){
+        const merged=mergeWorkspace(alignWorkspaceIds(sharedWorkspace(state),result.workspace as WorkspaceDraft),alignWorkspaceIds(sharedWorkspace(buildWorkspaceState(mediaId)),result.workspace as WorkspaceDraft),result.workspace as WorkspaceDraft)
+        applySharedWorkspace(mediaId,merged)
+      }
       if (mediaId === currentMediaId.value && ticket === saveTickets.get(mediaId)) { saveState.value = 'saved'; saveError.value = '' }
     } catch (error) {
-      markVersionConflict(error)
+      if(actor!==useAuth().user.value?.id)throw error
+      if(error instanceof WorkspaceMergeConflict){
+        let latest=error
+        if(mediaId===currentMediaId.value)try{mergeWorkspace(error.base,sharedWorkspace(buildWorkspaceState(mediaId)),error.remote)}catch(updated){if(updated instanceof WorkspaceMergeConflict)latest=updated}
+        await workspaceWrites.retainConflict(media.serverMediaId!,latest)
+        collaborationErrors.value={...collaborationErrors.value,[mediaId]:latest}
+      }else markVersionConflict(error)
       console.error('[annotation.workspace_save_failed]', { mediaId, ticket, error })
       if (mediaId === currentMediaId.value && ticket === saveTickets.get(mediaId)) {
         saveState.value = 'error'; saveError.value = messageOf(error, '保存失败，请重试')
@@ -908,17 +1053,43 @@ const createWorkspace = () => {
     if(pendingFeedback.value){await retryTrackingAnomalyFeedback();return}
     await persistWorkspaceState(currentMediaId.value,true)
   }
-  const reloadWorkspaceFromServer = async () => {
+  const downloadWorkspaceBackup = () => {
     const mediaId=currentMediaId.value
     // Explicit reload keeps a local backup of geometry and pending intent.
     const payload={workspace:buildWorkspaceState(mediaId,true),objects:annotationsByMedia.value[mediaId]||[],tracking:trackingFramesByMedia.value[mediaId]||[],pendingDeletion:pendingDeletion.value,pendingFeedback:pendingFeedback.value,pendingRestart:pendingRestart.value}
     const url=URL.createObjectURL(new Blob([JSON.stringify(payload,null,2)],{type:'application/json'}))
     const anchor=document.createElement('a');anchor.href=url;anchor.download='annotation-recovery-'+createRequestId()+'.json';anchor.click();setTimeout(()=>URL.revokeObjectURL(url),1000)
+  }
+  const reloadWorkspaceFromServer = async () => {
+    const mediaId=currentMediaId.value,serverId=selectedMedia.value?.serverMediaId
+    if(serverId){
+      const base=workspaceWrites.getBaseline(serverId)
+      if(base)await workspaceWrites.saveDraft(serverId,base,sharedWorkspace(buildWorkspaceState(mediaId,true)))
+      else sessionStorage.setItem(`annotation-recovery:${useAuth().user.value?.id}:${serverId}`,JSON.stringify(buildWorkspaceState(mediaId,true)))
+    }
     cancelScheduledSave(mediaId)
     if (pendingRestart.value?.phase === 'conflict' && pendingRestart.value.mediaId === mediaId) { rememberRestart(pendingRestart.value, true); pendingRestart.value = null; trackingRestartError.value = '' }
     annotationsByMedia.value={...annotationsByMedia.value,[mediaId]:(annotationsByMedia.value[mediaId]||[]).filter(o=>o.source==='manual')}
     trackingFramesByMedia.value[mediaId]=[]
     await resetAnnotationViewForMedia(mediaId)
+  }
+  // Explicit escape when a local draft keeps failing or the user prefers the shared
+  // version. An unconfirmed request is kept: it may already be on the server.
+  const discardLocalDraft = async () => {
+    const mediaId=currentMediaId.value,serverId=selectedMedia.value?.serverMediaId
+    if(!serverId||collaborationBusy.value)return
+    if(!window.confirm('放弃本机尚未保存的修改，改用服务器上的最新标注？此操作不能撤销，可先“导出本地备份”。'))return
+    draftSuppressed.add(mediaId);collaborationBusy.value=true
+    try{
+      cancelScheduledSave(mediaId)
+      await workspaceWrites.clearDraft(serverId)
+      const errors={...collaborationErrors.value};delete errors[mediaId];collaborationErrors.value=errors
+      saveError.value='';saveState.value='idle'
+      collaborationBusy.value=false
+      await resetAnnotationViewForMedia(mediaId)
+      await workspaceWrites.clearDraft(serverId)
+      console.info('[annotation.local_draft_discarded]',{mediaId:serverId})
+    }finally{collaborationBusy.value=false;draftSuppressed.delete(mediaId)}
   }
   const controlsCacheKey = (serverMediaId: string) => {
     let actor = 'unknown'
@@ -1237,7 +1408,7 @@ const createWorkspace = () => {
       // immediate refresh after successful deletion.
       try {
         localStorage.setItem('mediaAssets', JSON.stringify(mediaAssets.value))
-        persistLocalAnnotations()
+        await persistLocalAnnotations(new Set())
       } catch (error) { console.warn('[annotation.local_save_failed]', error) }
       console.info('[annotation.media_deleted]', { mediaId: media.serverMediaId || media.id, scope: media.serverMediaId ? 'server' : 'local' })
       statusMessage.value = `已删除素材：${media.name}`
@@ -1263,9 +1434,10 @@ const createWorkspace = () => {
   })
 
   watch(
-    [currentFrame, brightness, contrast, zoom, anomalyFrames, pausedAnomalies, lastPausedContext, activeTool, objectNameInput, selectedObjectId],
+    [currentFrame, brightness, contrast, zoom, activeTool, objectNameInput, selectedObjectId],
     () => {
-      if (!workspaceRestoreInProgress) scheduleWorkspaceStateSave(currentMediaId.value)
+      // A view reset while switching videos or modes must not overwrite the saved view.
+      if (!workspaceRestoreInProgress && !workspaceRestoring.value) savePersonalView(currentMediaId.value)
     },
     { deep: true },
   )
@@ -1300,7 +1472,19 @@ const createWorkspace = () => {
         if (!isCurrent()) return null
       }
       workspaceGenerations.set(mediaId,state.generationId)
-      workspaceWrites.setRevision(media.serverMediaId, state.revision || 0)
+      workspaceWrites.setBaseline(media.serverMediaId,state)
+      try {
+        const restored=await workspaceWrites.restoreDraft(media.serverMediaId,state)
+        if(restored)state=await trackApi.getWorkspaceState(media.serverMediaId)
+      }catch(error){
+        if(error instanceof WorkspaceMergeConflict)collaborationErrors.value={...collaborationErrors.value,[mediaId]:error}
+        else throw error
+      }
+      if(!isCurrent())return null
+      workspaceWrites.setBaseline(media.serverMediaId,state)
+      let personal:Pick<WorkspaceDraft,'currentFrame'|'display'|'editor'>={currentFrame:0,display:{brightness:100,contrast:100,zoom:1},editor:{activeTool:'bbox'}}
+      try{personal=JSON.parse(sessionStorage.getItem(viewKey(mediaId))||'null')??personal}catch{}
+      state={...state,...personal}
       workspaceReadError.value = ''
       deletedObjectIds.value[mediaId] = state.deletedObjectIds ?? []
       deletedFrameObjects.value[mediaId] = state.deletedFrameObjects ?? []
@@ -1316,7 +1500,7 @@ const createWorkspace = () => {
       rememberControls(mediaId)
       if (!state.exists || mediaId !== currentMediaId.value) return null
       workspaceRestoreInProgress = true
-      const restoredManual = (state.manualAnnotations ?? [])
+      const restoredManual = (collaborationErrors.value[mediaId]?.local.manualAnnotations ?? state.manualAnnotations ?? [])
         .filter((value): value is AnnotationObject => !!value && typeof value === 'object')
         .map((value) => ({ ...value, source: 'manual' as const }))
       const retainedAi = (annotationsByMedia.value[mediaId] ?? []).filter((obj) => obj.source === 'ai')
@@ -2823,7 +3007,7 @@ const createWorkspace = () => {
   return {
     runEndpointTrack,
     restartTrackingFromEarlierFrame, retryTrackingRestart, cancelTrackingRestartRequest, trackingRestartBusy, trackingRestartError, trackingRestartPendingAction, trackingRestartStorageWarning,
-    trackingError,trackingProgress,trackingProgressViewFor,currentTrackingProgress,currentTrackingFinished,trackingRetryLabel,trackingRetryBusy,retryTracking,isTrackingMedia,workspaceRecoveryRequired,saveRecoveryLabel,retryWorkspaceSave,reloadWorkspaceFromServer,
+    collaborationConflict,collaborationBusy,resolveCollaboration,syncWorkspace,downloadWorkspaceBackup,currentRemoteTracking,lastEditors,discardLocalDraft,storageWarning,trackingError,trackingProgress,trackingProgressViewFor,currentTrackingProgress,currentTrackingFinished,trackingRetryLabel,trackingRetryBusy,retryTracking,isTrackingMedia,workspaceRecoveryRequired,saveRecoveryLabel,retryWorkspaceSave,reloadWorkspaceFromServer,
     getObjectDeletionSummary, removeObjectAcrossVideo, undoVideoObjectDeletion, retryObjectDeletion, canUndoVideoDeletion, lastVideoObjectDeletion, objectDeletionBusy, objectDeletionError, objectDeletionPendingAction, confirmTrackingAnomaly, retryTrackingAnomalyFeedback, trackingFeedbackBusy, trackingFeedbackError, trackingFeedbackPending, trackingFeedbackPendingAction, trackingCalibrationSummary, resetTrackingCalibration, trackingWarningSummary,
     deleteMedia, deletingMediaId, mediaDeleteError, persistWorkspaceState, retryExactFrame, saveState, saveError, playbackRate, pausePlayback, displayObjects, editingBlocked, workspaceRestoring, frameError, loadExactFrame, nudgeSelected, cancelAnnotationGesture, canUndo, canRedo,
     edgeDiscovery, headBoxBusy, headBoxError, cancelHeadBox, createHeadBox, api, mediaAssets, selectedMediaId, submissionLocks, submissionBusy, mediaImportBusy, importError, duplicateImport, reimportSaving, cancelDuplicateImport, confirmDuplicateImport, restoreImportIntent, activeTool, objectNameInput, selectedObjectId, currentFrame, currentTime, videoDuration, videoFps, frameInput, isPlaying, isAiBusy, trackingFrameCount, statusMessage, toastMessage, showToast, zoom, zoomIn, zoomOut, zoomReset, savedResults, loadedRemoteResultKeys, effectResults, selectedEffectId, effectTime, effectPlaying, effectVideoRef, imageRef, videoRef, exactFrameImageRef, exactFrameUrl, exactFrameLoading, videoPlaybackFallback, annotationHitRef, fileInputRef, videoInputRef, packageInputRef, packageImportReport, importPackage, effectFolderInputRef, annotationsByMedia, trackingFramesByMedia, anomalyObjectIds, anomalyFrames, pausedAnomalies, anomalyPanelVisible, trackingPausedFrame, closeAnomalyPanel, selectedMedia, isVideo, maxFrameIndex, currentMediaId, currentObjects, selectedObject, selectedEffect, formatTime, timeToFrame, frameToTime, getStagePoint, addObject, adoptReviewTrack, resetVideoViewToFirstFrame, ensureVideoFirstFrame, selectTool, onStageClick, tempBbox, onBboxDown, onBboxMove, onBboxUp, onObjectDropdownChange, selectObject, removeObject, renameObject, undo, redo, copyPreviousFrame, brightness, contrast, mediaFilterStyle, resetMediaFilter, annotatedFrameCount, clearSelection, openFilePicker, handleFiles, onImageLoaded, onVideoLoaded, onVideoTimeUpdate, onVideoError, loadTrackingResult, seekVideo, seekToInputFrame, seekByFrame, togglePlayback, onVideoEnded, onTimelineClick, runAiSegment, runAiTrack, getMediaPixelSize, buildSam3AnnotationsJson, generateAnnotationsJson, loadSavedResults, openEffectFolderPicker, handleEffectFolder, loadEffects, onEffectTimeUpdate, toggleEffectPlayback, selectEffect, effectOverlayObjects, resetAnnotationViewForMedia, loadServerMedia

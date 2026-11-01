@@ -26,6 +26,16 @@ const jsonRequest = async <T>(path: string, init: RequestInit = {}): Promise<T> 
   return data as T
 }, init.signal)
 
+export interface WorkspaceStamp {
+  mediaId: string
+  revision: number
+  generationId?: string | null
+  updatedBy?: number | null
+  updatedByName?: string | null
+  trackingStamp: number[] | null
+  tracking: { userId: number | string | null; userName: string | null; status: 'queued' | 'running' } | null
+}
+
 export interface PackageImportResult {
   imported: (TrackUploadResponse & { objects: number; emptyFrames: number })[]
   skipped: { videoName: string; reason: string; mediaId?: string }[]
@@ -382,6 +392,12 @@ export const trackApi = {
     const query = params.toString() ? `?${params}` : ''
     const result = await jsonRequest<unknown>(`/track/result/${encodeURIComponent(mediaId)}${query}`)
     validateTrackingResult(result)
+    return result
+  },
+
+  async getWorkspaceStamp(mediaId: string) {
+    const result = await jsonRequest<WorkspaceStamp>(`/track/workspace/${encodeURIComponent(mediaId)}/stamp`)
+    if (!Number.isInteger(result.revision) || result.revision < 0) throw new Error('服务器未返回有效工作区版本')
     return result
   },
 

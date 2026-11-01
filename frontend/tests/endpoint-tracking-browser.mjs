@@ -91,7 +91,7 @@ if(process.env.CRITICAL_AI_MODE==='simulated'){
     execFileSync(process.env.TEST_PYTHON||'python3',['-m','tests.endpoint_duplicate_browser_fixture',mid],{env:{...process.env,PYTHONPATH:'backend'}})
     await page.reload();await page.getByTestId('annotation-hit').waitFor()
     await poll(async()=>await page.getByTestId('workspace-save-error').count()>0||!(await page.getByTestId('annotation-hit').getAttribute('class')).includes('locked'))
-    if(await page.getByTestId('workspace-save-error').count()){const backup=page.waitForEvent('download');await button('重新读取工作区').click();await backup}
+    if(await page.getByTestId('workspace-save-error').count()){await button('重新读取工作区').click()}
     await ready();await jump(3)
     check(await page.locator('.annotation-box').count()===1,'old padded AI plus tight unmatched human tail renders exactly one box after reload')
     const repaired=await api('/track/result/'+mid)
@@ -110,7 +110,7 @@ if(process.env.CRITICAL_AI_MODE==='simulated'){
     execFileSync(process.env.TEST_PYTHON||'python3',['-m','tests.endpoint_duplicate_browser_fixture',mid,'reassigned'],{env:{...process.env,PYTHONPATH:'backend'}})
     await page.reload();await page.getByTestId('annotation-hit').waitFor()
     await poll(async()=>await page.getByTestId('workspace-save-error').count()>0||!(await page.getByTestId('annotation-hit').getAttribute('class')).includes('locked'))
-    if(await page.getByTestId('workspace-save-error').count()){const backup=page.waitForEvent('download');await button('重新读取工作区').click();await backup}
+    if(await page.getByTestId('workspace-save-error').count()){await button('重新读取工作区').click()}
     await ready();await jump(3)
     await poll(async()=>{const s=await api('/track/workspace/'+mid);return s.manualAnnotations.some(o=>o.frameIndex===2&&o.objectId===2&&o.endpointOriginalObjectId===91)})
     check(await page.locator('.annotation-box').count()===1,'corrected same-run identity refresh keeps one human tail box, not the old canonical ID plus a second AI box')

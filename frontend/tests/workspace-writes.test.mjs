@@ -16,7 +16,7 @@ function storage() {
   const data = new Map()
   return { getItem: key => data.get(key) ?? null, setItem: (key, value) => data.set(key, String(value)), removeItem: key => data.delete(key), data }
 }
-function harness() {
+function harness(globals = {}) {
   const localStorage = storage(), sessionStorage = storage(), calls = [], receipts = new Map(), revisions = new Map(), commits = [], logs = []
   const hooks = { write: null, read: null }
   let identifier = 0
@@ -56,7 +56,7 @@ function harness() {
   }
   const exports = {}
   runInNewContext(compiled, {
-    exports, localStorage, sessionStorage, Error,
+    exports, localStorage, sessionStorage, Error, ...globals,
     console: { warn: (...args) => logs.push(args), error: (...args) => logs.push(args) },
     require: name => name.includes('browserCompat') ? { createRequestId: () => `request-${++identifier}` } : { trackApi: api },
   }, { filename: 'workspaceWrites.compiled.cjs' })
@@ -358,4 +358,143 @@ test('ordinary tracking on the open video saves its workspace', async () => {
   h.resolve(); await h.completion
   assert(!h.context.trackingMedia.has('media-A'))
   assert.deepEqual(h.scheduled, ['media-A'])
+})
+
+const box=(frame,x=10)=>({id:`box-${frame}`,objectId:1,frameIndex:frame,source:'manual',bbox:{x,y:10,width:5,height:5}})
+test('collaboration merges different frames but reports simultaneous edits to one head',()=>{
+  const h=harness(),api={};runInNewContext(compiled,{exports:api,Error,require:()=>({})})
+  const base={manualAnnotations:[box(0),box(1)]}
+  const local={manualAnnotations:[box(0,20),box(1)]},remote={manualAnnotations:[box(0),box(1,30)]}
+  const result=api.mergeWorkspace(base,local,remote)
+  assert.deepEqual(Array.from(result.manualAnnotations,o=>o.bbox.x),[20,30])
+  assert.throws(()=>api.mergeWorkspace(base,local,{manualAnnotations:[box(0,40),box(1)]}),e=>e.code==='WORKSPACE_MERGE_CONFLICT'&&e.entries.length===1)
+})
+test('collaboration never merges across reset generations or restores a remotely deleted object',()=>{
+  const api={};runInNewContext(compiled,{exports:api,Error,require:()=>({})})
+  assert.throws(()=>api.mergeWorkspace({generationId:'old'},{generationId:'old'},{generationId:'new'}),/覆盖/)
+  assert.throws(()=>api.mergeWorkspace({manualAnnotations:[box(0)]},{manualAnnotations:[box(0,20)]},{manualAnnotations:[],deletedObjectIds:[1]}),e=>e.code==='WORKSPACE_MERGE_CONFLICT')
+})
+test('view-only changes are kept local and do not write or advance shared revisions',async()=>{
+  const h=harness(),writer=new h.Writer();writer.setBaseline('m',{exists:true,mediaId:'m',revision:0,manualAnnotations:[]})
+  await writer.write('m','workspace',{manualAnnotations:[],currentFrame:8,display:{zoom:3}},'view')
+  assert.equal(writes(h).length,0)
+})
+
+test('two clients merge disjoint edits using fresh keys and keep exact replays after response loss',async()=>{
+  const h=harness(),a=new h.Writer(),b=new h.Writer()
+  let server={exists:true,mediaId:'m',revision:0,manualAnnotations:[box(0),box(1)]}
+  h.hooks.read=()=>copy(server)
+  let lose=false
+  h.hooks.write=(call,commit)=>{const result=commit();if(result.revision>server.revision)server={...copy(call.body),exists:true,mediaId:'m',revision:result.revision};if(lose){lose=false;throw new Error('lost merged response')}return result}
+  a.setBaseline('m',server);b.setBaseline('m',server)
+  await a.write('m','workspace',{manualAnnotations:[box(0,20),box(1)]},'a')
+  let first=true
+  h.hooks.write=(call,commit)=>{const result=commit();if(result.revision>server.revision)server={...copy(call.body),exists:true,mediaId:'m',revision:result.revision};if(first){first=false;throw new Error('lost merged response')}return result}
+  await assert.rejects(b.write('m','workspace',{manualAnnotations:[box(0),box(1,30)]},'b'),/lost merged/)
+  await b.write('m','workspace',{manualAnnotations:[box(0),box(1,30)]},'after-replay')
+  assert.equal(server.revision,2)
+  assert.deepEqual(server.manualAnnotations.map(o=>o.bbox.x),[20,30])
+  const mergedCalls=writes(h).filter(c=>c.body.expectedRevision===1)
+  assert.equal(mergedCalls[0].key,mergedCalls[1].key)
+  assert.deepEqual(mergedCalls[0].body,mergedCalls[1].body)
+  assert.notEqual(mergedCalls[0].key,'b')
+  assert.deepEqual(server.manualAnnotations.map(o=>o.bbox.x),[20,30])
+})
+test('same-head conflicts retain the draft and explicit resolution rechecks the remote value',async()=>{
+  const h=harness(),a=new h.Writer(),b=new h.Writer()
+  let server={exists:true,mediaId:'m',revision:0,manualAnnotations:[box(0)]}
+  h.hooks.read=()=>copy(server)
+  h.hooks.write=(call,commit)=>{const result=commit();server={...copy(call.body),exists:true,mediaId:'m',revision:result.revision};return result}
+  a.setBaseline('m',server);b.setBaseline('m',server)
+  await a.write('m','workspace',{manualAnnotations:[box(0,20)]})
+  await assert.rejects(b.write('m','workspace',{manualAnnotations:[box(0,30)]}),e=>e.code==='WORKSPACE_MERGE_CONFLICT')
+  const conflict=b.getConflict('m'),entry=conflict.entries[0]
+  assert(await b.getDraft('m'))
+  await b.resolve('m',{[entry.key]:{value:'local',remote:entry.remote}})
+  assert.equal(server.manualAnnotations[0].bbox.x,30)
+  assert.equal(await b.getDraft('m'),null)
+})
+test('explicit deletion choice preserves the complete identity instead of silently dropping other frames',()=>{
+  const api={};runInNewContext(compiled,{exports:api,Error,require:()=>({})})
+  const base={manualAnnotations:[box(0),box(1)]},local={manualAnnotations:[],deletedObjectIds:[1]},remote={manualAnnotations:[box(0,30),box(1)]}
+  let conflict;try{api.mergeWorkspace(base,local,remote)}catch(e){conflict=e}
+  assert.equal(conflict.entries.length,1)
+  const key=conflict.entries[0].key
+  const keep=api.mergeWorkspace(base,local,remote,{[key]:{value:'remote',remote:conflict.entries[0].remote}})
+  assert.equal(keep.manualAnnotations.length,2);assert.equal(keep.deletedObjectIds.length,0)
+  const remove=api.mergeWorkspace(base,local,remote,{[key]:{value:'local',remote:conflict.entries[0].remote}})
+  assert.equal(remove.manualAnnotations.length,0);assert.deepEqual(Array.from(remove.deletedObjectIds),[1])
+})
+test('merged manual references keep the latest adopted frame once per identity',()=>{
+  const api={};runInNewContext(compiled,{exports:api,Error,require:()=>({})})
+  const base={manualAnnotations:[]},local={manualAnnotations:[box(1)],manualBaselines:[{objectId:1,frameIndex:1,bbox:[1,2,3,4]}]},remote={manualAnnotations:[box(0)],manualBaselines:[{objectId:1,frameIndex:0,bbox:[2,3,4,5]}]}
+  const result=api.mergeWorkspace(base,local,remote)
+  assert.equal(result.manualBaselines.length,1);assert.equal(result.manualBaselines[0].frameIndex,1)
+})
+test('reset generation archives an old draft without replaying it or blocking the new workspace',async()=>{
+  const h=harness(),writer=new h.Writer()
+  await writer.saveDraft('m',{generationId:'old',manualAnnotations:[]},{generationId:'old',manualAnnotations:[box(0)]})
+  const result=await writer.restoreDraft('m',{exists:true,mediaId:'m',revision:8,generationId:'new',manualAnnotations:[]})
+  assert.equal(result,null);assert.equal(writes(h).length,0)
+  assert.equal(await writer.getDraft('m'),null)
+  assert(h.sessionStorage.getItem('annotation-write:A:m:draft:archive:old'))
+})
+test('independent new objects that picked the same number stay separate, including replay after remapping',()=>{
+  const api={};runInNewContext(compiled,{exports:api,Error,require:()=>({})})
+  const local={manualAnnotations:[{...box(0,10),creationId:'new-A'}]},remote={manualAnnotations:[{...box(1,70),creationId:'new-B'}]}
+  const result=api.mergeWorkspace({manualAnnotations:[]},local,remote)
+  assert.equal(new Set(result.manualAnnotations.map(o=>o.objectId)).size,2)
+  assert.equal(api.mergeWorkspace({manualAnnotations:[]},local,result).manualAnnotations.length,2)
+  const aligned=api.alignWorkspaceIds(local,result)
+  assert.equal(aligned.manualAnnotations[0].objectId,result.manualAnnotations.find(o=>o.creationId==='new-A').objectId)
+})
+test('an older completed save cannot clear a newer local draft',async()=>{
+  const h=harness(),writer=new h.Writer(),gate=deferred(),entered=deferred()
+  const base={exists:true,mediaId:'m',revision:0,manualAnnotations:[box(0)]}
+  writer.setBaseline('m',base)
+  h.hooks.write=async(call,commit)=>{entered.resolve();await gate.promise;return commit()}
+  const saving=writer.write('m','workspace',{manualAnnotations:[box(0,20)]})
+  await entered.promise
+  await writer.saveDraft('m',base,{manualAnnotations:[box(0,30)]})
+  gate.resolve();await saving
+  assert.equal((await writer.getDraft('m')).local.manualAnnotations[0].bbox.x,30)
+})
+test('collaboration never reverts the independent endpoint canonical identity mapping',()=>{
+  const api={};runInNewContext(compiled,{exports:api,Error,require:()=>({})})
+  const first={...box(0),creationId:'first'},tail={...box(5),objectId:91,creationId:'tail'}
+  const base={manualAnnotations:[first,tail]},local={manualAnnotations:[first,{...tail,objectId:1,endpointOriginalObjectId:91,endpointAnchorHash:'verified-endpoint'}]}
+  const result=api.mergeWorkspace(base,local,base)
+  assert.deepEqual(Array.from(result.manualAnnotations,o=>o.objectId),[1,1])
+})
+test('a prior single-frame tombstone does not hide a later whole-object deletion conflict',()=>{
+  const api={};runInNewContext(compiled,{exports:api,Error,require:()=>({})})
+  const base={manualAnnotations:[box(1)],deletedFrameObjects:[{objectId:1,frameIndex:0}]}
+  const local={...base,manualAnnotations:[],deletedObjectIds:[1]},remote={...base,manualAnnotations:[box(1,30)]}
+  let conflict;try{api.mergeWorkspace(base,local,remote)}catch(error){conflict=error}
+  assert.equal(conflict.entries[0].key,'object-delete:1')
+  const kept=api.mergeWorkspace(base,local,remote,{[conflict.entries[0].key]:{value:'remote',remote:conflict.entries[0].remote}})
+  assert.equal(kept.deletedObjectIds.length,0);assert.equal(kept.manualAnnotations[0].bbox.x,30)
+})
+
+// Browser cache that cannot be opened (quota, disabled site data, corrupted profile).
+const brokenIndexedDB = { open: () => { const request = {}; setImmediate(() => request.onerror?.()); return request } }
+test('a broken local recovery cache warns but never blocks saving to the server',async()=>{
+  const h=harness({indexedDB:brokenIndexedDB}),writer=new h.Writer(),warnings=[]
+  writer.onStorageWarning=message=>warnings.push(message)
+  let server={exists:true,mediaId:'m',revision:0,manualAnnotations:[box(0)]}
+  h.hooks.read=()=>copy(server)
+  h.hooks.write=(call,commit)=>{const result=commit();server={...copy(call.body),exists:true,mediaId:'m',revision:result.revision};return result}
+  writer.setBaseline('m',server)
+  const result=await writer.write('m','workspace',{manualAnnotations:[box(0,20)]})
+  assert.equal(result.revision,1);assert.equal(server.manualAnnotations[0].bbox.x,20)
+  assert(warnings.length>0,'the user is told that refresh recovery is unavailable')
+  assert.equal(await writer.getDraft('m'),null)
+})
+test('conflict entries say which side deleted the object and where it is',()=>{
+  const api={};runInNewContext(compiled,{exports:api,Error,require:()=>({})})
+  let conflict;try{api.mergeWorkspace({manualAnnotations:[box(3)]},{manualAnnotations:[box(3,20)]},{manualAnnotations:[],deletedObjectIds:[1]})}catch(e){conflict=e}
+  const entry=conflict.entries[0]
+  assert.equal(entry.deleted,true);assert.equal(entry.localDeleted,false);assert.equal(entry.frameIndex,3);assert.equal(entry.objectId,1)
+  try{api.mergeWorkspace({manualAnnotations:[box(2)]},{manualAnnotations:[box(2,20)]},{manualAnnotations:[box(2,30)]})}catch(e){conflict=e}
+  assert.equal(conflict.entries[0].deleted,false);assert.equal(conflict.entries[0].frameIndex,2)
 })

@@ -38,7 +38,7 @@ export async function trackingFocusChecks(page, {root, origin, api, poll, ready,
   async function pause(n){
     await legacyTrackingProbe(page).click();await page.getByTestId('confirm-tracking-normal').waitFor()
     await poll(async()=>(await work()).pausedAnomalies.length===n,'focus pause list saved')
-    await ready();await poll(async()=>{const w=await work();return w.currentFrame===w.lastPausedContext.frameIndex&&await page.getByRole('spinbutton',{name:'跳转帧号'}).inputValue()===String(w.currentFrame+1)},'focus pause frame saved')
+    await ready();await poll(async()=>{const w=await work();return w.lastPausedContext&&await page.getByRole('spinbutton',{name:'跳转帧号'}).inputValue()===String(w.lastPausedContext.frameIndex+1)},'focus pause frame saved')
   }
   async function focus(){if(!(await page.locator('.shell-annotate.is-focus').count()===1))await button('专注').click()}
   async function jump(frame){const i=page.getByRole('spinbutton',{name:'跳转帧号'});await i.fill(String(frame+1));await i.press('Enter');await ready()}
@@ -138,7 +138,8 @@ export async function trackingFocusChecks(page, {root, origin, api, poll, ready,
   check(Math.abs(pausedStage.width-seedStage.width)<=1&&Math.abs(pausedStage.height-seedStage.height)<=1,'the first compact pause does not silently refit the source frame while its zoom label remains unchanged')
   check(await chip(1).count()===1&&(await selected())?.endsWith('single 1'),'a one-object initial pause keeps the chip and selects the object')
   await button('画框').click()
-  await poll(async()=>(await work()).editor?.activeTool==='bbox','chosen tool persisted before reload')
+  // The chosen tool is per-client state, saved in this tab before reload.
+  await poll(async()=>(await page.evaluate((id)=>{const k=Object.keys(sessionStorage).find(k=>k.startsWith('annotation-view:')&&k.includes(':'+id+':'));return k?JSON.parse(sessionStorage.getItem(k)):null},mid))?.editor?.activeTool==='bbox','chosen tool saved in this client before reload')
   const frameRoute='**/api/track/frame/'+mid+'/1'
   let waiting=false,release
   const gate=new Promise(resolve=>{release=resolve})

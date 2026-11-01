@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { canvasZoomKey } from '../workbench/viewTransform'
 import AnnotationDatasetExport from '../components/AnnotationDatasetExport.vue'
 import AnnotationReviewPanel from '../components/AnnotationReviewPanel.vue'
+import ReviewZoomPreview from '../components/ReviewZoomPreview.vue'
 import AnnotationMinimap from '../components/AnnotationMinimap.vue'
 import WorkbenchShell from '../components/WorkbenchShell.vue'
 import WorkbenchFrameStrip from '../components/WorkbenchFrameStrip.vue'
@@ -17,12 +18,13 @@ import { useAuth } from '../stores/auth'
 import { useWorkspace } from '../stores/workspace'
 import { addLeaveGuard, useRouter } from '../router'
 import { useAnnotationReview, reviewStatusLabel } from '../stores/annotationReview'
+import type { MergeChoice, MergeEntry } from '../annotation/workspaceWrites'
 import type { ReviewItem } from '../api/annotationReviewApi'
 import { reviewPresentation, reviewTarget, reviewTargetZoom } from '../annotation/reviewPresentation'
 import '../annotation/annotation.css'
 import '../annotation/annotation-shell.css'
 const {
-  headBoxBusy, headBoxError, cancelHeadBox, createHeadBox, mediaAssets, selectedMediaId, submissionBusy, mediaImportBusy, importError, duplicateImport, reimportSaving, cancelDuplicateImport, confirmDuplicateImport, restoreImportIntent, activeTool, selectedObjectId, currentFrame, currentTime, frameInput, isPlaying,
+  collaborationConflict, collaborationBusy, resolveCollaboration, syncWorkspace, downloadWorkspaceBackup, currentRemoteTracking, lastEditors, discardLocalDraft, storageWarning, headBoxBusy, headBoxError, cancelHeadBox, createHeadBox, mediaAssets, selectedMediaId, submissionBusy, mediaImportBusy, importError, duplicateImport, reimportSaving, cancelDuplicateImport, confirmDuplicateImport, restoreImportIntent, activeTool, selectedObjectId, currentFrame, currentTime, frameInput, isPlaying,
   isAiBusy, statusMessage, toastMessage, imageRef, videoRef, exactFrameImageRef, exactFrameUrl, exactFrameLoading, videoPlaybackFallback, annotationHitRef, fileInputRef, videoInputRef, packageInputRef, packageImportReport, importPackage,
   annotationsByMedia, selectedMedia, isVideo, maxFrameIndex, currentMediaId, currentObjects, selectedObject, displayObjects, editingBlocked, workspaceRestoring,
   anomalyFrames, pausedAnomalies, trackingPausedFrame, formatTime, selectTool, onStageClick, tempBbox, onBboxDown, onBboxMove, onBboxUp,
@@ -46,6 +48,36 @@ const review = useAnnotationReview()
 const reviewPanel = ref<InstanceType<typeof AnnotationReviewPanel> | null>(null)
 const reviewMediaId = computed(() => selectedMedia.value?.type === 'video' ? selectedMedia.value?.serverMediaId ?? null : null)
 const reviewFocus = ref<ReviewItem | null>(null)
+const mergeChoices=ref<Record<string,MergeChoice>>({})
+watch(collaborationConflict,()=>{mergeChoices.value={} })
+const mergeReady=computed(()=>!!collaborationConflict.value && collaborationConflict.value.entries.every(e=>!!mergeChoices.value[e.key]))
+function chooseMerge(key:string,value:'local'|'remote',remote:unknown){mergeChoices.value={...mergeChoices.value,[key]:{value,remote}}}
+// The other version is named after whoever saved the shared workspace last.
+const otherEditor=computed(()=>lastEditors.value[currentMediaId.value]||'对方')
+type PercentBox={x:number;y:number;width:number;height:number}
+function entryObject(entry:MergeEntry,side:'local'|'remote'):{bbox?:PercentBox}|undefined{
+  const v=entry[side] as {bbox?:PercentBox;manualAnnotations?:Array<{frameIndex?:number;bbox?:PercentBox}>}|undefined
+  if(!v)return undefined
+  if(Array.isArray(v.manualAnnotations))return v.manualAnnotations.find(o=>(o.frameIndex??0)===entry.frameIndex)??v.manualAnnotations[0]
+  return v
+}
+function pixelBox(obj:{bbox?:PercentBox}|undefined){
+  const b=obj?.bbox,w=selectedMedia.value?.width||0,h=selectedMedia.value?.height||0
+  return b&&w&&h?[b.x/100*w,b.y/100*h,(b.x+b.width)/100*w,(b.y+b.height)/100*h]:null
+}
+function mergeSummary(entry:MergeEntry,side:'local'|'remote'){
+  if(side==='remote'&&entry.deleted)return `${otherEditor.value}删除了它`
+  if(side==='local'&&entry.localDeleted)return '你删除了它'
+  return side==='local'?'你的框（实线）':`${otherEditor.value}的框（虚线）`
+}
+async function locateConflict(entry:MergeEntry){
+  if(entry.frameIndex===undefined)return
+  await seekFrame(entry.frameIndex)
+}
+let collaborationTimer: ReturnType<typeof setInterval>|null=null
+// Refresh the review checklist only when the sync actually brought in someone else's change.
+onMounted(()=>{collaborationTimer=setInterval(async()=>{if(pointerActive||pan||reviewActionBusy.value||review.busy.value)return;const id=reviewMediaId.value;const changed=await syncWorkspace();if(changed===true&&reviewing.value&&id&&id===reviewMediaId.value&&!reviewActionBusy.value&&!review.busy.value)void review.load(id)},5000)})
+onUnmounted(()=>{if(collaborationTimer)clearInterval(collaborationTimer)})
 const reviewActionError = ref('')
 const reviewActionBusy = ref(false)
 let reviewContextSerial = 0
@@ -677,7 +709,7 @@ function cancelPointer(){if(pointerRaf)cancelAnimationFrame(pointerRaf);pointerR
 function stageClick(e:MouseEvent){if(suppressClick){suppressClick=false;return}if(!hiddenBoxes.value)onStageClick(e)}
 async function jump(){frameInput.value=Math.max(0,Math.min(maxFrameIndex.value,Math.floor(Number(jumpFrame.value)||1)-1));await seekToInputFrame();jumpFrame.value=currentFrame.value+1}
 async function retrySave(){
-  if(workspaceRecoveryRequired.value){if(!window.confirm('工作区发生冲突或读取失败。将先下载本地标注备份，再读取服务器当前状态；未保存的本地修改不会覆盖服务器。是否继续？'))return;await reloadWorkspaceFromServer();return}
+  if(workspaceRecoveryRequired.value){try{await reloadWorkspaceFromServer()}catch(error){saveError.value=(error as Error)?.message||'本机备份未成功，请保持页面打开并导出备份'}return}
   try{await retryWorkspaceSave()}catch{/* The store logs and exposes the failure. */}
 }
 function enhancement(preset:string){if(preset==='原图'){resetMediaFilter();inverted.value=false}else if(preset==='暗场'){brightness.value=150;contrast.value=125}else{brightness.value=100;contrast.value=160}}
@@ -771,7 +803,7 @@ onUnmounted(()=>{cancelReviewLocate();window.removeEventListener('pointerdown',c
         <div class="mt-5 flex justify-end gap-3"><button class="btn-secondary" :disabled="reimportSaving||duplicateImport.pending" @click="cancelDuplicateImport">取消导入</button><button v-if="duplicateImport.canOverwrite" class="btn-primary" :disabled="reimportSaving" @click="confirmDuplicateImport">{{ reimportSaving?'正在覆盖…':duplicateImport.pending?'重试覆盖':'覆盖并重新标注' }}</button></div>
       </section>
     </div></Teleport>
-    <WorkbenchShell name="annotate" :focused="focused" :focus-keeps-inspector="reviewing" drawer-label="素材库" :drawer-count="mediaAssets.length" :drawer-forced="!selectedMedia" :drawer-busy="backgroundTracking" v-model:drawer-open="libraryOpen" :inspector-forced="showPauseFeedback" :inspector-badge="currentObjects.length">
+    <WorkbenchShell name="annotate" :focused="focused" :focus-keeps-inspector="reviewing || !!collaborationConflict" drawer-label="素材库" :drawer-count="mediaAssets.length" :drawer-forced="!selectedMedia" :drawer-busy="backgroundTracking" v-model:drawer-open="libraryOpen" :inspector-forced="showPauseFeedback || !!collaborationConflict" :inspector-badge="currentObjects.length">
       <template #context="{ inspectorVisible }"><span class="annot-context" :class="{'is-tracking':(!inspectorVisible||reviewing)&&(currentTrackingProgress||currentTrackingFinished)}" data-testid="annotation-stage-status" aria-label="标注工作区状态">
         <strong :title="selectedMedia?.name">{{ selectedMedia?.name || (reviewing?'选择视频开始审查':'选择素材开始标注') }}</strong>
         <span v-if="isVideo" class="shell-meta">第 {{ currentFrame+1 }} / {{ maxFrameIndex+1 }} 帧 · {{ annotatedFrameCount }} 帧有框</span>
@@ -796,7 +828,8 @@ onUnmounted(()=>{cancelReviewLocate();window.removeEventListener('pointerdown',c
       <template #alerts>
         <div v-if="importError" class="error-banner" role="alert">{{ importError }}</div>
         <div v-if="packageImportReport" class="error-banner package-import-report" role="status" data-testid="package-import-report"><span>标注包：导入 {{ packageImportReport.imported.length }} 个视频<template v-if="packageImportReport.imported.length">（未审查，请到审查页检查）</template><template v-for="item in packageImportReport.skipped" :key="item.videoName">；{{ item.videoName }} 未导入：{{ item.reason }}</template></span><button class="quiet-button" @click="packageImportReport=null">知道了</button></div>
-        <div v-if="saveError" class="error-banner" role="alert" data-testid="workspace-save-error">{{ saveError }} <button class="quiet-button" :disabled="saveState==='saving'||workspaceRestoring||trackingRetryBusy||!!deletingMediaId||objectDeletionBusy||trackingFeedbackBusy" @click="retrySave">{{ saveState==='saving'?'正在重试保存…':saveRecoveryLabel }}</button></div>
+        <div v-if="saveError && !collaborationConflict" class="error-banner" role="alert" data-testid="workspace-save-error">{{ saveError }} <button class="quiet-button" :disabled="saveState==='saving'||workspaceRestoring||trackingRetryBusy||!!deletingMediaId||objectDeletionBusy||trackingFeedbackBusy" @click="retrySave">{{ saveState==='saving'?'正在重试保存…':saveRecoveryLabel }}</button><button class="quiet-button" @click="downloadWorkspaceBackup">导出本地备份</button><button class="quiet-button" @click="discardLocalDraft">放弃本机修改</button></div>
+        <div v-if="storageWarning" class="error-banner package-import-report" role="status" data-testid="storage-warning"><span>{{ storageWarning }}</span><button class="quiet-button" @click="storageWarning=''">知道了</button></div>
         <div v-if="trackingError" class="error-banner tracking-error-banner" role="alert" data-testid="tracking-error"><span>第 {{ trackingError.frameIndex+1 }} 帧 · {{ trackingError.phase }}失败：{{ trackingError.message }}</span><button class="quiet-button" :disabled="trackingRetryBusy||workspaceRestoring||saveState==='saving'||!!objectDeletionPendingAction||trackingFeedbackPending" @click="retryTracking">{{ trackingRetryBusy?'正在重试…':trackingRetryLabel }}</button></div>
         <div v-if="trackingRestartError&&!restartDialogOpen" class="error-banner tracking-error-banner" role="alert" data-testid="tracking-restart-error"><span>{{ trackingRestartError }}</span><button v-if="trackingRestartPendingAction&&trackingRestartPendingAction.phase!=='conflict'" class="quiet-button" data-testid="tracking-restart-retry" :disabled="trackingRestartBusy||workspaceRestoring" @click="retryTrackingRestart">{{ trackingRestartBusy?'正在恢复…':trackingRestartPendingAction.phase==='start'?'继续从原起点追踪':'重试原回退请求' }}</button><button v-else-if="trackingRestartPendingAction?.phase==='conflict'" class="quiet-button" :disabled="trackingRestartBusy||workspaceRestoring" @click="reloadWorkspaceFromServer">备份并重新读取</button></div>
         <div v-if="trackingRestartStorageWarning" class="error-banner" role="status">{{ trackingRestartStorageWarning }}</div>
@@ -841,7 +874,7 @@ onUnmounted(()=>{cancelReviewLocate();window.removeEventListener('pointerdown',c
           </div>
           <div v-if="enhancing" class="annot-enhance enhancement-bar"><button v-for="p in ['原图','暗场','低对比']" :key="p" class="quiet-button" @click="enhancement(p)">{{ p }}</button><label>亮度 <input v-model.number="brightness" aria-label="亮度" type="range" min="50" max="200" /></label><label>对比 <input v-model.number="contrast" aria-label="对比度" type="range" min="50" max="220" /></label><label><input v-model="inverted" type="checkbox" />反相</label><span>只影响显示</span></div>
           <AnnotationMinimap v-if="selectedMedia && minimapOn" :source="minimapSource" :scroller="scrollContainerRef" :stage="stageRef" :media-width="selectedMedia.width||4" :media-height="selectedMedia.height||3" :redraw-key="`${currentMediaId}:${currentFrame}:${exactFrameUrl}:${stageSize.w}`" />
-          <div v-if="exactFrameLoading||workspaceRestoring||isAiBusy" class="canvas-status">{{ isAiBusy?'AI 正在追踪本视频 · 可切换到其他视频继续标注':workspaceRestoring?'正在恢复工作区…':'正在读取帧…' }}</div>
+          <div v-if="exactFrameLoading||workspaceRestoring||isAiBusy||currentRemoteTracking" class="canvas-status" data-testid="canvas-status">{{ isAiBusy?'AI 正在追踪本视频 · 可切换到其他视频继续标注':currentRemoteTracking?`${currentRemoteTracking.userName||'其他人'}正在追踪本视频 · 完成后自动刷新，可先标注其他视频`:workspaceRestoring?'正在恢复工作区…':'正在读取帧…' }}</div>
           <div v-if="frameError" class="canvas-error" role="alert">{{ frameError }}<button class="btn-secondary" @click="retryExactFrame">重试读取</button></div>
           <div v-if="magnifier" class="loupe"><canvas ref="loupe" width="200" height="150" :style="{filter}" /><span>4× 原图局部 · {{ mousePixel?`${mousePixel.x}, ${mousePixel.y}`:'移动指针查看' }}</span></div>
           <div v-if="!isVideo" class="shell-zoom" role="group" aria-label="画面缩放"><span v-if="mousePixel" class="annot-coords">{{ mousePixel.x }}, {{ mousePixel.y }} px</span><button aria-label="缩小画面" @click="zoomAt(-1)">−</button><button title="适应画面 (0)" aria-label="适应画面" @click="fitView">{{ Math.round(zoom*100) }}%</button><button aria-label="放大画面" @click="zoomAt(1)">＋</button></div>
@@ -865,6 +898,23 @@ onUnmounted(()=>{cancelReviewLocate();window.removeEventListener('pointerdown',c
         <div class="shell-zoom in-bottom" role="group" aria-label="画面缩放"><span v-if="mousePixel" class="annot-coords">{{ mousePixel.x }}, {{ mousePixel.y }} px</span><button aria-label="缩小画面" @click="zoomAt(-1)">−</button><button title="适应画面 (0)" aria-label="适应画面" @click="fitView">{{ Math.round(zoom*100) }}%</button><button aria-label="放大画面" @click="zoomAt(1)">＋</button></div>
       </template>
       <template #inspector><div class="annot-inspector" :class="{'pause-active':showPauseFeedback}" aria-label="检查面板">
+      <section v-if="collaborationConflict" class="shell-card collaboration-card" role="region" aria-label="处理同时修改的标注" data-testid="workspace-merge">
+        <div class="shell-card-head"><strong>{{ collaborationConflict.entries.length }} 个框你和{{ otherEditor }}同时改了</strong></div>
+        <p class="shell-card-note">其他修改已自动合并。逐个选择保留哪一份。</p>
+        <div class="collaboration-entries">
+          <div v-for="entry in collaborationConflict.entries" :key="entry.key" class="collaboration-entry">
+            <div class="collaboration-entry-head"><strong>{{ entry.label }}</strong><button v-if="entry.frameIndex!==undefined" class="quiet-button" :disabled="currentFrame===entry.frameIndex" @click="locateConflict(entry)">{{ currentFrame===entry.frameIndex?'当前帧':'定位' }}</button></div>
+            <ReviewZoomPreview v-if="currentFrame===entry.frameIndex" comparing :source="minimapSource" :box="pixelBox(entryObject(entry,'local'))" :compare="pixelBox(entryObject(entry,'remote'))" :size="140" :media-width="selectedMedia?.width||0" :media-height="selectedMedia?.height||0" :filter="filter" :frame-key="`${entry.key}:${currentFrame}`" />
+            <div class="collaboration-choice">
+              <button class="btn-secondary" :disabled="collaborationBusy" :aria-pressed="mergeChoices[entry.key]?.value==='local'" @click="chooseMerge(entry.key,'local',entry.remote)">保留我的<small>{{ mergeSummary(entry,'local') }}</small></button>
+              <button class="btn-secondary" :disabled="collaborationBusy" :aria-pressed="mergeChoices[entry.key]?.value==='remote'" @click="chooseMerge(entry.key,'remote',entry.remote)">用{{ otherEditor }}的<small>{{ mergeSummary(entry,'remote') }}</small></button>
+            </div>
+          </div>
+        </div>
+        <p v-if="saveError" class="review-warning" role="alert">{{ saveError }}</p>
+        <button class="btn-primary" :disabled="!mergeReady||collaborationBusy" @click="resolveCollaboration(mergeChoices)">{{ collaborationBusy?'正在保存…':'应用选择并继续' }}</button>
+        <div class="collaboration-more"><button class="quiet-button" @click="downloadWorkspaceBackup">导出本地备份</button><button class="quiet-button" @click="discardLocalDraft">全部用服务器版本</button></div>
+      </section>
       <AnnotationReviewPanel v-if="reviewing" ref="reviewPanel" :media-id="reviewMediaId" :current-frame="currentFrame" :blocked="editingBlocked" :tracking-pending="hasPausedTracking" :flush="flushWorkspace" :preview-source="minimapSource" :preview-filter="filter" :preview-media-width="selectedMedia?.width||0" :preview-media-height="selectedMedia?.height||0" :action-error="reviewActionError" :action-busy="reviewActionBusy" @locate="locateReviewItem" @adopt="adoptReviewTrackItem" @add-head="addHeadAtReviewTarget" />
       <section v-show="showPauseFeedback" class="pause-inspector-panel" aria-label="暂停核对">
         <div ref="pauseControlHost" class="pause-control-host" />
@@ -929,3 +979,15 @@ onUnmounted(()=>{cancelReviewLocate();window.removeEventListener('pointerdown',c
   </section>
   <transition name="toast"><div v-if="toastMessage" class="status-toast" role="status">{{ toastMessage }}</div></transition>
 </template>
+
+<style scoped>
+.collaboration-card { border:1px solid var(--warning,#b87b21); padding:12px; display:grid; gap:10px; }
+.collaboration-entries { max-height:260px; overflow:auto; display:grid; gap:12px; }
+.collaboration-entry { display:grid; gap:6px; }
+.collaboration-entry-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.collaboration-choice { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+.collaboration-choice button { display:flex; flex-direction:column; align-items:flex-start; gap:2px; white-space:normal; text-align:left; font-size:12px; }
+.collaboration-choice small { color:var(--muted); font-size:11px; }
+.collaboration-choice button[aria-pressed="true"] { outline:2px solid var(--accent,#18777b); outline-offset:-2px; }
+.collaboration-more { display:flex; gap:8px; flex-wrap:wrap; }
+</style>

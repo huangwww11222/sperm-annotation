@@ -27,6 +27,8 @@ Docker 显式设定 `APP_DATA_DIR=/data/database`，业务日志位于宿主机 
 
 
 审查采用框在工作区 `manualAnnotations` 保留 `origin=review_adopted` 和 `reviewAdoptionKey`（审查轮次、项编号、动作类型），用于保存/检查失败后的原操作恢复。它不参与训练框几何，不代替工作区 revision 或写入幂等键；补框也用该标识避免检查重试重复创建。训练包 `review/decisions.jsonl` 汇总已通过各轮及归档清单的候选判断，同帧重合位置以最新结果为准，较新的 `ok` 不再输出旧 `fixed/not_target`。
+浏览器本机恢复：IndexedDB `annotation-workspace-recovery/records` 缓存独立基准、待保存草稿与原键原正文请求，键包含页面标识、账号和视频；观看状态使用带 generation 的本机 sessionStorage 键。人工框的可选 creationId 用于辨别独立新建身份与恢复后的编号对应，不替代 objectId。无数据库迁移或后端文件格式变化，离线 contract 不变。兼容读取旧 sessionStorage 请求；缓存不可用时提示用户并继续服务器保存，待确认请求保留在页面内存中按原键回放。JSON 仅按需导出，不再是重新读取的固定副作用。
+
 ## 文件与工作区
 
 ```text

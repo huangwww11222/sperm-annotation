@@ -53,6 +53,21 @@ Vue 3 + TypeScript + Vite；FastAPI + SQLite；SAM3 在后端按需加载。前�
 
 `review_repository.py` 等保留历史数据层；活动审查只走 `annotation_review_routes.py`，路由注册在 `review_routes.py`。`mockAnnotationApi.ts`、旧 annotation 接口注释、EffectsPage 等兼容代码不能作为“当前登录是 Mock”或“Tracking 只从第 0 帧开始”的依据。当前登录使用真实后端 JWT；实际请求以活动页面调用和 `main.py` 注册的路由为准。
 
+## 大文件定位
+
+下列文件超过约 800 行，先 `grep -n` 定位函数或关键字再读附近片段，不要整份读取（行数随开发变化，仅作量级参考）。
+
+| 文件 | 约行数 | 定位建议 |
+| --- | --- | --- |
+| `frontend/src/stores/workspace.ts` | 3000 | 标注/审查前端状态的总入口；按动作名搜索，如 `grep -n "const save\|function save\|importPackage\|seekVideo" ` |
+| `frontend/src/pages/AnnotatePage.vue` | 1000（单行很长，约 100 KB） | 按模板中的类名、`mode === 'review'` 或组件名搜索 |
+| `backend/app/main.py` | 1500 | 路由集中处；按路径搜索，如 `grep -n '"/api/track/' ` |
+| `backend/app/services/anomaly_detector.py` | 1500 | 仅旧暂停兼容路径的异常判定；按原因码搜索 |
+| `backend/app/tracker.py` | 1200 | SAM3 追踪编排；按 `def ` 列出函数后再读 |
+| `backend/app/annotation_review.py` | 900 | 审查清单与通过规则；按清单项类型（`unknown`、`doubt`、`sample` 等）搜索 |
+| `backend/app/annotation_state.py`、`services/tracking_evidence.py`、`training_export.py` | 800–900 | 按 `def ` 列出函数后再读 |
+| `backend/app/review_repository.py`、`review_workflow.py`、`confirmation_workflow.py` | 800–1200 | 历史 A/B/C/F 只读数据层；当前功能一般不需要读 |
+
 ## 本地运行
 
 第三方部署先使用根 README 的 Docker 入口。以下为开发模式；后端使用 Python 3.12（锁定 NumPy 需要 3.12+），前端 Node 22。项目根目录，已安装后端依赖的环境：

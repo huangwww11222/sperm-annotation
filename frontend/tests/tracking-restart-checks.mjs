@@ -90,7 +90,9 @@ export async function trackingRestartChecks(page, fixture, origin, { redProbeOnl
     publishTrackingFixture(fixture,{operation:'pause',rows,workspace:{...state,revision:state.revision+1,currentFrame:2,manualAnnotations:manual,manualBaselines:[{objectId:1,name:'sperm 1',source:'manual',frameIndex:6,bbox:[1538.4,1000,1598.4,1030]}],pausedAnomalies:[{objectId:1,displayName:'sperm 1',title:'目标偏移',summary:'追踪偏移需检查',metrics:[],rawReasons:['motion_normalized=3 HARD'],suggestion:'查看前几帧',canLearn:true,acceptsGeometry:false}],lastPausedContext:{mediaId:fixture.mid,frameIndex:5}}})
     await page.reload(); await attach(); await idle()
     if (await page.evaluate(mid=>window.ws.selectedMedia.value?.serverMediaId!==mid,fixture.mid)) {await openAsset(page,page.locator('.asset-card').filter({hasText:'4k-recovery.avi'}));await idle()}
-    await page.waitForFunction(() => window.ws.currentFrame.value === 2 && window.ws.pausedAnomalies.value.length === 1)
+    await page.waitForFunction(() => window.ws.pausedAnomalies.value.length === 1)
+    const frameInput=page.getByRole('spinbutton',{name:'跳转帧号'})
+    await frameInput.fill('3');await frameInput.press('Enter');await page.waitForFunction(()=>window.ws.currentFrame.value===2)
     // Workspace metadata arrives before the source image and AI collection;
     // correction controls remain intentionally disabled until all are loaded.
     await idle()

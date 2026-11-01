@@ -354,6 +354,8 @@ with zipfile.ZipFile(sys.argv[1]) as z:
   await page.getByTestId('package-import-report').waitFor()
   const report = await page.getByTestId('package-import-report').innerText()
   check(report.includes('导入 1 个视频') && report.includes(VIDEO.name) && report.includes('未覆盖'), 'package import adds the missing video and refuses to overwrite the existing one')
+  // The HTTP report arrives before media-list reconciliation and frame restore.
+  await page.waitForFunction(()=>!window.ws.mediaImportBusy.value);await ready()
   const imported = await page.evaluate(() => window.ws.selectedMedia.value)
   check(imported.name === PORTRAIT.name && imported.serverMediaId !== VIDEO.mid, 'imported video opens in the workbench')
   const importedState = await json('/track/workspace/'+imported.serverMediaId)
@@ -386,6 +388,8 @@ with zipfile.ZipFile(sys.argv[1]) as z:
     await page.waitForFunction(() => !window.ws.isTrackingMedia([...window.ws.mediaAssets.value].find(m => m.serverMediaId === 'ux-video').id))
     check(await page.locator('.asset-card').filter({ hasText: VIDEO.name }).getByTestId('asset-tracking').count() === 0 && await page.evaluate(() => window.ws.selectedMedia.value.name) === PORTRAIT.name, 'background job finishes without pulling the user back to its video')
   } finally { await page.unroute('**/api/track', fakeStart); await page.unroute('**/api/track/status/background-1', fakeStatus); await page.unroute('**/api/track/rewind', fakeRewind) }
+  // Later suites recreate the portrait fixture; do not leave a same-named imported copy behind.
+  check((await api('/track/media/'+imported.serverMediaId, 'DELETE')).ok(), 'imported test video removed after the import checks')
 
   check(errors.length === 0, 'no uncaught browser errors across review and export')
   console.log(`SUCCESS ${checks} checks`)

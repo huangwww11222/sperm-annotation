@@ -19,6 +19,10 @@
 
 前后端目录的 README 只提供入口链接。
 
+## 怎样读大文档
+
+当前文档都很长（约 KB）：TESTING 59、API 40、ANNOTATION 38、WORKFLOW 33、STORAGE_LAYOUT 28、DOCKER_DEPLOYMENT 26、PROJECT_STRUCTURE 12。不要整份读取：先 `grep -n '^#' docs/<文件>` 看章节，再只读与任务相关的章节。新增内容放进已有章节，单个文档不要继续膨胀；一节超过约 5 KB 时考虑拆成子章节或移出细节。
+
 ## 给工具使用者的说明
 
 [用户使用说明](../frontend/src/help/user-guide.md) 面向标注员和审查员，覆盖完整流程、保存与续做、快捷键、训练集导出及常见问题。前端顶部“使用说明”按当前页面打开章节、支持搜索并可下载同一份 Markdown。它随前端一起打包，是唯一来源；不替代上表中的开发契约。

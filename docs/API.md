@@ -19,6 +19,8 @@
 
 审查采用轨迹的 `adoptObjectId` 是生成清单时的建议编号：不同反向身份预留不同编号，前端采用前仍须检查全视频占用和删除墓碑；不得把生成后新增的其他对象并入。工作区人工框附 `reviewAdoptionKey` 用于同一采用/补框操作重试，保存仍走原版本校验、幂等写入与事务；记录检查请求显式绑定开始时的 mediaId/reviewId，切换视频或轮次后不发送旧操作的检查。
 
+客户端多人协作仍使用现有工作区 GET/PUT 写入，不增加绕过版本检查的入口。`GET /api/track/workspace/{mediaId}/stamp` 是只读轮询：`{revision,generationId,updatedBy,updatedByName,trackingStamp:[mtimeNs,size]|null,tracking:{userId,userName,status}|null}`；不持全局来源锁、不执行恢复日志，按文件 mtime/大小缓存已解析版本，文件正在替换时返回 503。权威内容仍以完整 GET 为准。新版普通保存仅提交人工框、人工基准、删除规则和 generation；观看状态在本机独立保存。工作区版本 409 的自动合并只基于独立读取基准及最新 GET；每次重算正文后使用新幂等键。反馈/回退等专用接口仍原键恢复，不自动重写。详见 WORKFLOW 的多人协作保存。
+
 ## 追踪与审查证据协议
 
 - 审查状态与开始审查可复用进程内解析缓存：键为 `(mediaId, 工作区revision/追踪文件标记, EVIDENCE_POLICY)`，最多 8 个，按最近使用淘汰；通过审查与导出门槛不读缓存，始终重新加载当前内容。

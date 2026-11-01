@@ -197,6 +197,118 @@ async function narrowWorkbenchChecks() {
   }
   await page.setViewportSize(desktop); await page.evaluate(() => scrollTo(0, 0))
 }
+async function collaborationChecks(){
+  const contexts=[],peers=[];let downloads=0
+  const mid='ux-portrait'
+  const read=async()=>{const response=await page.request.get(origin+'/api/track/workspace/'+mid,{headers:{Authorization:`Bearer ${confirmation.token}`}});assert(response.ok());return response.json()}
+  const idle=target=>target.waitForFunction(()=>window.ws && window.ws.selectedMedia.value?.serverMediaId==='ux-portrait' && !window.ws.workspaceRestoring.value && !window.ws.exactFrameLoading.value && !window.ws.editingBlocked.value)
+  const attach=target=>target.evaluate(async()=>{const resource=performance.getEntriesByType('resource').find(r=>r.name.includes('/src/stores/workspace.ts'));window.ws=(await import(resource.name)).useWorkspace()})
+  async function move(target,frame,dx){
+    const jump=target.getByRole('spinbutton',{name:'跳转帧号'});await jump.fill(String(frame+1));await jump.press('Enter');await idle(target)
+    await target.getByRole('button',{name:'适应画面',exact:true}).click();await target.keyboard.press('v')
+    const rect=await target.locator('.annotation-box').first().boundingBox();assert(rect)
+    await target.mouse.move(rect.x+rect.width/2,rect.y+rect.height/2);await target.mouse.down();await target.mouse.move(rect.x+rect.width/2+dx,rect.y+rect.height/2+3,{steps:3});await target.mouse.up()
+  }
+  try{
+    for(const [token,id] of [[confirmation.token,'3'],[confirmation.authorToken,'1']]){
+      const context=await browser.newContext({viewport:{width:1366,height:900}});contexts.push(context)
+      await context.addInitScript(({token,id})=>{localStorage.setItem('rare-sperm-token',token);localStorage.setItem('rare-sperm-auth',JSON.stringify({id,name:'协作测试',role:'annotator'}))},{token,id})
+      // Earlier suites may leave other media with the same file name; show only the shared video.
+      await context.route('**/api/track/media',async route=>{const response=await route.fetch(),data=await response.json();data.items=data.items.filter(m=>m.mediaId===mid);await route.fulfill({response,json:data})})
+      const peer=await context.newPage();peer.on('download',()=>downloads++);peers.push(peer)
+      await peer.goto(origin+'/annotate');await attach(peer)
+      await openAsset(peer,peer.locator('.asset-card').filter({hasText:'ux-portrait.avi'}));await idle(peer)
+    }
+    const [a,b]=peers
+    const before=await read()
+    await a.getByRole('button',{name:'放大画面',exact:true}).click()
+    const jump=a.getByRole('spinbutton',{name:'跳转帧号'});await jump.fill('2');await jump.press('Enter');await idle(a)
+    await a.waitForTimeout(1300)
+    check((await read()).revision===before.revision,'two accounts can browse and zoom without advancing a shared workspace revision')
+    // Hold B's ordinary synchronization at its independently read baseline.
+    // Once its write receives 409, the real fresh server read must be used.
+    let stale=await read(),allowFresh=false
+    const pattern='**/api/track/workspace/'+mid
+    const staleRead=async route=>{
+      if(route.request().method()==='GET'&&!allowFresh)return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(stale)})
+      const response=await route.fetch();if(route.request().method()==='PUT'&&response.status()===409)allowFresh=true
+      await route.fulfill({response})
+    }
+    await b.route(pattern,staleRead)
+    await move(a,0,9)
+    await poll(async()=> (await read()).manualAnnotations.some(o=>o.frameIndex===0),'first account edit saved')
+    await move(b,1,12)
+    await poll(async()=>{const state=await read();return state.manualAnnotations.some(o=>o.frameIndex===0)&&state.manualAnnotations.some(o=>o.frameIndex===1)},'disjoint edits from two accounts both saved')
+    await b.unroute(pattern,staleRead)
+    check(await b.getByTestId('workspace-merge').count()===0 && downloads===0,'different-frame edits merge without a conflict banner or JSON download')
+    // Re-establish identical baselines before a genuine same-head collision.
+    for(const peer of peers){await peer.reload();await attach(peer);await idle(peer)}
+    stale=await read();allowFresh=false;await b.route(pattern,staleRead)
+    const original=stale.manualAnnotations.find(o=>o.frameIndex===0)
+    await move(a,0,10)
+    await poll(async()=>JSON.stringify((await read()).manualAnnotations.find(o=>o.frameIndex===0).bbox)!==JSON.stringify(original.bbox),'remote same-head edit saved')
+    await move(b,0,-10)
+    await b.getByTestId('workspace-merge').waitFor()
+    check(downloads===0,'same-head conflict retains both versions without forcing a download')
+    await b.screenshot({path:'output/playwright/collaboration-same-head.png',fullPage:true})
+    for(const [width,theme] of [[760,'light'],[390,'dark']]){
+      await b.setViewportSize({width,height:844});await b.evaluate(theme=>document.documentElement.dataset.theme=theme,theme)
+      await b.screenshot({path:`output/playwright/collaboration-${width}-${theme}.png`,fullPage:true})
+      console.log('COLLAB_LAYOUT',await b.evaluate(()=>({width:innerWidth,scroll:document.documentElement.scrollWidth,overflow:[...document.querySelectorAll('body *')].filter(e=>{const r=e.getBoundingClientRect();return r.width>0&&(r.right>innerWidth+1||r.left< -1)}).slice(0,14).map(e=>({tag:e.tagName,class:e.className,width:e.getBoundingClientRect().width,left:e.getBoundingClientRect().left}))})))
+      check(await b.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),`collaboration choice fits ${width} ${theme}`)
+      await b.screenshot({path:`output/playwright/collaboration-${width}-${theme}.png`,fullPage:true})
+    }
+    await b.setViewportSize({width:1366,height:900})
+    // A refresh must restore the local draft and present the unresolved choice.
+    await b.unroute(pattern,staleRead);await b.reload();await attach(b)
+    await b.getByTestId('workspace-merge').waitFor()
+    check(downloads===0,'refresh preserves the unresolved draft without downloading JSON')
+    await b.getByTestId('workspace-merge').getByRole('button',{name:/^用.+的/}).first().click()
+    await b.getByRole('button',{name:'应用选择并继续',exact:true}).click()
+    await b.getByTestId('workspace-merge').waitFor({state:'hidden'});await idle(b)
+    await b.reload();await attach(b);await idle(b)
+    check(await b.getByTestId('workspace-merge').count()===0,'accepted remote choice stays resolved after refresh')
+    check(downloads===0,'the complete collaborative recovery does not generate backup downloads')
+    await b.evaluate(async()=>{
+      const url=performance.getEntriesByType('resource').find(r=>r.name.includes('/src/annotation/workspaceWrites.ts')).name
+      const {WorkspaceWrites}=await import(url),writer=new WorkspaceWrites()
+      const manualAnnotations=Array.from({length:22000},(_,i)=>({id:'large-'+i,objectId:i+1,frameIndex:0,name:'x'.repeat(200),bbox:{x:1,y:1,width:1,height:1}}))
+      await writer.saveDraft('large-cache-probe',{manualAnnotations:[]},{manualAnnotations})
+    })
+    await b.reload();await attach(b);await idle(b)
+    const count=await b.evaluate(async()=>{
+      const url=performance.getEntriesByType('resource').find(r=>r.name.includes('/src/annotation/workspaceWrites.ts')).name
+      const {WorkspaceWrites}=await import(url),writer=new WorkspaceWrites(),draft=await writer.getDraft('large-cache-probe')
+      await writer.clearDraft('large-cache-probe');return draft.local.manualAnnotations.length
+    })
+    check(count===22000,'large drafts exceeding Web Storage quota survive refresh in IndexedDB (cache component test)')
+
+    // Undo after a sync must not erase a colleague's box: B edits frame 4, A then adds a box there.
+    for(const peer of peers){await peer.reload();await attach(peer);await idle(peer)}
+    await move(b,3,8)
+    await poll(async()=>(await read()).manualAnnotations.some(o=>o.frameIndex===3),'B frame-4 edit saved')
+    await a.getByRole('spinbutton',{name:'跳转帧号'}).fill('4');await a.getByRole('spinbutton',{name:'跳转帧号'}).press('Enter');await idle(a)
+    await a.evaluate(()=>window.ws.addObject({x:80,y:80},{x:78,y:78,width:3,height:3}))
+    let added
+    await poll(async()=>{added=(await read()).manualAnnotations.find(o=>o.frameIndex===3&&o.bbox.x===78);return !!added},'A box on frame 4 saved')
+    await b.waitForFunction(id=>window.ws.currentObjects.value.some(o=>o.objectId===id),added.objectId,{timeout:20000})
+    check(true,'a colleague box appears through the background sync without reloading')
+    await idle(b);await b.locator('.shell-rail').click({position:{x:22,y:300}});await b.keyboard.press('Control+z');await b.waitForTimeout(1500)
+    await b.waitForFunction(()=>window.ws.saveState.value!=='saving')
+    check((await read()).manualAnnotations.some(o=>o.objectId===added.objectId&&o.frameIndex===3),'undo after a sync never deletes the colleague box')
+
+    // Another account tracking this video: shown by name and editing waits, then resumes.
+    const stampPattern='**/api/track/workspace/'+mid+'/stamp'
+    const busyStamp=async route=>{const response=await route.fetch(),data=await response.json();await route.fulfill({response,json:{...data,tracking:{userId:99,userName:'张三',status:'running'}}})}
+    await b.route(stampPattern,busyStamp)
+    await b.getByTestId('canvas-status').filter({hasText:'张三正在追踪本视频'}).waitFor({timeout:15000})
+    check(await b.evaluate(()=>window.ws.editingBlocked.value),'editing waits while another account tracks this video (stamp simulated)')
+    await b.unroute(stampPattern,busyStamp)
+    await b.waitForFunction(()=>!window.ws.currentRemoteTracking.value,{timeout:15000})
+    check(true,'the notice clears once the other job ends')
+  }finally{for(const context of contexts)await context.close()}
+}
+
 try {
   fs.mkdirSync('output/playwright', { recursive: true })
   await page.addInitScript(({ token }) => {
@@ -302,7 +414,7 @@ try {
   await page.locator('.review-candidate-circle').dispatchEvent('click')
   await page.waitForTimeout(200)
   check(await page.evaluate(()=>window.ws.zoom.value)===zoomWithBoxTool, 'the candidate circle is inert while the box tool is selected')
-  await page.keyboard.press('Escape'); await page.keyboard.press('v')
+  await page.keyboard.press('Escape'); await ready(); await page.keyboard.press('v')
   await page.waitForFunction(()=>window.ws.activeTool.value==='select')
 
   // Keyboard review result, next item, and zoom: inputs must isolate all of them.
@@ -344,9 +456,11 @@ try {
   await page.getByRole('button', { name: /退出专注/ }).click()
   await page.setViewportSize({ width: 1366, height: 768 })
   await narrowWorkbenchChecks()
+  await collaborationChecks()
   check(errors.length === 0, 'shared workbench paths have no uncaught browser exceptions')
   console.log('SUCCESS', checks, 'checks')
 } catch (error) {
+  console.log('WORKBENCH_FAILURE_STATE',await page.evaluate(()=>({frame:window.ws?.currentFrame.value,blocked:window.ws?.editingBlocked.value,restoring:window.ws?.workspaceRestoring.value,loading:window.ws?.exactFrameLoading.value,playing:window.ws?.isPlaying.value,focus:document.activeElement?.outerHTML.slice(0,180),conflict:!!window.ws?.collaborationConflict.value})))
   await page.screenshot({ path: 'output/playwright/workbench-consistency-failure.png', fullPage: true })
   throw error
 } finally {
