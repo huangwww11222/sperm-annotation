@@ -8,7 +8,7 @@
 
 | 模式 | 启动文件 | 可用功能 |
 | --- | --- | --- |
-| CPU 基础模式 | `compose.yaml` | 人工标注、逐帧审查、对比确认、YOLO/COCO 导出；不启用 AI Tracking |
+| CPU 基础模式 | `compose.yaml` | 人工标注、审查、YOLO/COCO 导出；不启用 AI Tracking |
 | GPU 模式（默认） | 上述文件 + `compose.gpu.yaml` | 完整工作流和 SAM3 Tracking |
 
 服务器安装 Docker + Compose 2.20+。Windows 使用 Docker Desktop 的 WSL2 Linux containers；Linux GPU 服务器还需 NVIDIA 驱动及 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)。[Docker 的 GPU 支持说明](https://docs.docker.com/compose/how-tos/gpu-support/)列出了设备挂载条件。
@@ -233,7 +233,7 @@ bash manage-offline.sh logs --tail=100 backend frontend
 bash /新包目录/update-offline.sh /原部署目录 --status
 ```
 
-升级成功后，浏览器按 Ctrl+F5。核对原账号、素材、标注和审查/确认结果，再用测试视频检查上传抽帧、送审、删除后刷新、训练包和一次实际 AI Tracking。健康检查或 CUDA 张量计算不能代替真实模型推理验收。
+升级成功后，浏览器按 Ctrl+F5。核对原账号、素材、标注和审查结果，再用测试视频检查上传抽帧、审查通过、删除后刷新、训练包和一次实际 AI Tracking。健康检查或 CUDA 张量计算不能代替真实模型推理验收。
 
 普通 Git push 只发布源码；每次医院升级仍需制作、传入并安装对应更新包。现有版本标签工作流发布镜像与此本地打包流程并行，不能把“仓库有工作流文件”视为医院自动升级或 GPU 已通过验收。
 

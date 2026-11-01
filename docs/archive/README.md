@@ -23,7 +23,7 @@
 | [标注体验与统一界面_优化与测试.md](标注体验与统一界面_优化与测试.md) | 当时的实现范围、故障排查与测试证据 |
 | [训练数据集导出_迁移与测试.md](训练数据集导出_迁移与测试.md) | 当时的实现范围、故障排查与测试证据 |
 
-历史原型：[审查 HTML](../review_demo.html)、[确认 HTML](../annotation-confirm-demo.html)。原型不随当前开发维护。
+历史原型：[审查 HTML](prototypes/review_demo.html)、[确认 HTML](prototypes/annotation-confirm-demo.html)。原型不随当前开发维护。
 
 ## 文档整合来源
 
@@ -35,14 +35,21 @@
 | ID 稳定性、追踪回退两篇短文 | 合并并对照代码纠正回退边界（保留当前 N 帧） | ANNOTATION |
 | Windows venv 启动说明 | 合入 Windows 部署；旧正文归档 | DEPLOYMENT_WINDOWS |
 | 前端旧接口契约、模块化说明、前后端旧 README | 归档过时 Mock、固定第一帧和默认 5 帧说明；README 改成入口 | API、PROJECT_STRUCTURE |
+| `docs/` 根目录的三个旧路径跳转页、`frontend/docs/API_CONTRACT.md`、`frontend/README_MODULARIZATION.md` | 2026-11-01 删除跳转页，原文仍在本目录 | 本表对应行 |
 | 项目结构、存储、Windows、Docker | 保留文件名，更新当前事实与交叉引用 | 同名当前文档 |
-| HTML 原型 | 保留，不当运行代码或最新视觉规范 | [审查原型](../review_demo.html)、[确认原型](../annotation-confirm-demo.html) |
+| HTML 原型 | 保留，不当运行代码或最新视觉规范 | [审查原型](prototypes/review_demo.html)、[确认原型](prototypes/annotation-confirm-demo.html) |
 
 原资料保留在本目录，每篇标有“历史归档，非当前开发依据”。已失效的规则包括“禁止自审”“登录只是 Mock”“所有视频只标第 0 帧”“原始标注直接导出训练集”“Tracking 默认 5 帧”。历史报告的“未实现”不表示当前仍未实现。
 
 ## 历史验证记录
 
-以下为各次开发当时的验证结果与限制；当前运行方法及最新结果见 [TESTING.md](../TESTING.md)。
+以下为各次开发当时的验证结果与限制；当前运行方法见 [TESTING.md](../TESTING.md)；此后的验证结果写在提交信息或 PR 描述里。
+
+2026-11-01 文档整理时自 TESTING.md 移入：
+
+2026-10-09 推送前验收：隔离后端全套 **430 项通过、1 项跳过**（需外部统计仓库的联调），前端单元 **37 项通过**，类型检查/生产构建通过；固定 **十组浏览器回归全部通过**，运行器退出码为 0。完整用户流程、正常与故障恢复、认证/播放/Range、迟到请求、4K 编码帧及 50,000 合成对象均按固定入口验证，模型预测使用测试引擎模拟。此轮使用 macOS CPU 与本机 Chrome，未验证医院 CUDA 或实际 Chrome 93 引擎，也不等于新提交远程 Actions 已通过。日志在 `work/push-1009/`，完整范围在 `work/e2e-confirm-ux-regression-511dd565bc/run.json`，测试服务已由运行器清理。
+
+固定 critical-workflows 使用真实新页面发送 concentratedReview/reviewMode，验证疑点浏览不提交、完整逐帧审查、直接下载 ZIP、重新审查关闭导出。其余旧 C 与暂停专项明确验证历史兼容：旧暂停场景请求显式 reviewMode=false，不把旧暂停当新流程。浏览器服务同时模拟 SAM3 和检测器，禁止本机回归加载真实头部权重。必须运行完整十组，不能用模型组件实验替代。
 
 2026-09-28 模型随仓库交付：固定官方 facebook/sam3 快照，权重 SHA256 `6d06f0a5f84e435071fe6603e61d0b4cc7b40e0d39d487cfd4d67d8cc11cc14a`，所有随包配置/许可与官方 Git blob 一致。模型以仓库 Release 附件提供，Git 仅记录清单、完整许可和安装工具。部署相关 **18 项 pytest 通过**，覆盖分块续传、SHA256 失败不发布模型、完整安装与缓存复用、自备模型不覆盖、关闭下载、路径防护及模型失败停止部署；PowerShell 7.4 模拟 Docker 默认/GPU/CPU 三组通过。真实 3.44 GB 权重经本机 HTTP 分块下载/组装、完整 SHA256 和再次零下载复用验证；实际 model-setup Compose 容器通过缓存校验。生产 CPU 镜像能从该包加载 Sam3TrackerVideoProcessor，safetensors 1797 个张量头可读取。日志 `work/model-distribution-*.log`、`work/model-full-restore.log`、`work/model-setup-container.log`、`work/model-processor-check.log`。15 个公开模型 Release 附件的远端大小和 SHA256 与本地包一致；匿名下载已核对清单、许可、处理器配置及四个权重块开头，确认无需模型站凭据。Windows CI 发现模拟失败留下 LASTEXITCODE=42，虽然断言全通过，runner 仍按失败退出；测试清理阶段重置该模拟退出码，保留部署脚本对真实失败的检查。未运行真实 GPU 推理。
 

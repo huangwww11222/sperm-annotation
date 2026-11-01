@@ -39,3 +39,11 @@ backend/data/app.db-wal
 
 # Separate statistics repository checked out for coordinated development.
 /标注统计/
+
+# Local training dataset batches (business data).
+/训练数据集-*/
+
+# Other AI tools' private local state; shared notes go in work/HANDOFF.md or docs/.
+/.workbuddy/
+# Claude Code dev-server presets with machine-specific absolute paths.
+/.claude/launch.json

@@ -2,7 +2,7 @@
 
 `annotation_reviews` 兼容追加可空的 `evidence_policy`、`checklist_history_json`。未结束旧轮次升级审查筛选/分组策略时，在同一SQLite事务内归档旧items/检查快照并替换疑点清单；原 `annotation_review_checks` 记录不删除。已通过历史轮次不重建，原Tracking诊断和几何文件不改写。新增列对旧数据兼容，不改变离线存储 contract；策略版本（当前 actionable-review-v3）包含筛选版本和独立候选对应容差指纹，避免每次读取反复重建。
 
-## 2026-10-29 当前入口
+## 概览
 
 annotation_export_snapshots 独立保存直接导出快照：账号/请求键、正文哈希、来源版本、原视频哈希和元数据、完整帧框及快照哈希。快照不写 final_versions、不创建A/B/C/F。audit requiredFeatures=annotation_direct_export_v1，包含原快照及操作者；下游不支持时须拒绝，不能将其误作经过审查的数据。
 
@@ -49,13 +49,13 @@ storage/
 
 `workspace_state.json` 临时文件写入后原子替换。AI 逐帧结果不复制进去，加载时与 `tracker_results.json` 合并，人工修正优先，删除标记不能因重新加载复活。
 
-追踪结果原子发布后写入 `tracker_results.meta.json`，旧结果在首次成功读取（详情或 JSONL 下载）时补记。该文件存在而 JSONL 缺失时，列表明确标为 missing，读取、下载和送审均拒绝，不能当作从未追踪。JSONL 存在而标记缺失时按旧数据读取并补记；旧版本从未被新版读取且已丢失的结果，以及结果/标记同时丢失的情况，没有足够持久证据还原其历史状态。任务报告成功/暂停后的 `required=true` 读取仍要求结果必须存在。覆盖重标把标记与结果一同纳入原有文件事务，回滚时同批恢复；删除视频删除整个目录。新上传不创建结果占位文件。标记为兼容的附加文件，不修改 A/B/F 或数据库，存储运行契约仍为 1。
+追踪结果原子发布后写入 `tracker_results.meta.json`，旧结果在首次成功读取（详情或 JSONL 下载）时补记。该文件存在而 JSONL 缺失时，列表明确标为 missing，读取、下载、审查和导出均拒绝，不能当作从未追踪。JSONL 存在而标记缺失时按旧数据读取并补记；旧版本从未被新版读取且已丢失的结果，以及结果/标记同时丢失的情况，没有足够持久证据还原其历史状态。任务报告成功/暂停后的 `required=true` 读取仍要求结果必须存在。覆盖重标把标记与结果一同纳入原有文件事务，回滚时同批恢复；删除视频删除整个目录。新上传不创建结果占位文件。标记为兼容的附加文件，不修改 A/B/F 或数据库，存储运行契约仍为 1。
 
 精确帧 JPEG 先写临时文件再原子替换；命中缓存读取为响应字节，避免返回路径后被 LRU 清理。只清理 `.frame_cache/frame_*.jpg`，源变化清理旧签名的这些 JPEG；不删除视频、标注、预览临时文件或其他运维数据。最多缓存 2 个解码器，后台长时追踪/导出另用顺序解码；不共享来源写锁。浏览器缓存服务器视频的人工框，AI 正文不再重复写入 localStorage；人工 pending 原请求、删除撤销快照及业务审计仍保存。
 
 Tracking JSONL 同样先写临时文件再原子替换，发布失败保留旧分支。长时视频解码、模型推理和按需预览编码不占用来源锁，结果/预览发布才使用短锁；追踪运行期间工作区只允许浏览状态保存，框、人工基准、删除规则写入仍拒绝。预览生成在 `.frame_cache/overlay-*.mp4` 临时文件进行，成功且输入签名未变化才发布；它及 meta 文件是可重建缓存，不影响 A/B/F 或训练集原图。任务内存与前端待查询记录不代表推理跨重启恢复，启动幂等回执在当前进程内有效。
 
-覆盖重新标注不再受历史送审任务限制（历史 A 不可变，不受影响）。重置使用 SQL 写事务、工作区 revision 与幂等键，移动旧 workspace/seed/results/overlay 到恢复目录，写入空工作区并删除该 media_id 的活动人工查询记录；原视频、media.json、历史 A 保留。成功后清理临时旧文件，失败回滚；启动按 journal 和成功回执协调进程中断后的文件状态，不能当作普通缓存直接删除。新的 generationId 使前端丢弃旧框/撤销/校准缓存，并在重放待重试草稿前识别轮次变化；仅已确认的覆盖允许丢弃旧请求，普通冲突不能静默覆盖。旧版本或旧无版本客户端不能写回已舍弃状态。新增字段和表均为兼容增量迁移，存储运行契约保持 1。
+覆盖重新标注不受历史审查记录限制（历史 A 不可变，不受影响）；覆盖后已通过的审查失效。重置使用 SQL 写事务、工作区 revision 与幂等键，移动旧 workspace/seed/results/overlay 到恢复目录，写入空工作区并删除该 media_id 的活动人工查询记录；原视频、media.json、历史 A 保留。成功后清理临时旧文件，失败回滚；启动按 journal 和成功回执协调进程中断后的文件状态，不能当作普通缓存直接删除。新的 generationId 使前端丢弃旧框/撤销/校准缓存，并在重放待重试草稿前识别轮次变化；仅已确认的覆盖允许丢弃旧请求，普通冲突不能静默覆盖。旧版本或旧无版本客户端不能写回已舍弃状态。新增字段和表均为兼容增量迁移，存储运行契约保持 1。
 
 工作区当前还保存 `revision`、稳定 ID 的 `deletedObjectIds/deletedFrameObjects`、服务端生成的 `normalMotionSamples` 和 `trackingFeedbackEvents`。内部 `_writeReceipts` 与状态同一次原子替换，GET 不暴露回执；响应丢失后原键重放不会重复递增版本或新增反馈。文件替换失败保留原状态和版本，日志记录 `annotation.workspace_save_failed`。这些状态受单进程来源锁保护，不属于 SQLite 跨资源事务。
 
@@ -63,7 +63,7 @@ Tracking JSONL 同样先写临时文件再原子替换，发布失败保留旧�
 
 新上传 `media.json` 记录源文件 size/mtimeNs/inode 指纹及 SHA-256；仅指纹未变时复用摘要，旧媒体或指纹改变重新计算。文件写入、视频探测及查重哈希在工作线程执行；导入之间串行，长哈希不持有全局来源锁。发布前在来源锁内重新核对候选集合与指纹，删除或其他导入改变候选时重新查重，避免过期匹配。
 
-删除是持久化过滤规则，原始 Tracking JSONL 和旧 seed 保留以便撤销；所有活动读入、续追 seed 和送审均应用规则。仅删除某帧不删除模型在后续帧的身份，重新追踪也不能让该帧复活。整视频删除同时排除人工记录、AI 框与人工基准。服务端 `deletedAnnotationFrames` 记录原先有人工框、后因删除变空的帧，使送审仍能区分已知空帧和未知帧。此字段与校准样本一样由服务端维护。
+删除是持久化过滤规则，原始 Tracking JSONL 和旧 seed 保留以便撤销；所有活动读入、续追 seed、审查和导出均应用规则。仅删除某帧不删除模型在后续帧的身份，重新追踪也不能让该帧复活。整视频删除同时排除人工记录、AI 框与人工基准。服务端 `deletedAnnotationFrames` 记录原先有人工框、后因删除变空的帧，使送审仍能区分已知空帧和未知帧。此字段与校准样本一样由服务端维护。
 
 正常运动样本取自真实追踪行的位移测量，按视频、对象、原因保存。正常确认事件另带可选 `geometryReference`（实际像素框、帧、对象、confirmed-normal 来源）；新版单对象正常与整帧正常都保存 `checkpoint:true` 的独立几何检查点，已保存人工框优先。恢复时校验帧界限、删除及新人工修正，不改写 manualBaselines。旧事件无该字段时仍按原人工基准判断，不推断用户曾认可未知几何。原有 AI 预测不会自行成为正常样本或尺寸参照。重置清活动运动样本并使旧尺寸及身份参照失效，但保留反馈事件，已修正决定独立记录。旧客户端遗漏新字段时，服务端保留删除规则与反馈，避免旧缓存覆盖新控制状态。
 
@@ -91,6 +91,8 @@ seed 的临时写入或替换失败保留旧文件，临时文件清理后可重
 
 ## SQLite 数据关系
 
+`backend/app/db.py` 的查询接口保留可选 `user_id` / `media_id` / `source` 过滤；同名视频按 `media_id` 区分。合并分支时不要恢复同名重复函数（`scripts/check_repository.py` 会检查重复定义）。
+
 完整 DDL 在 [review_schema.py](../backend/app/review_schema.py)、[review_workflow.py](../backend/app/review_workflow.py)、[confirmation_workflow.py](../backend/app/confirmation_workflow.py)、[training_export.py](../backend/app/training_export.py)。启动时增量建表，保留历史数据。
 
 | 数据层 | 表/作用 |
@@ -107,7 +109,7 @@ seed 的临时写入或替换失败保留旧文件，临时文件清理后可重
 | 游标 | `review_bookmarks`、`confirmation_bookmarks`，按用户与任务隔离、版本独立 |
 | 幂等 | `review_write_receipts` 与业务变化同一事务；`training_exports` 有操作者+请求键唯一约束 |
 | 导出 | `training_exports` 存任务设置、进度、manifest、错误、完成状态 |
-| 审查（2026-11-01） | `annotation_reviews` 每视频每轮一行：轮次、状态 open/passed、开始人/时间、开始时逐帧内容（`start_frames_json`）、清单（`items_json`）、是否加严；通过时记录通过人/时间、内容摘要 `passed_revision`、通过时逐帧内容、列表用的工作区/追踪文件标记 `passed_stamp`、修改记录 `changes_json`。`annotation_review_checks` 每项一行：结果 ok/fixed/empty/not_target、检查人、时间。只追加轮次，不改写旧轮。`annotation_review_exclusions` 记录“不是精子”的排除位置：`id/media_id/review_id/item_id/source/frames_json/actor_id/created_at/revoked_at/revoked_by`；`frames_json` 为原图像素 `[{frameIndex,bbox:[x1,y1,x2,y2]}]`，只追加和撤销，不物理删除 |
+| 审查 | `annotation_reviews` 每视频每轮一行：轮次、状态 open/passed、开始人/时间、开始时逐帧内容（`start_frames_json`）、清单（`items_json`）、是否加严；通过时记录通过人/时间、内容摘要 `passed_revision`、通过时逐帧内容、列表用的工作区/追踪文件标记 `passed_stamp`、修改记录 `changes_json`。`annotation_review_checks` 每项一行：结果 ok/fixed/empty/not_target、检查人、时间。只追加轮次，不改写旧轮。`annotation_review_exclusions` 记录“不是精子”的排除位置：`id/media_id/review_id/item_id/source/frames_json/actor_id/created_at/revoked_at/revoked_by`；`frames_json` 为原图像素 `[{frameIndex,bbox:[x1,y1,x2,y2]}]`，只追加和撤销，不物理删除 |
 | 审计身份/证据 | `audit_source_identity` 保存部署身份；`training_export_audits` 按 export_id 唯一保存规范 JSON、采集时间和 SHA；触发器禁止更新/删除 |
 
 A/B/F 不随浏览、缩放、草稿、重新确认或退回重审而改写。F 的对象集合和类别继承 A，只选择几何来源。当前帧重审使用上述事件表；旧问题标记表不作为这一流程的状态来源。
@@ -120,7 +122,7 @@ A/B/F 不随浏览、缩放、草稿、重新确认或退回重审而改写。F 
 - 当前部署是单进程，不共享一个 DB 给多后端进程；不要将 SQLite 放到 SMB/NFS 供多个实例直接读写。
 - 旧 `backend/track_data/<media-id>` 保留兼容读取；新上传写入 storage/media。受支持的编辑流程仍可能对已定位到的旧媒体目录写入工作区，不能将“兼容读取”误解为整个目录被文件系统锁定只读。
 - 迁移前停后端，备份，然后逐个移动旧素材子目录到 media；不要套入一层 track_data 或覆盖同名 ID。
-- 缺少完整 A/B/空帧的历史任务保持只读并解释原因；不能猜测补帧或冒充可导出 F，应按完整来源重新送审。
+- 缺少完整 A/B/空帧的历史任务保持只读并解释原因；不能猜测补帧或冒充可导出 F，需在当前流程中重新审查通过后导出。
 - `.frame_cache` 可重建；训练任务正常完成/失败会清理临时目录。异常进程终止留下的 `.work` / `.partial` 需停服务后核对再清理。
 - 原视频、seed、Tracking、工作区、DB 和历史版本不是缓存。不要因文档整理或测试删除它们。已完成 ZIP 暂无自动过期策略，清理需考虑任务记录及下载关系。
 

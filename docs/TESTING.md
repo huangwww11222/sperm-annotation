@@ -1,6 +1,16 @@
 # 测试与日志排查
 
-## 2026-11-01 当前入口
+## 测试分层
+
+| 时机 | 必须运行 | 不能代替 |
+| --- | --- | --- |
+| 开发中每次修改 | 下文“按修改选择测试”中的专项 pytest / 前端单元测试；涉及页面时 `run_browser_regression.py --only <相关套件>` | 只是定位和快速反馈 |
+| 提交前（每批改动一次） | `backend/tests` 全部 pytest、`test:workbench` / `test:compatibility` / `test:annotation`、`npm run build`、`python3 scripts/check_repository.py`；改动涉及工作区加载、认证、保存/重试协议、公共 API、缓存或依赖/构建时，再跑一次不带筛选参数的完整七组浏览器回归 | 分批或筛选运行的结果 |
+| 推送 / CI | CI 重跑完整门禁 | 本地通过记录 |
+
+纯样式、文案或使用说明的小改动，提交前运行相关专项、构建，并对受影响页面做 `--only workbench-consistency`；不要求完整七组。汇报时分别列出实际通过、失败、未执行和模拟的范围。
+
+## 审查与导出专项
 
 当前流程为标注 → 审查 → 导出。审查是标注页的审查模式；旧审查页、对比确认页及其浏览器测试已删除（A/B/C/F 数据层的后端测试仍保留，因为统计/审计导出读取这些历史表）。新主流程必须从真实画框、首尾追踪、在审查页完成清单并通过，到下载 ZIP。
 
@@ -12,7 +22,7 @@
 
 ## 固定回归入口与发布门禁
 
-修改工作区加载、认证、持久化/重试、公共 API、缓存、依赖或构建时，在专项测试之外必须运行下列固定入口。它从新的隔离目录启动自己的服务，顺序生成各套夹具，执行全部七组浏览器回归，结束后只关闭自己启动的进程。不能手工挑掉失败的套件后宣称完整回归通过。
+提交前，若本批改动涉及工作区加载、认证、持久化/重试、公共 API、缓存、依赖或构建，在专项测试之外运行一次下列固定入口（开发中只用 `--only` 定位，见“测试分层”）。它从新的隔离目录启动自己的服务，顺序生成各套夹具，执行全部七组浏览器回归，结束后只关闭自己启动的进程。不能手工挑掉失败的套件后宣称完整回归通过。
 
 ```bash
 npm ci --prefix frontend
@@ -20,7 +30,7 @@ npx --prefix frontend playwright install chromium
 python3 scripts/run_browser_regression.py --python work/review-venv/bin/python --channel chromium
 ```
 
-也可用本机 Chrome：`--channel chrome`。CI 使用已构建的 Python 3.12 后端镜像：`python3 scripts/run_browser_regression.py --backend-image annotation-ci-backend:cpu --channel chromium`。镜像模式仍使用独立 `work/e2e-confirm-ux-regression-*` 数据和单后端进程。`--critical-only` 或可重复的 `--only <套件名>` 仅用于定位问题，不能同时使用，也不能用于完整验收。例如 `--only workbench-consistency --only independent-integrity` 只运行这两组；最终验收须去掉筛选参数重新运行全部十组。
+也可用本机 Chrome：`--channel chrome`。CI 使用已构建的 Python 3.12 后端镜像：`python3 scripts/run_browser_regression.py --backend-image annotation-ci-backend:cpu --channel chromium`。镜像模式仍使用独立 `work/e2e-confirm-ux-regression-*` 数据和单后端进程。`--critical-only` 或可重复的 `--only <套件名>` 仅用于定位问题，不能同时使用，也不能用于完整验收。例如 `--only workbench-consistency --only independent-integrity` 只运行这两组；最终验收须去掉筛选参数重新运行全部七组。
 
 `run.json` 的 `requiredSuites` 始终列出七组固定范围，`selectedSuites` 记录本次实际选择，`scope` 区分完整与诊断运行。子集可记录本次 `status: passed`，但 `fullRegressionPassed` 仍为 `false`；只有未使用筛选参数的完整运行全部通过时才为 `true`。不能拼接分批通过记录代替同一批源码的一次完整回归。运行器在占用共享夹具锁前校验参数，初始化失败也清理自己取得的锁；其他进程持有的锁不得删除。
 
@@ -38,7 +48,7 @@ python3 scripts/run_browser_regression.py --python work/review-venv/bin/python -
 
 `critical-workflows-browser.mjs` 不导入前端 store，也不预先生成工作区、AI 结果或审查记录：真实登录 → 上传原视频 → 画框保存/刷新 → 保存成功但响应丢失 → 刷新沿用原键/原正文重放 → 再次画框保存/刷新 → 删除重传 → 取消/覆盖重标 → 追踪 → 导出被锁 → 去审查（注入开始失败后重试）→ 逐项检查 → 审查通过 → 快照响应丢失后刷新原键重放 → 下载真实 ZIP → 审查页内改框使通过失效并锁住导出。夹具只产生输入视频。CI 还在实际生产前端镜像上运行同一用例的 CPU 模式，并启用旧浏览器 API 兼容检查，避免只验证 Vite 开发页面。
 
-`training-export` 固定套件同时执行 `statistics-export-checks.mjs`：从真实 A/B/C/F 数据生成全量统计 ZIP，核验文件校验和、空帧和历史/当前 F、密码与原视频排除；验证匿名/跨账号下载拒绝、创建提交后响应丢失及刷新原键重放、查询失败恢复、下载原包重试、过期重新生成，并检查 1366×768 / 1180×760 浅深主题、弹窗焦点和共用使用说明。它使用 Chrome 93 API 兼容配置，不执行模型推理。统计 ZIP 后端专项用例见 `test_statistics_export.py`；仍须运行全部十组，不能用此新增场景代替固定门禁。
+`training-export` 固定套件同时执行 `statistics-export-checks.mjs`：从真实 A/B/C/F 数据生成全量统计 ZIP，核验文件校验和、空帧和历史/当前 F、密码与原视频排除；验证匿名/跨账号下载拒绝、创建提交后响应丢失及刷新原键重放、查询失败恢复、下载原包重试、过期重新生成，并检查 1366×768 / 1180×760 浅深主题、弹窗焦点和共用使用说明。它使用 Chrome 93 API 兼容配置，不执行模型推理。统计 ZIP 后端专项用例见 `test_statistics_export.py`；仍须运行全部七组，不能用此新增场景代替固定门禁。
 
 `tracking-recovery` 同时执行 `tracking-restart-checks.mjs`，在隔离 4K 原视频的较早帧修正，验证取消保留分支、暂停帧不能绕过、回退失败原键重试、成功后 seed 使用早帧原像素、未来人工框经保存/刷新保留、旧暂停不复活，以及发布成功但响应丢失后刷新重放不重复截新模型结果。恢复期间的送审状态查询失败保留原起点，后来已送审的合法回执重放不得发 seed 或模型请求。模型输出模拟，分支/工作区/收据走真实后端。`test_tracking_restart.py` 验证逐文件发布和提交故障、重启及读取恢复、已送审/轮次/版本边界、回执准确重放与持久暂停保护；包括首次工作区尚不存在的暂停写入失败、持续故障与读取恢复、legacy 人工 seed 保留、文件和目录同步失败的成对恢复。原反馈与删除/撤销用例继续运行，不能只验证新入口能点。
 
@@ -86,7 +96,7 @@ npm run build --prefix frontend
 
 
 
-三路综合专项：`test_joint_tracking.py` 验证正向漂移实际修框、反向漂移保留正确输出、检测细化、已知身份找回、两侧缺失不补假框、检测缺失不删目标、内部未知候选不扩范围、自然重叠不合并、人工框与删除优先、30对象身份不变、全输入结构验证后才修改、原图/检测失败释放与恢复，以及 worker 失败保留几何/记录日志、缺端点启动不写seed。`test_endpoint_tracking.py` 仍验证旧仅核验兼容。固定 critical-workflows 的 endpoint-tracking-browser 验证 combineResults 原键恢复、实际中间几何来自综合而非复制正向、画面只有一套框、微调/撤销、整段删除/刷新/撤销、旧后端缺综合结果不假成功、送审冻结后的简短状态。浏览器模型均模拟；专项不能替代完整十组固定回归。
+三路综合专项：`test_joint_tracking.py` 验证正向漂移实际修框、反向漂移保留正确输出、检测细化、已知身份找回、两侧缺失不补假框、检测缺失不删目标、内部未知候选不扩范围、自然重叠不合并、人工框与删除优先、30对象身份不变、全输入结构验证后才修改、原图/检测失败释放与恢复，以及 worker 失败保留几何/记录日志、缺端点启动不写seed。`test_endpoint_tracking.py` 仍验证旧仅核验兼容。固定 critical-workflows 的 endpoint-tracking-browser 验证 combineResults 原键恢复、实际中间几何来自综合而非复制正向、画面只有一套框、微调/撤销、整段删除/刷新/撤销、旧后端缺综合结果不假成功、送审冻结后的简短状态。浏览器模型均模拟；专项不能替代完整七组固定回归。
 
 综合回归同时覆盖隔帧漏检时不在10/16px之间闪烁（先保留失败证据），以及综合函数在修改工作副本后异常的注入：worker 仍只发布原有正向几何与失败标记，不能把部分综合框混入失败结果。真实模型观测可冻结后回放最终路径策略，和新神经推理分别记录。
 
@@ -320,11 +330,9 @@ python3 scripts/check_repository.py
 
 日志不记录 JWT/密码；不要记录每个鼠标移动。浏览器 route 注入的 503 不会出现在服务端日志；数据库触发器故障测试验证真实事务回滚与日志。
 
-## 最近验证记录
+## 其他专项说明
 
-2026-10-09 推送前验收：隔离后端全套 **430 项通过、1 项跳过**（需外部统计仓库的联调），前端单元 **37 项通过**，类型检查/生产构建通过；固定 **十组浏览器回归全部通过**，运行器退出码为 0。完整用户流程、正常与故障恢复、认证/播放/Range、迟到请求、4K 编码帧及 50,000 合成对象均按固定入口验证，模型预测使用测试引擎模拟。此轮使用 macOS CPU 与本机 Chrome，未验证医院 CUDA 或实际 Chrome 93 引擎，也不等于新提交远程 Actions 已通过。日志在 `work/push-1009/`，完整范围在 `work/e2e-confirm-ux-regression-511dd565bc/run.json`，测试服务已由运行器清理。
-
-此前生命周期、独立审查、4K 性能、部署及审计联调的过程和数量统一保存在 [历史验证记录](archive/README.md#历史验证记录)，不作为当前提交通过的证明。
+逐次验证的通过数量写在提交信息或 PR 描述里，不写入本文；旧记录见 [历史目录](archive/README.md)。
 
 ### 自动审计与统计仓库联调
 
@@ -347,13 +355,11 @@ interop 夹具生成真实 YOLO/COCO/双格式、多视频及重新确认前后�
 
 ### 边缘入画发现
 
-`backend/tests/test_edge_entry.py` 覆盖连续向内运动、初始/内部目标、静止/相机平移/低置信度/已有对象/向外运动/歧义/坏输入拒绝、跨轮候选恢复、SAM3提示接续不重复帧、稳定ID避开删除墓碑、实际JSONL补帧和推理失败保留旧结果。局部模型输出为模拟；真实模型仅在训练服务器独立目录核验，不能据这些测试宣称运动能准确识别精子。固定annotation-ux组检查开关及刷新保存，tracking-recovery组验证开关随原任务/重试正文传递；仍须完整十组浏览器回归。
+`backend/tests/test_edge_entry.py` 覆盖连续向内运动、初始/内部目标、静止/相机平移/低置信度/已有对象/向外运动/歧义/坏输入拒绝、跨轮候选恢复、SAM3提示接续不重复帧、稳定ID避开删除墓碑、实际JSONL补帧和推理失败保留旧结果。局部模型输出为模拟；真实模型仅在训练服务器独立目录核验，不能据这些测试宣称运动能准确识别精子。固定annotation-ux组检查开关及刷新保存，tracking-recovery组验证开关随原任务/重试正文传递；仍须完整七组浏览器回归。
 
-## 集中审查首版
+### 集中审查兼容路径与其他专项
 
-专项 `test_concentrated_review.py` / `test_concentrated_review_extra.py`：先记录旧行为失败，再验证疑点分组、检测器缺失/重叠不等于判错、失败不得默认为检查完成、连续追踪不质量暂停、内部 AI 接续不造人工 seed、完成审查直接 F、事务失败/原键恢复、重开帧后旧 F 永久失效、旧 C 不能修改新接受版本。
-
-固定 critical-workflows 使用真实新页面发送 concentratedReview/reviewMode，验证疑点浏览不提交、完整逐帧审查、直接下载 ZIP、重新审查关闭导出。其余旧 C 与暂停专项明确验证历史兼容：旧暂停场景请求显式 reviewMode=false，不把旧暂停当新流程。浏览器服务同时模拟 SAM3 和检测器，禁止本机回归加载真实头部权重。必须运行完整十组，不能用模型组件实验替代。
+（兼容）专项 `test_concentrated_review.py` / `test_concentrated_review_extra.py`：先记录旧行为失败，再验证疑点分组、检测器缺失/重叠不等于判错、失败不得默认为检查完成、连续追踪不质量暂停、内部 AI 接续不造人工 seed、完成审查直接 F、事务失败/原键恢复、重开帧后旧 F 永久失效、旧 C 不能修改新接受版本。 当前前端不再发送 concentratedReview，这些用例只保护服务端兼容路径。
 
 真实模型仅在服务器独立实验目录执行；短片段正反向成功只能证明算子与数据链路可运行，不表示疑点检出率、假阴性或医院验收通过。
 
@@ -361,6 +367,6 @@ interop 夹具生成真实 YOLO/COCO/双格式、多视频及重新确认前后�
 
 首尾重框回归：test_endpoint_duplicate_output.py 覆盖紧人工框/松AI框导致低IoU、连续时序恢复、自然双头竞争不合并、仅单帧重叠拒绝匹配、尾ID撞号、明确空尾帧、失败/历史策略保护，以及结果API/JSONL/导出/删除的一致性。实际冻结观察仅放 work/endpoint-duplicate-fix，标注为真实结果回放，不称为新模型推理或标注精度验收。
 
-出画身份专项：`test_boundary_exit_identity.py` 覆盖四边退出、部分头仍可见、连续裁切运动后借到邻居、普通画内遮挡/重叠、转向、缺图像风险、缺帧、人工重锚与已匹配尾帧保护；旧错误尾对应的纠正、读取幂等/源文件不变及 API/JSONL/导出一致性。运行时使用独立 APP_DATA_DIR/APP_DB_FILE/APP_STORAGE_DIR 与 PYTHONPATH=backend，再运行 pytest 的该文件及 endpoint_tracking、endpoint_duplicate_output、joint_tracking 三个专项。`tracking-result.test.mjs` 验证同一哈希下按原始尾编号纠错而不移动人工框；固定十组中的 endpoint-tracking-browser 新增保存过旧 canonical ID 后的真实刷新、写回、再次刷新与一框显示。服务器真实输出回放在隔离目录执行，保留原始文件SHA及第11–14帧相关对象前后框；不能称为重新执行SAM3或完整医院验收。
+出画身份专项：`test_boundary_exit_identity.py` 覆盖四边退出、部分头仍可见、连续裁切运动后借到邻居、普通画内遮挡/重叠、转向、缺图像风险、缺帧、人工重锚与已匹配尾帧保护；旧错误尾对应的纠正、读取幂等/源文件不变及 API/JSONL/导出一致性。运行时使用独立 APP_DATA_DIR/APP_DB_FILE/APP_STORAGE_DIR 与 PYTHONPATH=backend，再运行 pytest 的该文件及 endpoint_tracking、endpoint_duplicate_output、joint_tracking 三个专项。`tracking-result.test.mjs` 验证同一哈希下按原始尾编号纠错而不移动人工框；固定七组中的 endpoint-tracking-browser 新增保存过旧 canonical ID 后的真实刷新、写回、再次刷新与一框显示。服务器真实输出回放在隔离目录执行，保留原始文件SHA及第11–14帧相关对象前后框；不能称为重新执行SAM3或完整医院验收。
 
 检测权重交付：test_bundled_head_detector.py 校验默认资源存在、尺寸 / SHA256 与固定清单一致、Git LFS 指针 / 损坏文件被拒绝、自定义路径优先、四个检测入口共享解析。校验只读字节，不在本机运行模型推理。新 Git checkout 和 Docker COPY 打包验证须核对实际权重字节，不把路径存在当作完整模型。

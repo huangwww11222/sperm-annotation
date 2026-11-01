@@ -1,6 +1,6 @@
 # 当前接口与数据契约
 
-## 2026-11-01 当前入口
+## 路由概览
 
 标注 → 审查 → 导出。审查与旧 A/B/C/F 无关；旧 `/api/review/*`、`/api/confirmation/*`、`/api/final-versions/*` 已删除（说明见 [archive](archive/旧审查与对比确认流程_2026-11-01前.md)），对应数据表只读保留供统计/审计导出。实现：[annotation_review_routes.py](../backend/app/annotation_review_routes.py)、[annotationReviewApi.ts](../frontend/src/api/annotationReviewApi.ts)。均需登录；审查接口无需幂等头，重复调用天然幂等。
 
@@ -38,7 +38,7 @@
 
 ## 通用协议
 
-活动业务接口使用 `Authorization: Bearer <token>`。B/C/送审/训练导出的业务写请求还要求 `X-Review-Contract` 与 `Idempotency-Key`。当前审查增删与退回能力使用版本 `3`；旧 `2` 客户端保留原几何操作兼容，但不能改写含存在性变化的帧或确认任务，需刷新升级。同一次未知结果/网络失败重试使用**相同 key、相同请求体**；用户新的业务意图才生成新 key。
+活动业务接口使用 `Authorization: Bearer <token>`。审查与训练导出的业务写请求还要求 `X-Review-Contract`（服务端接受 `2` / `3`，当前前端发送 `2`，见 `backend/app/api_common.py`）与 `Idempotency-Key`。同一次未知结果/网络失败重试使用**相同 key、相同请求体**；用户新的业务意图才生成新 key。
 
 原视频也必须登录。为支持原生 `<video>` 与 Range 请求，登录/注册/`GET /api/auth/me` 同时签发仅用于 `/api/track/video/` 的 HttpOnly、SameSite=Strict 播放 Cookie；HTTPS 使用 Secure，医院 HTTP 环境仍可播放。它不能作为工作区或其他业务接口凭据，也不放入 URL。显式无效 Bearer 不被旧 Cookie 掩盖。`POST /api/auth/logout` 清除播放 Cookie；启动先校验身份再挂载工作区。401 才清除失效身份，超时/500 保留账号及待重试请求并允许重新验证。
 
@@ -56,7 +56,7 @@
 | --- | --- |
 | `POST /api/auth/register`、`/api/auth/login`；`GET /api/auth/me` | 真实账号与 JWT |
 | `POST /api/track/upload`；`GET /api/track/media` | 原视频上传、可用媒体 |
-| `DELETE /api/track/media/{mediaId}` | 删除未送审视频目录；需要登录。成功返回 `deleted: true, mediaId`；AI 运行、基准引用、新旧存储同名目录返回 409；文件系统失败返回 500 并记录日志，不能伪报成功 |
+| `DELETE /api/track/media/{mediaId}` | 删除视频目录；需要登录。成功返回 `deleted: true, mediaId`；AI 运行、基准引用、新旧存储同名目录返回 409；文件系统失败返回 500 并记录日志，不能伪报成功 |
 | `GET /api/track/video/{mediaId}`、`/api/track/frame/{mediaId}/{fi}` | 原视频、真实指定帧 |
 | `GET / PUT /api/track/workspace/{mediaId}` | 可恢复工作区 |
 | `GET /api/track/deletion-preview/{mediaId}/{objectId}` | 整视频删除预览，按稳定 ID 合并人工和 AI 同帧框，返回真实有效数量 |
@@ -80,13 +80,13 @@
 
 工作区写入在提交回执前校验人工对象：正整数稳定 ID、同帧身份唯一、原始帧号在视频范围内、百分比框及点为有限数值并在 0–100 内；人工基准使用原图像素 xyxy。合法点标注仍允许。非法输入返回 422，不改变文件、版本或回执。seed 同样校验规范 mediaId、仍存在的原视频及帧/像素框，以临时文件原子替换；删除后的迟到 seed 返回 404，不重建孤立目录，写入/替换失败保留旧来源并记录日志。
 
-历史 Tracking 的 `object_id` / `objectId` / `sam3_object_id` 统一转换为稳定 `object_id`；存在真实 `source_frame_index` 时它优先于模型内部 `frame_index`。详情、下载、删除及送审采用同一转换，重复或矛盾的稳定身份不能静默接受。客户端也校验成功响应的数组、计数、帧、身份与几何结构，HTTP 200 不等于数据有效。完整重读替换 AI 集合，保留人工修改，不保留已撤销分支的旧 AI 框。
+历史 Tracking 的 `object_id` / `objectId` / `sam3_object_id` 统一转换为稳定 `object_id`；存在真实 `source_frame_index` 时它优先于模型内部 `frame_index`。详情、下载、删除、审查及导出采用同一转换，重复或矛盾的稳定身份不能静默接受。客户端也校验成功响应的数组、计数、帧、身份与几何结构，HTTP 200 不等于数据有效。完整重读替换 AI 集合，保留人工修改，不保留已撤销分支的旧 AI 框。
 
 旧无版本请求携带的 `deletedTrackingIds` 只能是当前已有历史删除标记的子集（也可省略）；服务端保留完整当前集合，不删除既有标记。尝试新增历史删除标记同样返回 428，不能利用旧字段绕过版本校验。带版本及幂等键的当前客户端可正常删除和撤销。
 
 `POST /api/track` 新前端另携带 `Idempotency-Key`，同账号原键/输入在当前后端进程内返回同一个 taskId，原键用于不同输入返回 409；覆盖轮次仍校验，不能借回执绕过 generationId。旧无键客户端保持兼容。状态 GET 含 `stage`（queued/decoding/preparing_model/tracking/saving_results/paused/completed）、处理帧数与原始 `lastProcessedFrame`，不暴露请求 hash/key。模型失败在任务状态返回 failed 与具体 message，短 HTTP 超时不等于后台任务已失败。工作区浏览状态可在追踪中保存；改人工框、基准或删除规则返回 409。rewind 成功的 `overlayRegenerated` 为 false，不重编码源视频；结果发布原子完成。普通 rewind 将结果截断与被丢弃未来的身份/关系认可退休一起纳入两文件恢复日志，API 使用真实账号的内部 SQL 回执判断提交；不递增人工工作区 revision，不导致随后正常保存/续追的版本冲突。
 
-删除规则是 `deletedObjectIds:number[]`（整视频）和 `deletedFrameObjects:[{objectId,frameIndex}]`（单帧）；`deletedTrackingIds` 仅保留历史兼容。规则同时作用于人工/AI、seed、追踪读取、人工记录查询与送审。单帧删除不关闭后续该对象的追踪；整视频删除不允许该对象进入后续 seed。原追踪文件不物理抹除，撤销通过恢复工作区及移除对应删除标记实现。A/B/F 不随删除或撤销改变。
+删除规则是 `deletedObjectIds:number[]`（整视频）和 `deletedFrameObjects:[{objectId,frameIndex}]`（单帧）；`deletedTrackingIds` 仅保留历史兼容。规则同时作用于人工/AI、seed、追踪读取、人工记录查询、审查与导出。单帧删除不关闭后续该对象的追踪；整视频删除不允许该对象进入后续 seed。原追踪文件不物理抹除，撤销通过恢复工作区及移除对应删除标记实现。A/B/F 不随删除或撤销改变。
 
 删除预览前必须保存当前工作区。响应为 `{mediaId,objectId,name,revision,totalCount,frameCount,manualCount,aiCount,firstFrame,lastFrame}`；同对象同帧人工覆盖 AI 只算一框；帧号 0 起，无框时首末帧为 null。确认删除时仍用当前工作区版本，不能把预览数量当无需校验的删除许可。
 
@@ -122,7 +122,7 @@
 
 可靠独立主体仍保留时，旋转、甩尾和仅 Mask 混入邻居不直接按宽高硬停；局部细线在框内但 Mask 覆盖不足为提示，明确大段结构跑出框仍保护。短暂粘连使用有限不确定观察并冻结可信身份；不能将粘连质心更新成正常位置，也不能无限放行。缺字段、坏绑定或其他未知证据保留旧保护，已确认Mask骤减仅在可靠当前主体且无明确丢失时降为候选，明确消失仍检查。图像持续风险提供 `image_observation_count/required`、`image_pending` 与首次风险帧；pausedObjects.type 兼容 `coverage_loss` / `identity_loss`。前端只解释实际证据，不推断或决定风险。Mask ROI 和原图不进入 JSON，仍按真实原始像素坐标保存。
 
-暂停工作区可带服务端 `diagnostic` 以刷新恢复完整解释。客户端展示字段不参与后端判定；原始帧号、稳定对象 ID、幂等/版本、删除及送审边界保持原协议。
+暂停工作区可带服务端 `diagnostic` 以刷新恢复完整解释。客户端展示字段不参与后端判定；原始帧号、稳定对象 ID、幂等/版本、删除及导出边界保持原协议。
 
 ### 异常暂停后从较早帧重新追踪
 
@@ -130,7 +130,7 @@
 
 成功返回 `{ok,mediaId,revision,pausedAnomalies:[],lastPausedContext:null,cutoffFrame,removedRows,keptRows,deletedFutureSeedFiles:0,overlayRegenerated:false}`。只截断起点之后的旧 AI 行，清除旧分支的当前暂停及未来派生提示；所有人工框、seed/基准、删除规则、历史反馈和正常样本保留，不生成 normal/corrected 事件。被丢弃未来里的身份/关系认可通过内部事件 ID 退休，不删除人工决定、几何历史或旧回执；起点同帧及更早认可仍适用，避免正常续追立即丢掉刚保存的判断。以后新分支走过旧确认帧再启动，也不能恢复旧分支的未来关系认可。操作不自动启动模型；客户端成功核对后保存该早帧 seed，再启动追踪，不重复普通 rewind。
 
-跨文件发布通过持久日志与 SQL `review_write_receipts` 协调，收据重放早于业务版本/暂停校验，但轮次重置后不重放旧轮次操作；同账号原键原正文恢复已完成的重建，不再截断之后新模型的结果。相同 key 用不同意图返回 409。合法收据只证明过去已完成的分支操作；客户端恢复后另查询当前送审状态，已送审时停止 seed/模型启动，查询失败保留原起点待重试，不当作未送审。发布失败和重启按提交证据恢复两份文件，读取不能混用中间状态；临时故障保留原请求、暂停和数据，冲突需明确重读。当前暂停由真实追踪任务持久化，普通工作区 PUT 可以补展示信息和删除/撤销对象，但不能清空或伪造已确认暂停；显式反馈或重建才解除。运行时暂停更新不改变人工工作区 revision。
+跨文件发布通过持久日志与 SQL `review_write_receipts` 协调，收据重放早于业务版本/暂停校验，但轮次重置后不重放旧轮次操作；同账号原键原正文恢复已完成的重建，不再截断之后新模型的结果。相同 key 用不同意图返回 409。合法收据只证明过去已完成的分支操作；发布失败和重启按提交证据恢复两份文件，读取不能混用中间状态；临时故障保留原请求、暂停和数据，冲突需明确重读。当前暂停由真实追踪任务持久化，普通工作区 PUT 可以补展示信息和删除/撤销对象，但不能清空或伪造已确认暂停；显式反馈或重建才解除。运行时暂停更新不改变人工工作区 revision。
 
 ## 训练导出
 

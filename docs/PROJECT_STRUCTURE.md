@@ -1,6 +1,6 @@
 # 代码地图与运行入口
 
-## 2026-11-01 当前入口
+## 当前入口
 
 标注 → 审查 → 导出。审查是 `pages/AnnotatePage.vue` 的 `mode="review"`（`App.vue` 在 `/review` 渲染），右侧换成 `components/AnnotationReviewPanel.vue`，状态共享于 `stores/annotationReview.ts` → `api/annotationReviewApi.ts` → `backend/app/annotation_review_routes.py` / `annotation_review.py`。导出：`components/AnnotationDatasetExport.vue`（审查通过才可用）→ `annotation_export.py`（`require_passed` 门槛）→ `training_export` 队列。
 

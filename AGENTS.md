@@ -1,39 +1,58 @@
 # AI 开发入口
 
-本项目是 Vue 3 / TypeScript + 单进程 FastAPI / SQLite 的视频标注工具。本文面向接手代码的 AI agent；按任务阅读下列当前文档，不必遍历历史材料。
+本项目是 Vue 3 / TypeScript + 单进程 FastAPI / SQLite 的精子视频标注工具。本文是 Claude Code、Codex 等所有 AI 编程工具的共同入口（`CLAUDE.md` 只引用本文）。规则只写在仓库文件里；任何工具的私有记忆、会话记录都不是项目记录。
 
 ## 开始工作
 
-1. 读 [当前流程与不可变规则](docs/WORKFLOW.md) 和 [代码地图](docs/PROJECT_STRUCTURE.md)。先检查 `git status`，保留已有未提交改动。
-2. 标注、追踪、画布或快捷键任务读 [ANNOTATION.md](docs/ANNOTATION.md)。接口或数据库任务读 [API.md](docs/API.md) 与 [STORAGE_LAYOUT.md](docs/STORAGE_LAYOUT.md)。
-3. 修改前确定 [TESTING.md](docs/TESTING.md) 中与任务对应的测试；在隔离数据上复现，按日志定位失败，再做修复和回归。
-   修改工作区加载、认证、读写/重试、公共 API、缓存或依赖/构建时，必须执行 TESTING.md 的固定浏览器回归入口；不能只挑本次功能的专项用例。缺陷先补能在旧行为下失败的行为测试，正常状态与故障恢复成对验证。数量多、构建通过、静态字符串断言均不能替代用户完整流程。
-4. 用户当前明确要求优先。代码和当前文档不一致时调查原因，不能从旧原型、旧报告或旧注释推断现有规则。
+1. 先读 `work/HANDOFF.md`（如存在）和 `git log -5`，了解上一位开发者（人或另一个 AI 工具）留下的进行中工作。检查 `git status`，保留已有未提交改动。
+2. 读 [当前流程与不变量](docs/WORKFLOW.md) 和 [代码地图](docs/PROJECT_STRUCTURE.md)。按任务再读：标注、追踪、画布、快捷键 → [ANNOTATION.md](docs/ANNOTATION.md)；接口、数据库 → [API.md](docs/API.md)、[STORAGE_LAYOUT.md](docs/STORAGE_LAYOUT.md)；部署 → [DOCKER_DEPLOYMENT.md](docs/DOCKER_DEPLOYMENT.md)。
+3. 用户当前明确要求优先。文档与代码不一致时，以代码和测试为事实，调查原因后修正文档；不能从 `docs/archive/`、旧原型、旧报告或旧注释推断现有规则。
 
 ## 关键边界
 
-- 当前流程（2026-11-01）：标注 → 审查 → 导出，只有两个页面。首尾双向追踪默认识别边缘入画。审查是 `AnnotatePage` 的 `mode="review"`：同一画布、同一工作区，审查员直接改标注，没有 A/B 副本；系统生成清单（未标注帧、追踪疑点、计数突变、整帧漏标检查、随机抽检，抽检错多时加抽），全部检查后显式“审查通过”，记录修改与审查人。规则见 WORKFLOW。
-- 只有审查通过且内容未再改动的视频才能导出（服务端 `annotation_review.require_passed`）。任何改动使通过失效，重新审查只查改动部分。浏览、勾选清单都不等于通过。
-- **允许同一账号标注并审查**，分别记录。
-- 旧对比确认页、旧审查页、送审/撤回/领取及其接口已删除；A/B/C/F 表与数据只读保留给统计/审计导出，不能再锁住工作区，也不能恢复这些页面。说明见 `docs/archive/旧审查与对比确认流程_2026-11-01前.md`。
-- 真实原始帧号；API 从 0 开始，页面从 1 开始。人工标注工作区坐标为 0–100 百分比；B/C/seed 是原图像素 xyxy；不要混用。
+- 流程：标注 → 审查 → 导出。导航只有“标注”（`/annotate`）和“审查”（`/review`，即 `AnnotatePage` 的 `mode="review"`）两步，另有“标注记录与统计导出”页（`/results`）。审查员在同一画布、同一工作区直接改标注，没有 A/B 副本；系统生成审查清单，全部检查后显式“审查通过”，记录修改与审查人。规则见 WORKFLOW。
+- 只有审查通过且内容未再改动的视频才能导出（`backend/app/annotation_review.py` 的 `require_passed`）。任何改动使通过失效，重新审查只查改动部分。浏览、勾选清单都不等于通过。
+- 允许同一账号标注并审查，分别记录。
+- 旧对比确认页、旧审查页、送审/撤回/领取及其接口已删除；A/B/C/F 表只读保留给统计/审计导出，不能再锁住工作区，也不能恢复这些页面。见 `docs/archive/旧审查与对比确认流程_2026-11-01前.md`。
+- 真实原始帧号：API 从 0 开始，页面从 1 开始。人工标注工作区坐标为 0–100 百分比；追踪 seed、追踪结果、审查证据和历史 B/C 为原图像素 xyxy。不要混用。
 - `objectId` 稳定且独立于数组顺序。未知帧不能当空帧，缺失媒体不能用占位图导出。
 - 保留版本校验、幂等键、事务回滚、失败待重试状态和日志。不要把网络失败当成功或空数据。
-- 内网客户端兼容 Chrome 93 / HTTP；超时和 UUID 使用 `frontend/src/utils/browserCompat.ts`，不要直接依赖新版 API。素材列表仅保留经确认的删除，不提供“关闭素材”；服务器视频与本地图片的删除范围须明确，被历史审查基准引用的源视频不可删。
-- 当前部署只支持一个后端进程/worker。测试设置独立 `APP_DATA_DIR`、`APP_DB_FILE`、`APP_STORAGE_DIR`，禁止向用户业务目录生成夹具。
+- 内网客户端兼容 Chrome 93 / HTTP；超时和 UUID 使用 `frontend/src/utils/browserCompat.ts`，不要直接依赖新版 API。素材列表只提供经确认的删除，不提供“关闭素材”；服务器视频与本地图片的删除范围须明确，被历史审查基准引用的源视频不可删。
+- 只支持一个后端进程/worker。测试设置独立 `APP_DATA_DIR`、`APP_DB_FILE`、`APP_STORAGE_DIR`，禁止向用户业务目录生成夹具。
+
+## 测试分层
+
+命令和用例选择见 [TESTING.md](docs/TESTING.md)。
+
+| 时机 | 必须运行 |
+| --- | --- |
+| 开发中每次修改 | 改动相关的专项 pytest / 前端单元测试；涉及页面时加 `run_browser_regression.py --only <相关套件>` |
+| 提交前（每批改动一次） | 全部后端 pytest、前端单元测试、`npm run build`、`python3 scripts/check_repository.py`；改动涉及工作区加载、认证、保存/重试协议、公共 API、缓存或依赖/构建时，再跑一次不带筛选参数的完整浏览器回归（七组） |
+| 推送 / CI | CI 重跑完整门禁 |
+
+- 缺陷先补能在旧行为下失败的行为测试；正常状态与故障恢复成对验证。静态字符串断言、构建通过、测试数量都不能替代用户完整流程。
+- `--only` / `--critical-only` 的结果不能当作完整回归通过；不能拼接分批结果。
+- 汇报时分别列出实际通过、失败、未执行和模拟的范围（浏览器回归中的模型输出是模拟的，不代表真实 GPU 验收）。
+
+## 与其他 AI 工具交接
+
+- 同一时间只让一个工具在本工作目录写代码；需要并行时用独立 git worktree 或分支。
+- 每次结束一段工作前，覆盖更新 `work/HANDOFF.md`（已被 Git 忽略），格式见 [docs/HANDOFF_TEMPLATE.md](docs/HANDOFF_TEMPLATE.md)：当前任务、分支、已完成、下一步、等用户确认的问题、不要碰的文件。
+- 稳定规则写进对应 `docs/*.md`；重大方案取舍写一篇 `docs/decisions/NNNN-标题.md`；验证结果写在提交信息或 PR 描述里。不新增“本次实现/最终审查/优化总结”类文档。
+- 提交信息说明改了什么、为什么、跑了哪些测试。
 
 ## 文档维护
 
-人工标注与审查共用画面优先外壳 `WorkbenchShell.vue` 与 `workbench/shell.css`（上下文进站点顶栏、抽屉式视频列表、底部帧条/导航、可收起检查面板，见 WORKFLOW.md）。以后新增、删除或调整功能，遵守 [工作台布局与扩展规则](docs/WORKFLOW.md#工作台布局与扩展规则)：顶部状态、左侧视频、中间图像、图下导航、右上主操作、右下对象或修改项；次要详情按需展开。不要另起一套页面布局或重复常驻统计。用户可见调整同时维护使用说明，并验证三页在小窗口和浅深主题中的位置、可见性及原有流程。
+- 当前文档直接改写原文，不追加带日期的“当前入口”段落；被取代的规则直接删除，需要追溯时看 git 历史或 `docs/archive/`。
+- 工作台布局遵守 [工作台布局与扩展规则](docs/WORKFLOW.md#工作台布局与扩展规则)：标注与审查共用 `frontend/src/components/WorkbenchShell.vue` 与 `frontend/src/workbench/shell.css`，不要另起一套布局或重复常驻统计。
+- 用户可见流程或快捷键改变时，同步维护 [用户使用说明](frontend/src/help/user-guide.md)（前端说明窗口与 Markdown 下载的唯一来源），并验证标注、审查、记录三页在小窗口和浅深主题中的位置、可见性及原有流程。
+- 入口与阅读顺序见 [docs/README.md](docs/README.md)。`docs/archive/` 只用于追溯。日志、截图、临时分析放在 `work/`、`output/playwright/`；测试 token 和业务数据不写入文档。
 
-入口与阅读顺序见 [docs/README.md](docs/README.md)。改变稳定规则、接口、运行方式时直接更新对应当前文档；测试复现命令集中在 TESTING.md。不要每次改动都新增“本次实现/最终审查/优化总结”文档。
+## 交付与部署红线
 
-用户可见流程或快捷键改变时，同步维护 [用户使用说明](frontend/src/help/user-guide.md)。它是前端说明窗口与 Markdown 下载的共同来源；不要复制成另一份长期维护的手册。
+细节见 [DOCKER_DEPLOYMENT.md](docs/DOCKER_DEPLOYMENT.md)、[STORAGE_LAYOUT.md](docs/STORAGE_LAYOUT.md)。
 
-`docs/archive/` 只用于追溯，`docs/*.html` 只作为历史视觉参考；不是当前实现契约。日志、截图、临时分析放在 `work/`、`output/playwright/`，不把测试 token 或业务数据写入文档。
-
-## 第三方交付
-
-根 README 面向安装者，`deploy.sh` / `deploy.ps1` 初始化配置并启动；首次默认 GPU + AI，CPU 仅人工模式须显式选择；已有 .env 不自动切换。CPU 基础模式与 GPU 覆盖配置分开。部署修改须读 DOCKER_DEPLOYMENT.md，使用隔离 Compose 项目验证；不能把 CPU 容器测试当成真实 GPU 验收。提交前运行 `python3 scripts/check_repository.py`，运行数据和大型 SAM3 权重不纳入 Git，也不进入 Docker build context。用户已明确要求开发者拉取即获得自训练检测器：backend/app/model_assets/head-detector.pt（约19.4 MiB）是唯一随普通 Git 交付的小模型例外，附固定清单和许可，随 app 进入镜像；不能扩展为上传其他权重或业务数据。SAM3 随仓库 Release 提供，Git 保留 model-distribution/ 的固定清单与许可；部署先运行独立 model-setup 容器，不把公开模型包误当用户业务数据清理。`db.py` 的查询接口必须保留可选 user_id/media_id/source 过滤，同名视频按 media_id 区分，不能在合并时恢复重复函数。
-
-医院已有部署通过 `build-offline.ps1` 制作固定提交的完整镜像包，再用 `update-offline.sh` 离线升级。不能只更换脚本或沿用旧 images.tar；不能解压到新目录后以相对 runtime 路径重建一套空数据。升级器保留实际运行配置、校验已知旧后端或托管版本身份、停写备份后切换；`.offline/` 是运维状态和备份，不纳入 Git，也不自动清理。`scripts/offline_legacy.json` 的 `contract` 是存储/运行兼容承诺，新增破坏性数据库、环境或模型变更必须实现迁移并调整契约，不能把未知版本加入白名单绕过检查。回滚必须明确恢复同批数据，并保存回滚时的新数据副本。
+- 运行数据、业务视频/训练集和大型 SAM3 权重不进 Git，也不进 Docker build context。唯一例外是 `backend/app/model_assets/head-detector.pt`（约 19.4 MiB，附固定清单与许可），不能扩展到其他权重或数据。
+- SAM3 随仓库 Release 分发，Git 只保留 `model-distribution/` 的固定清单与许可；部署先运行独立 `model-setup` 容器。公开模型包不是用户业务数据，清理时不要混淆。
+- 部署修改用隔离 Compose 项目验证；CPU 容器测试不能当成真实 GPU 验收。首次部署默认 GPU + AI，CPU 仅人工模式须显式选择；已有 `.env` 不自动切换模式。
+- 医院离线升级必须用 `build-offline.ps1` 制作固定提交的完整镜像包，再用 `update-offline.sh` 升级；不能只换脚本或沿用旧 `images.tar`。`scripts/offline_legacy.json` 的 `contract` 是兼容承诺：破坏性数据库/环境/模型变更必须实现迁移并调整契约，不能把未知版本加入白名单绕过检查。回滚必须恢复同批数据，并保存回滚时的新数据副本。`.offline/` 不纳入 Git，也不自动清理。
