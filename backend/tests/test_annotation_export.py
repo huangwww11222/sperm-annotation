@@ -14,12 +14,12 @@ def review_pass(source, uid=1):
     return review.pass_review('complete-media', source, INFO, state['reviewId'], uid)
 
 
-def review_pass_with_candidate(source, result='not_target', uid=1):
+def review_pass_with_candidate(source, result='not_target', uid=1, box=None):
     from app import annotation_review as review
     rows=[json.loads(line) for line in (source/'tracker_results.json').read_text().splitlines() if line.strip()]
     for row in rows[:2]:
         row['reviewEvidence']=dict(findings=[dict(kind='endpoint_identity_uncertain',objectId=None,tailObjectId=9,
-                                                  bbox=[300,300,364,348])])
+                                                  bbox=box or [300,300,364,348])])
     (source/'tracker_results.json').write_text('\n'.join(json.dumps(row) for row in rows))
     state=review.start('complete-media',source,INFO,uid)
     candidate=next(i for i in state['items'] if i['kind']=='doubt' and i['category']=='missing')
@@ -97,7 +97,8 @@ def test_real_direct_export_zip_and_invalidation(source, monkeypatch, tmp_path):
     with pytest.raises(Exception): export.download(job['exportId'],1)
 
 
-def test_review_decisions_are_exported_for_annexp_snapshots(source, monkeypatch, tmp_path):
+@pytest.mark.parametrize('rereview',[False,True])
+def test_review_decisions_are_exported_for_annexp_snapshots(source, monkeypatch, tmp_path, rereview):
     import zipfile
     from app import main, api_common as routes, confirmation_workflow as confirmation
     from .test_training_export import video_file
@@ -110,19 +111,28 @@ def test_review_decisions_are_exported_for_annexp_snapshots(source, monkeypatch,
     monkeypatch.setattr(export,'DATASET_EXPORT_DIR',tmp_path/'packages')
     monkeypatch.setattr(export,'enqueue',lambda eid:None)
     passed,item=review_pass_with_candidate(source,'not_target')
+    expected=[(passed,item,'not_target',[300,300,364,348])]
+    if rereview:
+        from .test_annotation_review import edit_manual
+        edit_manual(source,15)
+        state=json.loads((source/'workspace_state.json').read_text());state['updatedBy']=1
+        (source/'workspace_state.json').write_text(json.dumps(state))
+        newer,new_item=review_pass_with_candidate(source,'fixed',box=[450,300,514,348])
+        expected.append((newer,new_item,'fixed',[450,300,514,348]))
     result=direct.freeze(source,video,'complete-media',1,'judged',body(source),INFO)
     job=export.create(1,'judged-export',dict(finalVersionIds=[result['finalVersionId']],format='yolo',splitRatio=.8))
     export.run(job['exportId'])
     assert export.status(job['exportId'],1)['state']=='ready'
     with zipfile.ZipFile(export.download(job['exportId'],1)) as z:
         manifest=json.loads(z.read('manifest.json'))
-        assert manifest['reviewDecisions']=={'file':'review/decisions.jsonl','count':len(item['observations'])}
+        expected_count=sum(len(i['observations']) for _,i,_,_ in expected)
+        assert manifest['reviewDecisions']=={'file':'review/decisions.jsonl','count':expected_count}
         rows=[json.loads(line) for line in z.read('review/decisions.jsonl').decode().splitlines()]
-        assert len(rows)==2
-        assert {r['frameIndex'] for r in rows}=={o['frameIndex'] for o in item['observations']}
-        assert all(r['result']=='not_target' and r['category']=='missing' and r['source']=='reverse'
-                   and r['reviewId']==passed['reviewId'] and r['itemId']==item['id']
-                   and r['bbox']==[300,300,364,348] for r in rows)
+        assert len(rows)==expected_count
+        for passed,item,result,box in expected:
+            selected=[r for r in rows if r['reviewId']==passed['reviewId']]
+            assert {r['frameIndex'] for r in selected}=={o['frameIndex'] for o in item['observations']}
+            assert all(r['result']==result and r['bbox']==box and r['category']=='missing' and r['source']=='reverse' and r['itemId']==item['id'] for r in selected)
         assert len(rows[0]['sourceSha256'])==64
 
 

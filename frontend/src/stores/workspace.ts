@@ -445,7 +445,7 @@ const createWorkspace = () => {
     statusMessage.value = `已添加：${name}${media.type === 'video' ? `（第 ${currentFrame.value + 1} 帧）` : ''}`
   }
 
-  const adoptReviewTrack = async (boxes: {frameIndex:number;bbox:{x:number;y:number;width:number;height:number}}[],objectId:number) => {
+  const adoptReviewTrack = async (boxes: {frameIndex:number;bbox:{x:number;y:number;width:number;height:number}}[],objectId:number,adoptionKey?:string) => {
     if(editingBlocked.value)throw new Error('当前画面正在处理其他操作，暂不能采用轨迹')
     const mediaId=currentMediaId.value,media=mediaAssets.value.find(item=>item.id===mediaId)
     if(!media||media.type!=='video'||!Number.isInteger(objectId)||objectId<=0||!boxes.length)throw new Error('采用轨迹的参数无效')
@@ -459,12 +459,19 @@ const createWorkspace = () => {
       frames.add(item.frameIndex)
     }
     const existing=annotationsByMedia.value[mediaId]??[]
-    if(existing.some(obj=>obj.objectId===objectId&&frames.has(obj.frameIndex??0)))throw new Error(`对象 #${objectId} 在目标帧已有标注，未补任何框`)
+    const adopted=adoptionKey ? existing.filter(obj=>obj.reviewAdoptionKey===adoptionKey) : []
+    if(adopted.length){
+      const exact=adopted.length===boxes.length && boxes.every(item=>adopted.some(obj=>obj.frameIndex===item.frameIndex && obj.bbox && ['x','y','width','height'].every(k=>Math.abs(obj.bbox![k as keyof typeof obj.bbox]-item.bbox[k as keyof typeof item.bbox])<1e-6)))
+      if(!exact)throw new Error('这条已采用轨迹后来有改动，请核对现有框后点“已有框”')
+      await persistWorkspaceState(mediaId,true)
+      return adopted[0].objectId
+    }
+    if(existing.some(obj=>obj.objectId===objectId) || [...frames].some(fi=>isObjectDeleted(mediaId,objectId,fi))) objectId=getNextObjectId(mediaId)
     const name=numberedObjectName(objectNameInput.value.trim()||'rare sperm',objectId)
     const stamp=Date.now()
     const added:AnnotationObject[]=boxes.map((item,index)=>({
       id:`manual-adopt-${stamp}-${index}`,
-      objectId,name,source:'manual',origin:'review_adopted',bbox:{...item.bbox},
+      objectId,name,source:'manual',origin:'review_adopted',reviewAdoptionKey:adoptionKey,bbox:{...item.bbox},
       frameIndex:item.frameIndex,timestampMs:Math.round(frameToTime(item.frameIndex)*1000),
     }))
     annotationsByMedia.value={...annotationsByMedia.value,[mediaId]:[...existing,...added]}
@@ -473,8 +480,9 @@ const createWorkspace = () => {
     try{await persistWorkspaceState(mediaId,true)}
     catch(error){
       console.error('[annotation.review_track_adopt_save_failed]',{mediaId,objectId,frames:[...frames],error})
-      throw error
+      throw new Error(`已在本地添加，等待保存；请重试采用以恢复保存，尚未记录审查：${error instanceof Error?error.message:'保存失败'}`)
     }
+    return objectId
   }
 
   const revokeExactFrameUrl = () => {
@@ -557,28 +565,35 @@ const createWorkspace = () => {
   let headRequest: AbortController | null = null
   const cancelHeadBox = () => { headRequest?.abort(); headRequest=null; headBoxBusy.value=false }
   watch([currentMediaId, currentFrame, activeTool, editingBlocked, annotationsByMedia, () => useAuth().user.value?.id], cancelHeadBox, {flush:'sync'})
-  const createHeadBox = async (point: {x:number;y:number}) => {
-    if (editingBlocked.value || headBoxBusy.value) return
+  const createHeadBox = async (point: {x:number;y:number}, creationKey?:string) => {
+    headBoxError.value=''
+    if (editingBlocked.value || headBoxBusy.value) return {status:'blocked' as const}
     const media=selectedMedia.value
     if (!media?.serverMediaId || media.type!=='video') {
-      headBoxError.value='点选头部目前用于已导入的视频；图片请使用手动画框。'; return
+      headBoxError.value='点选头部目前用于已导入的视频；图片请使用手动画框。'; return {status:'error' as const}
     }
+    if(creationKey && currentObjects.value.some(obj=>obj.reviewAdoptionKey===creationKey))return {status:'created' as const}
     const frame=currentFrame.value, controller=new AbortController()
     headRequest=controller; headBoxBusy.value=true; headBoxError.value=''
     try {
       const result=await trackApi.headBox(media.serverMediaId,frame,Math.min((media.width||1)-1,point.x*(media.width||1)/100),Math.min((media.height||1)-1,point.y*(media.height||1)/100),controller.signal)
-      if(headRequest!==controller || controller.signal.aborted || editingBlocked.value) return
+      if(headRequest!==controller || controller.signal.aborted || editingBlocked.value) return {status:'cancelled' as const}
       const [x1,y1,x2,y2]=result.bbox || []
       if(result.frameIndex!==frame || result.width!==media.width || result.height!==media.height || result.bbox.length!==4 || ![x1,y1,x2,y2].every(Number.isFinite) || x1<0 || y1<0 || x2>result.width || y2>result.height || x2<=x1 || y2<=y1) throw new Error('检测结果无效，未创建标注框，请重试或手动画框。')
       const box={x:x1/result.width*100,y:y1/result.height*100,width:(x2-x1)/result.width*100,height:(y2-y1)/result.height*100}
       const existing=currentObjects.value.find(obj=>{if(!obj.bbox)return false;const b=obj.bbox;const area=Math.max(0,Math.min(b.x+b.width,box.x+box.width)-Math.max(b.x,box.x))*Math.max(0,Math.min(b.y+b.height,box.y+box.height)-Math.max(b.y,box.y));return area/(b.width*b.height+box.width*box.height-area)>.7})
-      if(existing){selectedObjectId.value=existing.id;statusMessage.value='该头部已有标注，可继续点选其他头部；按 V 微调';return}
+      if(existing){selectedObjectId.value=existing.id;statusMessage.value='该头部已有标注，可继续点选其他头部；按 V 微调';return {status:creationKey && existing.reviewAdoptionKey===creationKey ? 'created' as const : 'existing' as const,objectId:existing.objectId}}
       addObject(point,box)
+      if(creationKey){
+        annotationsByMedia.value={...annotationsByMedia.value,[media.id]:(annotationsByMedia.value[media.id]??[]).map(obj=>obj.id===selectedObjectId.value?{...obj,reviewAdoptionKey:creationKey}:obj)}
+      }
       statusMessage.value='已生成头部框，可继续点选；按 V 微调，或撤销'
+      return {status:'created' as const}
     } catch(error) {
-      if(headRequest!==controller || controller.signal.aborted)return
+      if(headRequest!==controller || controller.signal.aborted)return {status:'cancelled' as const}
       headBoxError.value=error instanceof Error?error.message:'头部检测失败，请重试或手动画框'
       console.warn('[annotation.head_box_failed]',{mediaId:media.id,frame,error})
+      return {status:'error' as const}
     } finally { if(headRequest===controller) cancelHeadBox() }
   }
 

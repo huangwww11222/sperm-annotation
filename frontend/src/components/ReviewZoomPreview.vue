@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { nextTick, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 
 const props = withDefaults(defineProps<{
   source: HTMLImageElement | HTMLVideoElement | null
@@ -13,16 +13,23 @@ const props = withDefaults(defineProps<{
 const canvas = ref<HTMLCanvasElement | null>(null)
 const waiting = ref(true)
 
-const sourceState = computed(() => {
+let boundSource: HTMLImageElement | HTMLVideoElement | null = null
+const sourceEvents = ['load', 'error', 'loadeddata', 'seeked', 'emptied', 'loadstart']
+function bindSource(source: HTMLImageElement | HTMLVideoElement | null) {
+  for (const event of sourceEvents) boundSource?.removeEventListener(event, redraw)
+  boundSource = source
+  for (const event of sourceEvents) source?.addEventListener(event, redraw)
+}
+function sourceReady() {
   const source = props.source
-  if (!source) return 'missing'
-  if (source instanceof HTMLImageElement) return source.complete && source.naturalWidth ? 'ready' : 'loading'
-  return source.readyState >= 2 ? 'ready' : 'loading'
-})
+  return source instanceof HTMLImageElement ? source.complete && source.naturalWidth > 0 : !!source && source.readyState >= 2 && !source.seeking
+}
 
 function draw() {
   const source = props.source, ctx = canvas.value?.getContext('2d'), box = props.box
-  waiting.value = sourceState.value !== 'ready'
+  waiting.value = true
+  ctx?.clearRect(0, 0, props.size, props.size)
+  if (!sourceReady()) return
   if (!source || !ctx || !box || box.length !== 4 || !box.every(Number.isFinite) || props.mediaWidth <= 0 || props.mediaHeight <= 0) return
   const [x1, y1, x2, y2] = box
   const boxW = x2 - x1, boxH = y2 - y1
@@ -40,6 +47,7 @@ function draw() {
   try { ctx.filter = props.filter || 'none' } catch {}
   try { ctx.drawImage(source, sx, sy, crop, crop, 0, 0, side, side) } catch { ctx.restore(); return }
   ctx.restore()
+  waiting.value = false
   const targetCx = (cx - sx) / crop * side, targetCy = (cy - sy) / crop * side
   const radiusX = boxW / crop * side / 2, radiusY = boxH / crop * side / 2
   ctx.save()
@@ -52,13 +60,14 @@ function draw() {
 }
 
 async function redraw() {
-  waiting.value = sourceState.value !== 'ready'
+  waiting.value = true
   await nextTick()
   draw()
 }
 
 watch(() => [props.source, props.box, props.mediaWidth, props.mediaHeight, props.filter, props.frameKey], redraw, { deep: true })
-watch(sourceState, value => { if (value === 'ready') void redraw() })
+watch(() => props.source, bindSource, { immediate: true })
+onBeforeUnmount(() => bindSource(null))
 onMounted(redraw)
 </script>
 

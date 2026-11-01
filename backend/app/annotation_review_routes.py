@@ -49,7 +49,12 @@ def start(media_id: str, user: User):
 
 @router.put("/media/{media_id}/items/{item_id}")
 def check(media_id: str, item_id: str, body: Check, user: User):
-    review.check(media_id, body.reviewId, item_id, body.result, user["uid"])
+    current = None
+    if body.result == "ok":
+        with source_read():
+            directory, _, info = media_context(media_id, allow_tracking=True)
+            current = review.load_cached(media_id, directory, info)[0]
+    review.check(media_id, body.reviewId, item_id, body.result, user["uid"], current)
     with source_read():
         directory, _, info = media_context(media_id, allow_tracking=True)
         return review.status(media_id, directory, info)

@@ -12,6 +12,7 @@ import AnnotationTrackingFeedback from '../components/AnnotationTrackingFeedback
 import UserGuide from '../components/UserGuide.vue'
 import userGuide from '../help/user-guide.md?raw'
 import { revealBoxScroll } from '../annotation/geometry'
+import { useAuth } from '../stores/auth'
 import { useWorkspace } from '../stores/workspace'
 import { addLeaveGuard, useRouter } from '../router'
 import { useAnnotationReview, reviewStatusLabel } from '../stores/annotationReview'
@@ -45,6 +46,29 @@ const reviewPanel = ref<InstanceType<typeof AnnotationReviewPanel> | null>(null)
 const reviewMediaId = computed(() => selectedMedia.value?.type === 'video' ? selectedMedia.value?.serverMediaId ?? null : null)
 const reviewFocus = ref<ReviewItem | null>(null)
 const reviewActionError = ref('')
+const reviewActionBusy = ref(false)
+let reviewContextSerial = 0
+const reviewAuth = useAuth()
+watch([reviewMediaId, () => review.state.value?.review?.reviewId, () => reviewAuth.user.value?.id], () => {
+  reviewContextSerial++; reviewActionError.value=''
+}, {flush:'sync'})
+onUnmounted(() => { reviewContextSerial++ })
+function reviewActionContext() {
+  const mediaId=reviewMediaId.value,localId=currentMediaId.value,reviewId=review.state.value?.review?.reviewId
+  const serial=reviewContextSerial
+  if(!mediaId||!reviewId||review.state.value?.mediaId!==mediaId)return null
+  return {mediaId,localId,reviewId,current:()=>serial===reviewContextSerial && reviewing.value && mediaId===reviewMediaId.value && localId===currentMediaId.value && reviewId===review.state.value?.review?.reviewId}
+}
+async function waitReviewFrame(frame: number, current: () => boolean) {
+  const deadline=Date.now()+15000
+  while(current() && Date.now()<deadline){
+    if(frameError.value)throw new Error(`第 ${frame+1} 帧读取失败，请重新定位后重试`)
+    if(currentFrame.value===frame && !exactFrameLoading.value && !editingBlocked.value)return true
+    await new Promise(resolve=>setTimeout(resolve,40))
+  }
+  if(current())throw new Error('画面尚未加载或暂不能编辑，请稍后重试；未记录检查结果')
+  return false
+}
 const savedReviewView = ref<{zoom:number;left:number;top:number}|null>(null)
 const userZoomedInReview = ref(false)
 let reviewLocateSerial = 0
@@ -127,56 +151,57 @@ async function locateReviewItem(item: ReviewItem) {
   console.info('[annotation_review.located]', {mediaId,itemId:item.id,frame:item.frame,index:item.index,zoom:zoom.value})
 }
 async function addHeadAtReviewTarget(item: ReviewItem) {
-  reviewActionError.value=''
-  const media=selectedMedia.value,width=media?.width??0,height=media?.height??0
-  const observation=item.observations?.find(o=>o.frameIndex===item.frame)
-  const box=observation?.candidates[0]??item.anchor??item.candidates?.[0]
-  if(!media||width<=0||height<=0||!box?.length){reviewActionError.value='这一项没有可定位的候选框，请手动画框后点“已手动补”';return}
-  if(currentFrame.value!==item.frame){
-    await seekFrame(item.frame)
+  if(reviewActionBusy.value||review.busy.value)return
+  const context=reviewActionContext();if(!context)return
+  reviewActionBusy.value=true;reviewActionError.value=''
+  try {
+    const media=selectedMedia.value,width=media?.width??0,height=media?.height??0
+    const box=item.observations?.find(o=>o.frameIndex===item.frame)?.candidates[0]??item.anchor??item.candidates?.[0]
+    if(width<=0||height<=0||!box?.length)throw new Error('这一项没有可定位的候选框，请手动画框后点“已有框”')
+    if(currentFrame.value!==item.frame)await seekFrame(item.frame)
     await nextTick()
-    if(currentFrame.value!==item.frame||frameError.value){
-      reviewActionError.value=`第 ${item.frame+1} 帧尚未成功读取，未记录检查结果；请重试定位`
+    if(!await waitReviewFrame(item.frame,context.current))return
+    headBoxError.value=''
+    const key=`${context.reviewId}:${item.id}:head`
+    const result=await createHeadBox({x:100*(box[0]+box[2])/2/width,y:100*(box[1]+box[3])/2/height},item.check?undefined:key)
+    if(!context.current())return
+    if(result.status==='existing')throw new Error('这里已经有框，未新增标注，也未记录检查结果')
+    if(result.status==='blocked')throw new Error('当前画面暂不能编辑，未执行补框；请稍后重试')
+    if(result.status!=='created')throw new Error(`${headBoxError.value||'补框已取消，未记录检查结果'}。请手动画框后点“已有框”`)
+    await persistWorkspaceState(context.localId,true)
+    if(!context.current())return
+    if(!await review.check(context.mediaId,context.reviewId,item,'fixed')) {
+      if(context.current())reviewActionError.value='框已保存，检查结果未记录；可重试本操作以补记'
       return
     }
-  }
-  const point={x:100*((box[0]+box[2])/2)/width,y:100*((box[1]+box[3])/2)/height}
-  const before=currentObjects.value.length
-  await createHeadBox(point)
-  while(headBoxBusy.value)await new Promise(resolve=>setTimeout(resolve,60))
-  if(headBoxError.value){
-    reviewActionError.value=`${headBoxError.value}。请手动画框后点“已手动补”`
-    return
-  }
-  if(currentObjects.value.length!==before+1){
-    reviewActionError.value='这里已经有框，未新增标注，也未记录检查结果'
-    return
-  }
-  try{await flushWorkspace()}
-  catch(error){reviewActionError.value=`标注保存失败，未记录检查结果：${(error as Error)?.message||'请重试'}`;return}
-  if (!reviewMediaId.value || !await review.check(reviewMediaId.value,item,'fixed')) return
-  if (review.nextItem.value) locateReviewItem(review.nextItem.value)
+    if(context.current()&&review.nextItem.value)void locateReviewItem(review.nextItem.value)
+  } catch(error) {
+    if(context.current())reviewActionError.value=(error as Error)?.message||'补框未完成，请重试'
+    console.warn('[annotation_review.add_head_failed]',{mediaId:context.mediaId,reviewId:context.reviewId,itemId:item.id,error})
+  } finally {reviewActionBusy.value=false}
 }
 async function adoptReviewTrackItem(item: ReviewItem) {
-  reviewActionError.value=''
-  const media=selectedMedia.value,width=media?.width??0,height=media?.height??0
-  if (!item.adoptObjectId || !item.observations?.length || width<=0 || height<=0) {
-    review.error.value='这条轨迹没有可采用的框，请改用手动补框'; return
-  }
-  const boxes=item.observations.map(observation=>{
-    const box=observation.candidates[0]
-    return {frameIndex:observation.frameIndex,bbox:{
-      x:100*box[0]/width,y:100*box[1]/height,width:100*(box[2]-box[0])/width,height:100*(box[3]-box[1])/height,
-    }}
-  })
+  if(reviewActionBusy.value||review.busy.value)return
+  const context=reviewActionContext();if(!context)return
+  reviewActionBusy.value=true;reviewActionError.value=''
   try {
-    await adoptReviewTrack(boxes,item.adoptObjectId)
+    const media=selectedMedia.value,width=media?.width??0,height=media?.height??0
+    if(!item.adoptObjectId||!item.observations?.length||width<=0||height<=0)throw new Error('这条轨迹没有可采用的框，请改用手动补框')
+    const boxes=item.observations.map(o=>{
+      const box=o.candidates[0]
+      return {frameIndex:o.frameIndex,bbox:{x:100*box[0]/width,y:100*box[1]/height,width:100*(box[2]-box[0])/width,height:100*(box[3]-box[1])/height}}
+    })
+    await adoptReviewTrack(boxes,item.adoptObjectId,`${context.reviewId}:${item.id}:track`)
+    if(!context.current())return
+    if(!await review.check(context.mediaId,context.reviewId,item,'fixed')) {
+      if(context.current())reviewActionError.value='轨迹已保存，检查结果未记录；可重试采用以补记，不会重复加框'
+      return
+    }
+    if(context.current()&&review.nextItem.value)void locateReviewItem(review.nextItem.value)
   } catch(error) {
-    review.error.value=`采用轨迹失败，未记录审查结果：${(error as Error)?.message||'请重试'}`
-    return
-  }
-  if (!reviewMediaId.value || !await review.check(reviewMediaId.value,item,'fixed')) return
-  if (review.nextItem.value) locateReviewItem(review.nextItem.value)
+    if(context.current())reviewActionError.value=`采用轨迹未完成：${(error as Error)?.message||'请重试'}。尚未记录审查结果`
+    console.warn('[annotation_review.adopt_failed]',{mediaId:context.mediaId,reviewId:context.reviewId,itemId:item.id,error})
+  } finally {reviewActionBusy.value=false}
 }
 const reviewMarks = computed(() => reviewPresentation(reviewing.value ? reviewFocus.value : null, currentFrame.value, currentObjects.value, selectedMedia.value?.width ?? 0, selectedMedia.value?.height ?? 0,stageSize.value.w))
 const reviewLastBox = computed(() => {
@@ -195,7 +220,7 @@ let reviewRefresh: ReturnType<typeof setTimeout> | null = null
 watch(saveState, value => {
   if (value !== 'saved' || !reviewMediaId.value) return
   if (reviewRefresh) clearTimeout(reviewRefresh)
-  reviewRefresh = setTimeout(() => { void review.load(reviewMediaId.value) }, 1500)
+  reviewRefresh = setTimeout(() => { if(!reviewActionBusy.value && !review.busy.value)void review.load(reviewMediaId.value) }, 1500)
 })
 const importDialog=ref<HTMLElement|null>(null)
 watch(duplicateImport,async value=>{if(value){await nextTick();importDialog.value?.querySelector<HTMLElement>('button:not(:disabled)')?.focus()}})
@@ -831,7 +856,7 @@ onUnmounted(()=>{cancelReviewLocate();window.removeEventListener('pointerdown',c
         <div class="shell-zoom in-bottom" role="group" aria-label="画面缩放"><span v-if="mousePixel" class="annot-coords">{{ mousePixel.x }}, {{ mousePixel.y }} px</span><button aria-label="缩小画面" @click="zoomAt(-1)">−</button><button title="适应画面 (0)" aria-label="适应画面" @click="fitView">{{ Math.round(zoom*100) }}%</button><button aria-label="放大画面" @click="zoomAt(1)">＋</button></div>
       </template>
       <template #inspector><div class="annot-inspector" :class="{'pause-active':showPauseFeedback}" aria-label="检查面板">
-      <AnnotationReviewPanel v-if="reviewing" ref="reviewPanel" :media-id="reviewMediaId" :current-frame="currentFrame" :blocked="editingBlocked" :tracking-pending="hasPausedTracking" :flush="flushWorkspace" :preview-source="minimapSource" :preview-filter="filter" :preview-media-width="selectedMedia?.width||0" :preview-media-height="selectedMedia?.height||0" :action-error="reviewActionError" @locate="locateReviewItem" @adopt="adoptReviewTrackItem" @add-head="addHeadAtReviewTarget" />
+      <AnnotationReviewPanel v-if="reviewing" ref="reviewPanel" :media-id="reviewMediaId" :current-frame="currentFrame" :blocked="editingBlocked" :tracking-pending="hasPausedTracking" :flush="flushWorkspace" :preview-source="minimapSource" :preview-filter="filter" :preview-media-width="selectedMedia?.width||0" :preview-media-height="selectedMedia?.height||0" :action-error="reviewActionError" :action-busy="reviewActionBusy" @locate="locateReviewItem" @adopt="adoptReviewTrackItem" @add-head="addHeadAtReviewTarget" />
       <section v-show="showPauseFeedback" class="pause-inspector-panel" aria-label="暂停核对">
         <div ref="pauseControlHost" class="pause-control-host" />
         <div v-show="pauseDetailsOpen" ref="inspectorDetailsHost" class="pause-inspector-details" />

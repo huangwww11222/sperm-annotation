@@ -5,6 +5,8 @@ import fs from 'node:fs'
 import test from 'node:test'
 import vm from 'node:vm'
 import ts from 'typescript'
+import {execFileSync} from 'node:child_process'
+const readProduction=path=>process.env.REVIEW_FIX_BASELINE==='1'?execFileSync('git',['show',`HEAD:frontend/src/${path}`],{encoding:'utf8'}):fs.readFileSync(new URL(`../src/${path}`,import.meta.url),'utf8')
 
 const source=fs.readFileSync(new URL('../src/pages/AnnotatePage.vue',import.meta.url),'utf8').split('<script setup lang="ts">')[1].split('</script>')[0]
 const ast=ts.createSourceFile('AnnotatePage.ts',source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TS)
@@ -66,4 +68,71 @@ test('legacy IME key code 229 cannot enter focus or invoke canvas actions',()=>{
   assert.deepEqual(f.effects,[])
   assert.equal(f.refs.hiddenBoxes.value,false)
   assert.equal(f.refs.spaceHeld.value,false)
+})
+
+function reviewStoreRuntime() {
+  const input=readProduction('stores/annotationReview.ts')
+  const compiled=ts.transpileModule(input,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText
+  const exported={},calls=[];let resolve
+  const pending=new Promise(r=>{resolve=r})
+  const round=mid=>({mediaId:mid,status:'open',review:{reviewId:'round-'+mid,items:[]}})
+  const api={status:async mid=>round(mid),check:async(...args)=>{calls.push(args);setTimeout(()=>resolve(round(args[0])),30);return pending}}
+  vm.runInNewContext(compiled,{exports:exported,console,setTimeout,require:name=>name==='vue'?{ref:value=>({value}),computed:fn=>({get value(){return fn()}})}:name==='./auth'?{useAuth:()=>({user:{value:{id:1}}})}:{annotationReviewApi:api}})
+  return {store:exported.useAnnotationReview(),calls,resolve,round}
+}
+test('review check binds the captured round and ignores a response after switching video',async()=>{
+  const {store,calls,resolve,round}=reviewStoreRuntime()
+  await store.load('A')
+  const writing=store.check('A','round-A',{id:'doubt-3'},'fixed')
+  await store.load('B');resolve(round('A'));await writing
+  assert.equal(calls[0][1],'round-A')
+  assert.equal(store.state.value.mediaId,'B')
+})
+test('stale review action never sends a check to a newly selected video',async()=>{
+  const {store,calls}=reviewStoreRuntime();await store.load('B')
+  assert.equal(await store.check('A','round-A',{id:'doubt-3'},'fixed'),false)
+  assert.equal(calls.length,0)
+})
+
+const workspaceSource=readProduction('stores/workspace.ts')
+function workspaceHandler(name,context){
+  const ast=ts.createSourceFile('workspace.ts',workspaceSource,ts.ScriptTarget.Latest,true)
+  let body
+  function visit(n){if(ts.isVariableDeclaration(n)&&n.name.getText(ast)===name)body=n.initializer.getText(ast);ts.forEachChild(n,visit)}visit(ast)
+  assert(body,`production ${name} must exist`)
+  return vm.runInNewContext(ts.transpileModule(`(${body})`,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,context)
+}
+function adoptionRuntime(existing=[]){
+  const ref=value=>({value}),annotations=ref({A:existing}),selected=ref(null),saves=[]
+  let failure=false
+  const context={console,editingBlocked:ref(false),currentMediaId:ref('A'),mediaAssets:ref([{id:'A',type:'video',frameCount:20}]),annotationsByMedia:annotations,selectedObjectId:selected,objectNameInput:ref('sperm'),statusMessage:ref(''),
+    numberedObjectName:(name,id)=>`${name} ${id}`,frameToTime:fi=>fi/10,isObjectDeleted:()=>false,
+    getNextObjectId:()=>Math.max(0,...annotations.value.A.map(o=>o.objectId))+1,
+    persistWorkspaceState:async(mid)=>{saves.push(mid);if(failure)throw new Error('response lost')}}
+  return {adopt:workspaceHandler('adoptReviewTrack',context),annotations,saves,setFailure:x=>failure=x}
+}
+const adoptBoxes=[{frameIndex:3,bbox:{x:10,y:10,width:2,height:2}},{frameIndex:4,bbox:{x:11,y:10,width:2,height:2}}]
+test('adoption rebases a stale id owned by an object outside the target frames',async()=>{
+  const r=adoptionRuntime([{id:'other',objectId:5,frameIndex:0,bbox:{x:50,y:50,width:3,height:3}}])
+  assert.equal(await r.adopt(adoptBoxes,5,'round:item'),6)
+  assert.equal(r.annotations.value.A[0].objectId,5)
+  assert.equal(r.annotations.value.A.filter(o=>o.objectId===6).length,2)
+})
+test('save failure retains retryable local boxes and exact replay saves without duplicating',async()=>{
+  const r=adoptionRuntime();r.setFailure(true)
+  await assert.rejects(r.adopt(adoptBoxes,5,'round:item'),/已在本地添加，等待保存/)
+  assert.equal(r.annotations.value.A.length,2)
+  r.setFailure(false)
+  await r.adopt(adoptBoxes,5,'round:item')
+  await r.adopt(adoptBoxes,5,'round:item')
+  assert.equal(r.annotations.value.A.length,2)
+  assert.equal(r.saves.length,3)
+  r.annotations.value.A[0].bbox.x=30
+  await assert.rejects(r.adopt(adoptBoxes,5,'round:item'),/后来有改动/)
+})
+test('head creation reports a locked frame distinctly and clears a previous model error',async()=>{
+  const context={editingBlocked:{value:true},headBoxBusy:{value:false},headBoxError:{value:'old model error'}}
+  const result=await workspaceHandler('createHeadBox',context)({x:10,y:10})
+  assert.equal(result.status,'blocked')
+  assert.equal(context.headBoxError.value,'')
 })

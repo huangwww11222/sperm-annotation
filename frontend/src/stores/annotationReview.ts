@@ -1,4 +1,5 @@
 import { computed, ref } from 'vue'
+import { useAuth } from './auth'
 import { annotationReviewApi as api, type CheckResult, type Failure, type ReviewItem, type ReviewState, type ReviewStatus } from '../api/annotationReviewApi'
 
 // One review state for the selected server video, shared by the review panel, the
@@ -35,12 +36,20 @@ async function load(mediaId: string | null | undefined) {
   }
 }
 
-async function run(action: () => Promise<ReviewState>) {
-  if (busy.value) return false
+async function run(mediaId: string, reviewId: string | null, action: () => Promise<ReviewState>) {
+  if (busy.value || state.value?.mediaId !== mediaId || (reviewId && state.value?.review?.reviewId !== reviewId)) return false
+  const seq = ++loadSeq, actor = useAuth().user.value?.id
+  const current = () => seq === loadSeq && actor === useAuth().user.value?.id && state.value?.mediaId === mediaId && (!reviewId || state.value?.review?.reviewId === reviewId)
   busy.value = true; error.value = ''
-  try { apply(await action()); return true }
-  catch (e) { error.value = describe(e); return false }
-  finally { busy.value = false }
+  try {
+    const next = await action()
+    if (!current()) return false
+    apply(next); return true
+  } catch (e) {
+    console.warn('[annotation_review.action_failed]', {mediaId,reviewId,error:e})
+    if (current()) error.value = describe(e)
+    return false
+  } finally { busy.value = false }
 }
 
 async function loadSummary() {
@@ -52,9 +61,9 @@ export function useAnnotationReview() {
   return {
     state, summary, busy, error, status, items, nextItem,
     load, loadSummary,
-    start: (mediaId: string) => run(() => api.start(mediaId)),
-    check: (mediaId: string, item: ReviewItem, result: CheckResult) => run(() => api.check(mediaId, state.value!.review!.reviewId, item.id, result)),
-    pass: (mediaId: string) => run(() => api.pass(mediaId, state.value!.review!.reviewId)),
+    start: (mediaId: string) => run(mediaId, null, () => api.start(mediaId)),
+    check: (mediaId: string, reviewId: string, item: ReviewItem, result: CheckResult) => run(mediaId, reviewId, () => api.check(mediaId, reviewId, item.id, result)),
+    pass: (mediaId: string, reviewId: string) => run(mediaId, reviewId, () => api.pass(mediaId, reviewId)),
   }
 }
 

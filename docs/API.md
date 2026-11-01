@@ -8,7 +8,7 @@
 | --- | --- |
 | `GET /api/annotation-review/media/{id}` | `status: none/open/passed/stale`、`currentRevision`（逐帧内容摘要）、`unknownFrames`、当前或最近一轮 `review{reviewId,round,state,lastActorId,lastActivityAt,items[{id,kind,startFrame,endFrame,frame,message,objectId?,objectIds?,category?,source?,anchor?,region?,index?,countInFrame?,observations?,adoptObjectId?,detectorAgrees?,lastFrame?,lastBox?,bbox?,check}],checked,total,escalated,passedBy,passedAt,changes}`、`lastPassed`。`lastActorId` 取最近检查人，无检查时为开始人；`lastActivityAt` 同理。从未保存工作区时返回 `none` 与 `notReady` 说明，不报错。Tracking 运行中也可读取 |
 | `POST /api/annotation-review/media/{id}/start` | 已有进行中的轮次则原样返回；已通过且内容未变返回 409 `REVIEW_ALREADY_PASSED`；Tracking 运行中 409 `SOURCE_BUSY` |
-| `PUT /api/annotation-review/media/{id}/items/{itemId}` | `{reviewId, result:'ok'|'fixed'|'empty'|'not_target'}`，`empty` 仅用于 `unknown` 项，`not_target` 仅用于 `missing/static` 项；可改判。`not_target` 在同一事务写 `annotation_review_exclusions`，改为其他结果时同事务撤销。非当前轮 409 `REVIEW_NOT_CURRENT`，已结束 409 `REVIEW_CLOSED`。随机抽检 ≥2 帧 `fixed` 时追加 `min(30,max(10,ceil(帧数×0.05)))` 帧（`escalation:true`） |
+| `PUT /api/annotation-review/media/{id}/items/{itemId}` | `{reviewId, result:'ok'|'fixed'|'empty'|'not_target'}`，`empty` 仅用于 `unknown` 项，`not_target` 仅用于 `missing/static` 项；可改判。`not_target` 在同一事务写 `annotation_review_exclusions`，改为其他结果时同事务撤销。`missing/static` 项提交 `ok` 时，若其观测帧内容与本轮开始时不同，服务端记为 `fixed`。非当前轮 409 `REVIEW_NOT_CURRENT`，已结束 409 `REVIEW_CLOSED`。随机抽检 ≥2 帧 `fixed` 时追加 `min(30,max(10,ceil(帧数×0.05)))` 帧（`escalation:true`） |
 | `POST /api/annotation-review/media/{id}/pass` | `{reviewId}`；有未检查项 409 `REVIEW_INCOMPLETE`，仍有未确认的未知帧 409 `UNKNOWN_FRAMES`；成功固定 `passed_revision` 和修改记录 |
 | `GET /api/annotation-review/summary` | `{items:{mediaId: status}}`，列表用，不读追踪文件 |
 | `POST /api/annotation-review/media/{id}/reset-annotations` | 原 `/api/review/media/{id}/reset-annotations` 迁移至此，正文与幂等语义不变；不再因历史送审拒绝 |
@@ -16,6 +16,8 @@
 | `POST /api/datasets/annotations/{id}/snapshot` | 同前；另要求最近一次审查通过且内容未变，否则 409 `REVIEW_REQUIRED` |
 
 本页是 API 地图与不变量，不复制全部类型定义。精确请求验证以已注册路由的 Pydantic 模型为准；开发时可读本地 FastAPI `/openapi.json`。旧原型中的示例接口不是活动接口。
+
+审查采用轨迹的 `adoptObjectId` 是生成清单时的建议编号：不同反向身份预留不同编号，前端采用前仍须检查全视频占用和删除墓碑；不得把生成后新增的其他对象并入。工作区人工框附 `reviewAdoptionKey` 用于同一采用/补框操作重试，保存仍走原版本校验、幂等写入与事务；记录检查请求显式绑定开始时的 mediaId/reviewId，切换视频或轮次后不发送旧操作的检查。
 
 ## 追踪与审查证据协议
 

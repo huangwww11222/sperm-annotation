@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import AppIcon from './AppIcon.vue'
 import ReviewZoomPreview from './ReviewZoomPreview.vue'
 import { useAnnotationReview, reviewStatusLabel } from '../stores/annotationReview'
@@ -10,12 +10,16 @@ import { reviewCategory, reviewLabels, reviewLocationText } from '../annotation/
 const props = defineProps<{
   mediaId: string | null; currentFrame: number; blocked: boolean; trackingPending: boolean; flush: () => Promise<unknown>
   previewSource: HTMLImageElement | HTMLVideoElement | null; previewFilter: string
-  previewMediaWidth: number; previewMediaHeight: number; actionError?: string
+  previewMediaWidth: number; previewMediaHeight: number; actionError?: string; actionBusy?: boolean
 }>()
 const emit = defineEmits<{ locate: [item: ReviewItem]; adopt: [item: ReviewItem]; 'add-head': [item: ReviewItem] }>()
 const review = useAnnotationReview()
 const auth = useAuth()
 const { state, busy, error, status, nextItem } = review
+const pending=ref(false)
+let contextSerial=0
+watch([()=>props.mediaId,()=>auth.user.value?.id],()=>{contextSerial++},{flush:'sync'})
+onBeforeUnmount(()=>{contextSerial++})
 
 // One short explanation per category, shown once instead of on every row.
 const groups: { kind: ItemKind; category?: string; label: string; hint: string }[] = [
@@ -60,12 +64,46 @@ function objectsText(i: ReviewItem) {
 }
 const missing = (i: ReviewItem) => i.kind === 'doubt' && ['missing', 'static'].includes(reviewCategory(i))
 const rowText = (i: ReviewItem) => i.source === 'track_ended'
-  ? `对象 #${i.objectId} 在第 ${i.frame + 1} 帧起消失：若它仍在画面内，请补框；灰色虚线是上一帧位置。`
+  ? `对象 ${i.objectId} · 第 ${i.frame + 1} 帧起消失`
   : missing(i) ? reviewLocationText(i) : i.kind === 'doubt' ? objectsText(i) : i.kind === 'count' ? i.message : ''
 const sameFrameLocations = computed(() => current.value && missing(current.value) ? items.value.filter(i => missing(i) && i.frame === current.value!.frame).sort((a,b) => (a.index ?? 0)-(b.index ?? 0)) : [])
 const currentLocation = computed(() => sameFrameLocations.value.findIndex(i => i.id === current.value?.id))
 function nearbyLocation(delta: number) { const item = sameFrameLocations.value[currentLocation.value+delta]; if (item) locate(item) }
 const resultLabel: Record<CheckResult, string> = { ok: '无误', fixed: '已修正', empty: '无目标', not_target: '不是精子' }
+const checkedLabel = (i: ReviewItem) => i.check ? (missing(i) && i.check.result === 'ok' ? '已有框' : resultLabel[i.check.result]) : ''
+// One plain sentence per card; the buttons carry the choices.
+function question(i: ReviewItem) {
+  if (i.source === 'track_ended') return `对象 ${i.objectId} 从这一帧起没有框了。它还在画面里吗？灰色虚线为上一帧位置；若仍在画面内，请补框。`
+  if (missing(i)) {
+    if (reviewCategory(i) === 'static') return '这个目标几乎不动：可能是杂质，也可能是不动的精子。'
+    const seen = i.source === 'disagreement' ? '正反向追踪对这个头的位置不一致，这里没有框' : i.source === 'detector' ? '检测器在这里看到一个头，但没有框' : `SAM3 反向追踪在 ${i.observations?.length ?? 1} 帧看到一个头，但没有框`
+    return `${seen}${i.detectorAgrees && i.source !== 'detector' ? '（检测器也看到了）' : ''}。`
+  }
+  const objects = i.kind === 'doubt' ? objectsText(i) : ''
+  return i.kind === 'count' ? i.message : objects ? `${objects}：${groupOf(i).hint}` : groupOf(i).hint
+}
+type CardAction = { key: 1 | 2 | 3; label: string; title: string; primary?: boolean; testid?: string; run: () => void }
+const actions = computed<CardAction[]>(() => {
+  const i = current.value
+  if (!i) return []
+  if (i.kind === 'unknown') return [
+    { key: 1, label: '确认无目标', title: '这些帧确实没有精子', primary: true, run: () => mark(i, 'empty') },
+    { key: 2, label: '已补标', title: '已经在画面上补好框', run: () => mark(i, 'fixed') },
+  ]
+  if (missing(i)) return [
+    adoptsTrack(i)
+      ? { key: 1, label: `是精子，采用轨迹（${i.observations?.length ?? 0} 帧）`, testid: 'review-adopt-track', primary: true, run: () => emit('adopt', i),
+          title: `补上 SAM3 反向追踪的框，编号 #${i.adoptObjectId ?? '新'}；可在对象操作中“删除全视频中此对象”撤回` }
+      : { key: 1, label: '是精子，补这一帧', testid: 'review-add-head', primary: true, run: () => emit('add-head', i),
+          title: `在第 ${i.frame + 1} 帧的候选位置自动补一个头部框；其他帧若也缺需逐帧补` },
+    { key: 2, label: '不是精子', title: '记住这个位置，以后不再提示', run: () => mark(i, 'not_target') },
+    { key: 3, label: '已有框', title: '画面上已经框好这个精子（重复识别，或你刚手动补好）', run: () => mark(i, 'ok') },
+  ]
+  return [
+    { key: 1, label: '无误', title: '检查过，没有问题', primary: true, run: () => mark(i, 'ok') },
+    { key: 2, label: '已修正', title: '先在画面上改好，再点这里', run: () => mark(i, 'fixed') },
+  ]
+})
 const adoptsTrack = (i: ReviewItem) => i.kind === 'doubt' && reviewCategory(i) === 'missing' && ['reverse', 'disagreement'].includes(i.source ?? '')
 const zoomPreview = computed(() => {
   const item = current.value
@@ -81,47 +119,32 @@ const zoomPreview = computed(() => {
 })
 
 function locate(item: ReviewItem) { selectedId.value = item.id; emit('locate', item) }
-async function saved() {
-  try { await props.flush(); return true }
-  catch (e) { error.value = `标注保存失败，未记录本次审查操作：${(e as Error)?.message || '请重试'}`; return false }
+async function perform(kind: 'start'|'check'|'pass', item?: ReviewItem, result?: CheckResult) {
+  if(busy.value||props.actionBusy||pending.value||props.blocked||!props.mediaId)return
+  const mediaId=props.mediaId,reviewId=round.value?.reviewId,serial=contextSerial
+  if(kind!=='start'&&!reviewId)return
+  const current=()=>serial===contextSerial && mediaId===props.mediaId && (kind==='start' || reviewId===round.value?.reviewId)
+  pending.value=true
+  try {
+    await props.flush()
+    if(!current())return
+    const ok=kind==='start'?await review.start(mediaId):kind==='pass'?await review.pass(mediaId,reviewId!):await review.check(mediaId,reviewId!,item!,result!)
+    if(ok&&current()&&nextItem.value)locate(nextItem.value)
+  } catch(e) {
+    if(current())error.value=`标注保存失败，未记录本次审查操作：${(e as Error)?.message||'请重试'}`
+  } finally {pending.value=false}
 }
-async function start() {
-  if (!props.mediaId || !await saved()) return
-  if (await review.start(props.mediaId) && nextItem.value) locate(nextItem.value)
+const start=()=>perform('start')
+const mark=(item:ReviewItem,result:CheckResult)=>perform('check',item,result)
+const pass=()=>perform('pass')
+function actionable() { return !busy.value && !props.actionBusy && !pending.value && !props.blocked && current.value }
+function run(key: CardAction['key']) {
+  if (!actionable()) return
+  actions.value.find(a => a.key === key)?.run()
 }
-async function mark(item: ReviewItem, result: CheckResult) {
-  // Corrections live in the shared workspace; save them before recording the check.
-  if (!props.mediaId || !await saved()) return
-  if (!await review.check(props.mediaId, item, result)) return
-  // Corrections are made before marking, so every result moves on to the next unchecked item.
-  if (nextItem.value) locate(nextItem.value)
-}
-async function pass() {
-  if (!props.mediaId || !await saved()) return
-  await review.pass(props.mediaId)
-}
-function actionable() { return !busy.value && !props.blocked && current.value }
-function primary() {
-  const item = current.value
-  if (!actionable() || !item) return
-  if (item.kind === 'unknown') return void mark(item, 'empty')
-  if (missing(item)) {
-    if (adoptsTrack(item)) emit('adopt', item)
-    else emit('add-head', item)
-    return
-  }
-  void mark(item, 'ok')
-}
-function secondary() {
-  const item = current.value
-  if (!actionable() || !item) return
-  void mark(item, item.kind === 'unknown' ? 'fixed' : missing(item) ? 'not_target' : 'fixed')
-}
-function tertiary() {
-  const item = current.value
-  if (!actionable() || !item || !missing(item)) return
-  void mark(item, 'fixed')
-}
+const primary = () => run(1)
+const secondary = () => run(2)
+const tertiary = () => run(3)
 function next() {
   const all = items.value
   if (!all.length) return
@@ -146,7 +169,7 @@ defineExpose({ primary, secondary, tertiary, next })
         <p class="review-note">{{ status === 'stale' ? '通过后标注又改过，只需检查改动的地方。' : '系统会挑出最可能出错的帧，逐个确认；发现错误直接在画面上改。' }}</p>
         <p v-if="state.notReady" class="review-warning" role="status">{{ state.notReady }}</p>
         <p v-if="trackingPending" class="review-warning" role="status">AI 追踪还在等待核对，请先回到标注页处理。</p>
-        <button class="btn-primary review-wide" data-testid="review-start" :disabled="busy || blocked || trackingPending || !!state.notReady" @click="start">{{ busy ? '正在生成清单…' : status === 'stale' ? '开始重新审查' : '开始审查' }}</button>
+        <button class="btn-primary review-wide" data-testid="review-start" :disabled="busy || actionBusy || pending || blocked || trackingPending || !!state.notReady" @click="start">{{ busy ? '正在生成清单…' : status === 'stale' ? '开始重新审查' : '开始审查' }}</button>
       </template>
 
       <template v-else-if="status === 'passed' && state.review">
@@ -165,43 +188,29 @@ defineExpose({ primary, secondary, tertiary, next })
           <div class="review-current-head">
             <span class="review-kind">{{ groupOf(current).label }}</span>
             <button class="review-frame" :title="`跳到${frames(current)}`" @click="locate(current)">{{ frames(current) }}</button>
-            <span v-if="current.check" class="review-result" :class="current.check.result">{{ resultLabel[current.check.result] }}</span>
+            <span v-if="current.check" class="review-result" :class="current.check.result">{{ checkedLabel(current) }}</span>
           </div>
-          <p v-if="current.check" class="review-checked" data-testid="review-checked">已判为：{{ resultLabel[current.check.result] }}，可改判</p>
-          <p v-if="rowText(current)" class="review-what" data-testid="review-location-text">{{ rowText(current) }}</p>
-          <p class="review-hint">{{ groupOf(current).hint }}</p>
+          <p class="review-question">{{ question(current) }}</p>
           <figure v-if="zoomPreview" class="review-zoom" data-testid="review-zoom-preview">
-            <ReviewZoomPreview :source="previewSource" :box="zoomPreview.box" :media-width="previewMediaWidth" :media-height="previewMediaHeight" :filter="previewFilter" :frame-key="`${current.id}:${currentFrame}:${zoomPreview.label}`" />
-            <figcaption>{{ zoomPreview.label }}</figcaption>
+            <ReviewZoomPreview :source="previewSource" :box="zoomPreview.box" :size="200" :media-width="previewMediaWidth" :media-height="previewMediaHeight" :filter="previewFilter" :frame-key="`${current.id}:${currentFrame}:${zoomPreview.label}`" />
+            <figcaption data-testid="review-location-text">{{ zoomPreview.label }}</figcaption>
           </figure>
-          <div v-if="missing(current) || objectsText(current)" class="review-location-actions">
-            <button v-if="sameFrameLocations.length > 1" class="btn-secondary" :disabled="currentLocation <= 0" @click="nearbyLocation(-1)">上一处</button>
-            <button class="btn-secondary" data-testid="review-relocate" @click="locate(current)">{{ missing(current) ? '定位此处' : '定位对象' }}</button>
-            <button v-if="sameFrameLocations.length > 1" class="btn-secondary" :disabled="currentLocation >= sameFrameLocations.length-1" @click="nearbyLocation(1)">下一处</button>
+          <div v-if="missing(current) || objectsText(current) || current.source === 'track_ended'" class="review-locate">
+            <span v-if="!zoomPreview && missing(current)" class="review-locate-text" data-testid="review-location-text">{{ reviewLocationText(current) }}</span>
+            <button v-if="sameFrameLocations.length > 1" class="icon-button" aria-label="上一处" title="本帧上一处" :disabled="currentLocation <= 0" @click="nearbyLocation(-1)"><AppIcon name="prev" :size="15" /></button>
+            <button class="quiet-button" data-testid="review-relocate" @click="locate(current)"><AppIcon name="point" :size="14" />{{ missing(current) ? '定位此处' : '定位对象' }}</button>
+            <button v-if="sameFrameLocations.length > 1" class="icon-button" aria-label="下一处" title="本帧下一处" :disabled="currentLocation >= sameFrameLocations.length-1" @click="nearbyLocation(1)"><AppIcon name="next" :size="15" /></button>
           </div>
-          <div class="review-actions review-actions-many">
-            <template v-if="current.kind === 'unknown'">
-              <button class="btn-primary" :disabled="busy || blocked" title="确认无目标（快捷键 1）" @click="mark(current, 'empty')">确认无目标</button>
-              <button class="btn-secondary" :disabled="busy || blocked" title="已补标（快捷键 2）" @click="mark(current, 'fixed')">已补标</button>
-            </template>
-            <template v-else-if="missing(current)">
-              <button v-if="adoptsTrack(current)" class="btn-primary" data-testid="review-adopt-track" :disabled="busy || blocked" title="采用这段轨迹（快捷键 1）" @click="emit('adopt', current)">采用这段轨迹</button>
-              <button v-else class="btn-primary" data-testid="review-add-head" :disabled="busy || blocked" title="在当前候选位置补一个头部框（快捷键 1）" @click="emit('add-head', current)">是精子，在这里补框</button>
-              <button class="btn-secondary" :disabled="busy || blocked" title="记住这个位置，以后不再提示（快捷键 2）" @click="mark(current, 'not_target')">不是精子</button>
-              <button class="btn-secondary" title="已手动补框后记录（快捷键 3）" :disabled="busy || blocked" @click="mark(current, 'fixed')">已手动补</button>
-            </template>
-            <template v-else>
-              <button class="btn-primary" :disabled="busy || blocked" title="无误（快捷键 1）" @click="mark(current, 'ok')">无误</button>
-              <button class="btn-secondary" title="先在画面上改好，再点这里（快捷键 2）" :disabled="busy || blocked" @click="mark(current, 'fixed')">已修正</button>
-            </template>
+          <div class="review-actions">
+            <button v-for="a in actions" :key="a.key" :class="[a.primary ? 'btn-primary' : 'btn-secondary', { wide: a.primary && actions.length > 2 }]" :data-testid="a.testid" :aria-label="a.label" :title="`${a.title}（快捷键 ${a.key}）`" :disabled="busy || actionBusy || pending || blocked" @click="run(a.key)">
+              <span>{{ a.label }}</span><kbd aria-hidden="true">{{ a.key }}</kbd>
+            </button>
           </div>
-          <p v-if="adoptsTrack(current) && current.adoptObjectId" class="review-hint" data-testid="review-adopt-note">将在 {{ current.observations?.length ?? 0 }} 帧补上 SAM3 反向追踪的框，编号 #{{ current.adoptObjectId }}；可用“删除全视频中此对象”撤回。</p>
-          <p v-if="current.detectorAgrees" class="review-hint">检测器也在这里看到了头部。</p>
-          <p v-if="!adoptsTrack(current) && missing(current)" class="review-hint">这里只补第 {{ current.frame + 1 }} 帧；其他帧若也缺，请逐帧补，或等待“只追踪新对象”功能。</p>
+          <p v-if="current.check" class="review-checked" data-testid="review-checked">已判为：{{ checkedLabel(current) }}，可改判</p>
           <p v-if="actionError" class="review-warning" role="alert" data-testid="review-action-error">{{ actionError }}</p>
         </div>
 
-        <button class="btn-primary review-wide" data-testid="review-pass" :disabled="!canPass || busy || blocked" @click="pass">{{ busy ? '正在处理…' : canPass ? '审查通过' : `还剩 ${remaining} 项` }}</button>
+        <button class="btn-primary review-wide" data-testid="review-pass" :disabled="!canPass || busy || actionBusy || pending || blocked" @click="pass">{{ busy ? '正在处理…' : canPass ? '审查通过' : `还剩 ${remaining} 项` }}</button>
 
         <div class="review-groups">
           <details v-for="g in grouped" :key="g.category || g.kind" class="review-group" :data-review-group="g.category || g.kind" :open="g.items.some(i => !i.check) || g.items.some(i => i.id === current?.id)">
@@ -210,7 +219,7 @@ defineExpose({ primary, secondary, tertiary, next })
               <i class="review-dot" :class="item.check?.result" aria-hidden="true" />
               <span class="review-row-frame">{{ frames(item) }}</span>
               <span class="review-row-text">{{ rowText(item) }}</span>
-              <small v-if="item.check">{{ resultLabel[item.check.result] }}</small>
+              <small v-if="item.check">{{ checkedLabel(item) }}</small>
               <button v-if="item.check" class="review-override" title="改判这一项" @click.stop="locate(item)">改判</button>
             </div>
           </details>
@@ -233,21 +242,25 @@ defineExpose({ primary, secondary, tertiary, next })
 .review-wide { width: 100%; }
 .review-progress { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .review-progress progress { flex: 1; height: 6px; }
-.review-current { border: 1px solid var(--accent); border-radius: 8px; padding: 10px; background: var(--surface); display: flex; flex-direction: column; gap: 6px; }
-.review-current-head { display: flex; align-items: center; gap: 8px; }
+.review-current { border: 1px solid var(--accent); border-radius: 8px; padding: 12px; background: var(--surface); display: flex; flex-direction: column; gap: 10px; }
+.review-current-head { display: flex; align-items: baseline; gap: 8px; }
 .review-kind { font-size: 12px; font-weight: 600; color: var(--accent); }
 .review-frame { font-size: 13px; font-weight: 600; color: var(--text); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
-.review-what { margin: 0; font-size: 13px; color: var(--text); line-height: 1.45; }
-.review-hint { margin: 0; font-size: 12px; color: var(--muted); line-height: 1.45; }
-.review-zoom { margin: 0; display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
-.review-zoom figcaption { font-size: 11px; color: var(--muted); }
-.review-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 2px; }
-.review-actions-many { grid-template-columns: repeat(auto-fit,minmax(96px,1fr)); }
-.review-location-actions { display: flex; gap: 6px; }
-.review-location-actions button { flex: 1; min-width: 0; padding: 5px 6px; font-size: 12px; }
+.review-question { margin: 0; font-size: 13px; color: var(--text); line-height: 1.5; }
+.review-zoom { margin: 0; display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.review-zoom figcaption { font-size: 12px; color: var(--muted); }
+.review-locate { display: flex; align-items: center; justify-content: center; gap: 4px; margin-top: -4px; }
+.review-locate-text { margin-right: auto; font-size: 12px; color: var(--muted); }
+.review-locate .quiet-button { display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; font-size: 12px; }
+.review-locate .icon-button { width: 28px; height: 28px; }
+.review-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.review-actions button { display: flex; align-items: center; justify-content: center; gap: 6px; min-width: 0; min-height: 36px; }
+.review-actions button.wide { grid-column: 1 / -1; }
+.review-actions button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.review-actions kbd { flex: none; padding: 0 4px; font-size: 10px; border-color: currentColor; color: inherit; opacity: .55; }
 .review-result { margin-left: auto; font-size: 11px; color: var(--success); }
 .review-result.fixed { color: var(--warning); }
-.review-checked { margin: 0; font-size: 12px; color: var(--success); }
+.review-checked { margin: 0; font-size: 12px; color: var(--muted); }
 .review-override { flex: none; padding: 2px 5px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); color: var(--text); font-size: 11px; }
 .review-groups { display: flex; flex-direction: column; gap: 6px; flex: none; min-height: 0; }
 .review-group summary { display: flex; justify-content: space-between; align-items: center; cursor: pointer; font-size: 12px; font-weight: 600; color: var(--text); padding: 4px 2px; }

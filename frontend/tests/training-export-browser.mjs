@@ -179,6 +179,7 @@ try {
   await page.setViewportSize({width:1440,height:900})
   await page.reload(); await attach(); await ready()
   check((await reviewState(VIDEO.mid)).review.total===tolerant.review.total, 'reloading the upgraded review does not duplicate items or restore old noise')
+  await page.waitForFunction(id=>window.ws?.selectedMedia.value?.serverMediaId===id,VIDEO.mid);await ready()
   const persistedZoom=await page.evaluate(()=>window.ws.zoom.value)
   const smallLocation=tolerant.review.items.find(i=>i.category==='missing' && i.frame===39)
   await page.locator(`[data-review-item="${smallLocation.id}"]`).click(); await ready()
@@ -189,12 +190,51 @@ try {
   await page.locator(`[data-review-item="${reverse.id}"]`).click(); await ready()
   check((await page.getByTestId('review-location-text').innerText()).includes('右下'), 'reverse-only evidence is labeled with its original-image region')
   await page.getByTestId('review-zoom-preview').waitFor()
+  await page.evaluate(async()=>{
+    const vueUrl=performance.getEntriesByType('resource').find(r=>r.name.includes('/node_modules/.vite/deps/vue.js?')).name
+    const {createApp}=await import(vueUrl),{default:Preview}=await import('/src/components/ReviewZoomPreview.vue')
+    const host=document.createElement('div');host.id='preview-loading-probe';host.style.cssText='position:fixed;left:-9999px';document.body.append(host)
+    const image=new Image();window.previewProbe={image,app:createApp(Preview,{source:image,box:[5,5,15,15],mediaWidth:20,mediaHeight:20})}
+    window.previewProbe.app.mount(host)
+  })
+  for(const color of ['red','blue']){
+    await page.evaluate(color=>{window.previewProbe.image.src='data:image/svg+xml,'+encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><rect width="20" height="20" fill="${color}"/></svg>`)},color)
+    await page.waitForFunction(color=>{const host=document.querySelector('#preview-loading-probe'),canvas=host.querySelector('canvas'),p=canvas.getContext('2d').getImageData(80,80,1,1).data;return !host.querySelector('span')&&p[3]>0&&(color==='red'?p[0]>200:p[2]>200)},color)
+  }
+  check(true,'preview redraws after asynchronous image load and same-element source changes')
+  await page.evaluate(()=>{window.previewProbe.app.unmount();document.querySelector('#preview-loading-probe').remove()})
   await page.waitForFunction(() => { const c=document.querySelector('[data-testid=review-zoom-preview] canvas'); if(!c)return false; const p=c.getContext('2d').getImageData(c.width/2,c.height/2,1,1).data; return p[3]>0 })
   check(true, 'the current review card draws a non-transparent enlarged frame around the candidate')
   const adoptedBefore=(await json('/track/workspace/'+VIDEO.mid)).manualAnnotations.length
+  let saveArrived,releaseSave
+  const saveStarted=new Promise(r=>{saveArrived=r}),saveGate=new Promise(r=>{releaseSave=r})
+  const savePattern=`**/api/track/workspace/${VIDEO.mid}`
+  const delayedSave=async route=>{if(route.request().method()!=='PUT')return route.continue();saveArrived();await saveGate;await route.continue()}
+  await page.route(savePattern,delayedSave)
+  await page.getByTestId('review-adopt-track').click();await saveStarted
+  check(await page.getByTestId('review-adopt-track').isDisabled(),'pending adoption disables duplicate clicks and keyboard actions')
+  await page.keyboard.press('1')
+  // Switch while the original media save is in flight; do not wait for its save.
+  await page.getByTestId('toggle-workbench-library').click()
+  await page.locator('.asset-card').filter({hasText:PORTRAIT.name}).click()
+  await page.waitForFunction(id=>window.ws.selectedMedia.value?.serverMediaId===id,PORTRAIT.mid)
+  releaseSave();await ready();await page.unroute(savePattern,delayedSave)
+  await poll(async()=>(await json('/track/workspace/'+VIDEO.mid)).manualAnnotations.length===adoptedBefore+reverse.observations.length,'original video adoption saved after video switch')
+  check(!(await reviewState(VIDEO.mid)).review.items.find(i=>i.id===reverse.id)?.check,'switching video leaves the old pending review item unchecked')
+  check((await reviewState(PORTRAIT.mid)).status==='none','late adoption cannot start or check another video review')
+  await openVideo(VIDEO.name,VIDEO.mid)
+  await page.locator(`[data-review-item="${reverse.id}"]`).click();await ready()
+  const checkPattern=`**/api/annotation-review/media/${VIDEO.mid}/items/${reverse.id}`
+  const failedCheck=route=>route.fulfill({status:503,contentType:'application/json',body:'{"detail":"test review check failure after saved adoption"}'})
+  await page.route(checkPattern,failedCheck)
   await page.getByTestId('review-adopt-track').click()
-  await poll(async () => (await json('/track/workspace/'+VIDEO.mid)).manualAnnotations.filter(o=>o.objectId===reverse.adoptObjectId).length===reverse.observations.length, 'adopted SAM3 track saved every frame')
-  await poll(async () => (await reviewState(VIDEO.mid)).review.items.find(i=>i.id===reverse.id)?.check?.result==='fixed', 'adopted track marked fixed')
+  await poll(async()=>await page.getByTestId('review-action-error').isVisible(),'saved adoption reports pending review check')
+  check(!(await reviewState(VIDEO.mid)).review.items.find(i=>i.id===reverse.id)?.check,'failed check never becomes false completion')
+  await page.screenshot({path:'output/playwright/review-adoption-check-retry.png'})
+  await page.unroute(checkPattern,failedCheck)
+  await page.getByTestId('review-adopt-track').click()
+  await poll(async () => (await json('/track/workspace/'+VIDEO.mid)).manualAnnotations.filter(o=>o.objectId===reverse.adoptObjectId).length===reverse.observations.length, 'replayed adoption saved every frame exactly once')
+  await poll(async () => (await reviewState(VIDEO.mid)).review.items.find(i=>i.id===reverse.id)?.check?.result==='fixed', 'saved adoption can retry only its failed review check')
   const afterAdopt=await json('/track/workspace/'+VIDEO.mid)
   check(afterAdopt.manualAnnotations.length===adoptedBefore+reverse.observations.length
     && afterAdopt.manualAnnotations.some(o=>o.origin==='review_adopted'),

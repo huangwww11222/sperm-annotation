@@ -155,7 +155,7 @@ work/review-venv/bin/python scripts/replay_tracking_pause_cases.py work/replay-i
 | 帧解码、追踪内存、大量修改项性能 | `test_video_frames.py`（逐帧身份/随机访问/失败 seek/缓存限量与原子失败/真实 processor 输入一致/掩码几何一致/首次模型 dtype）、`test_confirmation_performance.py`（5,000 项/紧凑回执/升级前重放/精确进度） | `performance-browser.mjs`（27；外部真实 4K 副本、50,000 AI 对象、初次读取失败/坏 JPEG 原位重试、C 同帧图像复用/增量回复/并发版本跳变） |
 | Chrome 93 / HTTP、素材删除 | `test:compatibility`、`test_media_deletion.py` | `browser-compat-media.mjs`；下述旧 API 回归模式 |
 | 重复视频覆盖、旧历史不锁定 | `test_workflow_transitions.py`、`test_media_reimport.py` | `workflow-transitions-browser.mjs`（重复导入/覆盖/响应丢失重放/旧审查历史不再阻止覆盖） |
-| 审查清单/纠错/通过/失效 | `test_annotation_review.py`、`test_annotation_export.py` | `training-export-browser.mjs`、`critical-workflows-browser.mjs` |
+| 审查清单/纠错/通过/失效 | `test_annotation_review.py`、`test_annotation_export.py`（重审窗口去重、静止/运动成对、编号预留、一对一关联、跨轮次及归档判断真实 ZIP） | `training-export-browser.mjs`、`critical-workflows-browser.mjs` |
 | 训练导出/门禁/版本 | `test_training_export.py`、`test_quality_audit.py`、`test_export_audit_script.py` | `training-export-browser.mjs`（审查门槛、按视频划分、附原视频、多视频合并、响应丢失重放、改动后失效、统计导出） |
 | 标注/审查工作台一致性 | 上述对应页面回归、构建 | `workbench-consistency-browser.mjs`：两种模式两尺寸浅深主题、同一画布与工具、审查隐藏追踪、清单定位与帧条、专注、760/390 窄屏与使用说明隔离 |
 | 数据库查询/升级、Docker 发布 | `test_annotation_result_dedupe.py`、`test_deployment_preflight.py`、`test_docker_deployment_contract.py`、`test_model_distribution.py` | 下方容器验收；不是只运行前端构建 |
@@ -227,7 +227,7 @@ work/review-venv/bin/python backend/tests/real_video_benchmark.py --source-dir "
 真实素材浏览器用例先生成 C/UX/B 基础夹具，再在同一 `/work/e2e-confirm-ux-*` 环境运行 `backend/tests/real_4k_browser_fixture.py --source-dir "/实际视频目录"`；生成的测试标注不代表该视频真实目标。随后运行 `CONFIRMATION_ORIGIN=http://127.0.0.1:5373 node frontend/tests/performance-browser.mjs`，会消费本批 C 决定；重新运行先生成新任务。截图/指标在 `output/playwright/performance-results.json` 和 `real-4k-performance.png`。
 - `annotation-delete-feedback-browser` 前在同一隔离环境运行 `backend/tests/annotation_controls_fixture.py`，只重置六个 `controls-*` 媒体，凭证留在 `work/annotation-controls-browser-fixture.json`。环境路径支持 `/work/e2e-confirm-ux*` 或单独 `/work/e2e-annotation-controls*`；前端地址用 `ANNOTATION_ORIGIN`。覆盖当前帧/全视频删除、统计取消/确认、跨帧撤销、刷新、正常/仅本次/实际修框、尺寸误报无须重画的人工参照保存与恢复、校准重置、两类写入成功但响应丢失的原键重放、帮助下载一致及小窗口首屏。其后续 GPU job 响应模拟，保存/反馈/seed/rewind与原视频帧走真实后端；不能称真实模型验收。
 - `test_tracking_adaptive_feedback.py`、`test_tracking_pause_policy.py`、`test_tracking_confirmation_policy.py`、`test_tracking_pause_publication.py` 使用真实检测与反馈持久化、合成框或模拟推理输出，验证普通风险的持续观察与方向切换、30 对象在 44.2 FPS 下的轻微变化、原形状往返、已确认正常形态、重启读取、跨轮首次风险发布、回退帧界限、活动参照损坏与重置恢复、逐渐丢尾、新对象对风险和极端缩框的成对路径。它们随后端全量入口执行，不代表真实 GPU 推理。前端 `pause-diagnostics.test.mjs` 与 `tracking-calibration.test.mjs` 随 `test:annotation` 验证服务端明确指标/界限的解释、软提示与触发指标的区分、多个 partner、重置显示与历史证据缺字段，不用它们替代实际浏览器确认流程。
-- `training-export-browser` 会通过审查并导出 `ux-video`，重跑前重新生成 UX 与 C 夹具。
+- `training-export-browser` 会通过审查并导出 `ux-video`，重跑前重新生成 UX 与 C 夹具。 同套件覆盖放大图的真实异步图片 load 与同元素换源、采用中切视频、连按快捷键保护、轨迹已保存但检查失败后重试不重复加框。`annotation-view-guards.test.mjs` 执行实际审查 store 和工作区动作，覆盖轮次绑定、迟到响应隔离、全视频编号冲突、待保存草稿恢复和编辑锁定的明确返回。
 - 测试执行时不修改前端文件，避免 HMR 改变正在运行的实例。
 
 Vite 调试脚本若需要访问 workspace，须导入浏览器实际已加载的模块 URL（包含可能的 `?t=`），不要无条件二次 `import('/src/stores/workspace.ts')` 建立独立实例。

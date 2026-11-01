@@ -421,7 +421,119 @@ def test_not_target_records_and_revokes_same_transaction_exclusions():
 
 
 def test_static_exclusion_matches_same_location_on_any_frame():
-    exclusion=[dict(frames=[dict(frameIndex=50,bbox=[300,300,320,320])])]
+    exclusion=[dict(source='static',frames=[dict(frameIndex=50,bbox=[300,300,320,320])])]
     rows=[detector_row(0,[300,300,320,320]),detector_row(5,[300,300,320,320])]
     frames=[[HEAD_OBJ] for _ in range(10)]
     assert review.doubt_items(rows,info={'width':1000,'height':800},frames_list=frames,exclusions=exclusion)==[]
+
+
+def test_already_boxed_answer_is_fixed_only_when_the_reviewer_edited_those_frames():
+    media='boxed-media-'+uuid.uuid4().hex;rid='arev_'+uuid.uuid4().hex;frames=[[HEAD_OBJ] for _ in range(6)]
+    item=dict(id='doubt-reverse',kind='doubt',category='missing',source='reverse',startFrame=2,endFrame=3,frame=2,
+              objectIds=[],objectId=None,anchor=[300,300,320,320],candidates=[[300,300,320,320]],labels=['可能漏标'],
+              observations=[dict(frameIndex=fi,objectIds=[],candidates=[[300,300,320,320]]) for fi in (2,3)])
+    with db.connect() as c:
+        review.migrate(c)
+        c.execute("INSERT INTO annotation_reviews(id,media_id,round,state,started_by,started_at,start_revision,start_frames_json,items_json) VALUES (?,?,?,?,?,?,?,?,?)",
+                  (rid,media,1,'open',1,'now',review.revision(frames),json.dumps(frames),json.dumps([item])))
+    unchanged=json.loads(json.dumps(frames))
+    state=review.check(media,rid,item['id'],'ok',7,unchanged)
+    assert state['items'][0]['check']['result']=='ok'  # Duplicate detection: the head already had a box.
+    edited=json.loads(json.dumps(frames));edited[3]=[HEAD_OBJ,dict(objectId=2,bbox=[300,300,320,320],classKey='sperm')]
+    state=review.check(media,rid,item['id'],'ok',7,edited)
+    assert state['items'][0]['check']['result']=='fixed'  # The reviewer drew it during this round.
+    edited_elsewhere=json.loads(json.dumps(frames));edited_elsewhere[5]=[]
+    state=review.check(media,rid,item['id'],'ok',7,edited_elsewhere)
+    assert state['items'][0]['check']['result']=='ok'
+
+
+def test_rereview_ended_tracks_are_scoped_and_not_duplicated():
+    old=[[HEAD_OBJ] for _ in range(30)]
+    new=json.loads(json.dumps(old));new[5]=[];new[8]=[];new[24]=[]
+    rows=evidence_rows(30,heads={fi:[HEAD_OBJ,dict(objectId=2,bbox=[300,300,320,320])] for fi in range(7)})
+    for fi in range(7,30):rows[fi]['_reviewObjects']=[HEAD_OBJ]
+    rows[19]['_reviewObjects']=[dict(objectId=3,bbox=[400,300,420,320])]
+    ended=[i for i in review.build_items('rereview',new,rows,old,info={'width':1000,'height':800}) if i.get('source')=='track_ended']
+    assert [(i['objectId'],i['frame']) for i in ended]==[(2,7)]
+
+
+def test_static_motion_does_not_subtract_swimming_sperm():
+    frames=[[dict(objectId=1,bbox=[100+fi*4,100,120+fi*4,120])] for fi in range(6)]
+    static=review.doubt_items([detector_row(0,[300,300,320,320]),detector_row(5,[300,300,320,320])],frames_list=frames)
+    moving=review.doubt_items([detector_row(0,[300,300,320,320]),detector_row(5,[320,300,340,320])],frames_list=frames)
+    assert static[0]['category']=='static'
+    assert moving[0]['category']=='missing'
+
+
+def test_reverse_adoption_ids_reserved_across_conflicting_tracks():
+    rows=[]
+    for fi in (0,1):
+        row=reverse_row(fi,1,[300,300,320,320])
+        row['reviewEvidence']['findings'].append(dict(kind='endpoint_identity_uncertain',objectId=None,tailObjectId=2,bbox=[500,300,520,320]))
+        rows.append(row)
+    frames=[[HEAD_OBJ,dict(objectId=2,bbox=[200,100,220,120])]]*2
+    items=review.doubt_items(rows,frames_list=frames,info={'width':1000,'height':800})
+    assert len(items)==2 and len({i['adoptObjectId'] for i in items})==2
+    assert all(i['adoptObjectId']>2 for i in items)
+
+
+def test_detector_links_one_to_one_using_all_distances():
+    def finding(x):return dict(kind='unlabelled_candidate',bbox=[x-2,298,x+2,302])
+    findings={0:[finding(100),finding(130)],5:[finding(120),finding(135)]}
+    items=review.detector_items(findings,{},dict(diagonal=5),[])
+    assert len(items)==2
+    assert sorted([(i['anchor'][0],i['observations'][-1]['candidates'][0][0]) for i in items])==[(98,118),(128,133)]
+    assert all(len({o['frameIndex'] for o in i['observations']})==2 for i in items)
+
+
+def test_moving_exclusion_does_not_hide_later_static_head():
+    box=[300,300,320,320]
+    exclusions=[dict(source='detector',frames=[dict(frameIndex=50,bbox=box)])]
+    rows=[detector_row(0,box),detector_row(5,box)]
+    assert len(review.doubt_items(rows,frames_list=[[HEAD_OBJ]]*10,exclusions=exclusions))==1
+    exclusions[0]['source']='static'
+    assert review.doubt_items(rows,frames_list=[[HEAD_OBJ]]*10,exclusions=exclusions)==[]
+
+
+def test_export_decisions_preserve_passed_rounds_and_latest_location_wins():
+    media='decision-'+uuid.uuid4().hex
+    def item(x):return dict(id='doubt-1',kind='doubt',category='missing',source='reverse',observations=[dict(frameIndex=2,candidates=[[x,300,x+20,320]])])
+    with db.connect() as c:
+        review.migrate(c)
+        for round_no,x,result in [(1,300,'fixed'),(2,500,'not_target'),(3,300,'not_target')]:
+            rid=media+str(round_no)
+            c.execute("INSERT INTO annotation_reviews(id,media_id,round,state,started_by,started_at,start_revision,start_frames_json,items_json) VALUES (?,?,?,?,?,?,?,?,?)",
+                      (rid,media,round_no,'passed',1,'now','revision','[]',json.dumps([item(x)])))
+            c.execute('INSERT INTO annotation_review_checks VALUES (?,?,?,?,?)',(rid,'doubt-1',result,1,str(round_no)))
+        decisions=review.review_decisions(c,media,'sha')
+    assert sorted((d['bbox'][0],d['result']) for d in decisions)==[(300,'not_target'),(500,'not_target')]
+
+
+def test_static_exclusions_are_typed_and_legacy_records_remain_scoped():
+    media='static-'+uuid.uuid4().hex;rid=media+'round'
+    item=dict(id='doubt-1',kind='doubt',category='static',source='detector',frame=0,startFrame=0,endFrame=5,
+              observations=[dict(frameIndex=0,candidates=[[300,300,320,320]])])
+    with db.connect() as c:
+        review.migrate(c)
+        c.execute("INSERT INTO annotation_reviews(id,media_id,round,state,started_by,started_at,start_revision,start_frames_json,items_json) VALUES (?,?,?,?,?,?,?,?,?)",
+                  (rid,media,1,'open',1,'now','revision','[]',json.dumps([item])))
+    review.check(media,rid,item['id'],'not_target',1)
+    with db.connect() as c:
+        assert review.active_exclusions(c,media)[0]['source']=='static'
+        c.execute("UPDATE annotation_review_exclusions SET source='detector' WHERE review_id=?",(rid,))
+        assert review.active_exclusions(c,media)[0]['source']=='static'
+
+
+def test_export_decisions_keep_archived_checks_but_newer_ok_supersedes_them():
+    media='archived-'+uuid.uuid4().hex
+    item=dict(id='doubt-1',kind='doubt',category='missing',source='reverse',observations=[dict(frameIndex=2,candidates=[[300,300,320,320]])])
+    archived=[dict(items=[item],checks={'doubt-1':dict(result='not_target')})]
+    with db.connect() as c:
+        review.migrate(c)
+        c.execute("INSERT INTO annotation_reviews(id,media_id,round,state,started_by,started_at,start_revision,start_frames_json,items_json,checklist_history_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                  (media,media,1,'passed',1,'now','revision','[]','[]',json.dumps(archived)))
+        assert len(review.review_decisions(c,media,'sha'))==1
+        c.execute("INSERT INTO annotation_reviews(id,media_id,round,state,started_by,started_at,start_revision,start_frames_json,items_json) VALUES (?,?,?,?,?,?,?,?,?)",
+                  (media+'2',media,2,'passed',1,'now','revision','[]',json.dumps([item])))
+        c.execute('INSERT INTO annotation_review_checks VALUES (?,?,?,?,?)',(media+'2','doubt-1','ok',1,'now'))
+        assert review.review_decisions(c,media,'sha')==[]

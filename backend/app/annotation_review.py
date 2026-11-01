@@ -43,6 +43,9 @@ RESULTS = {"ok", "fixed", "empty", "not_target"}
 # Review candidate association has its own policy. Tuning endpoint identity
 # matching must not silently change what is considered a missed annotation.
 CANDIDATE_MATCH_POLICY = dict(iou=.5, centerRatio=.35, minCenterPx=2., containment=.85, maxSideRatio=2.)
+# A shifted or looser box around an already labelled head (each box holds the
+# other's centre) is a duplicate detection, not a missed head.
+DUPLICATE_POLICY = dict(mutualCenter=True, maxSideRatio=3.)
 REVERSE_MIN_FRAMES = 2
 REVERSE_GAP_FRAMES = 2
 EDGE_MARGIN_RATIO = .5
@@ -56,7 +59,7 @@ COUNT_POLICY = dict(sampleRate=SAMPLE_RATE,sampleMin=SAMPLE_MIN,sampleMax=SAMPLE
                     rereviewRate=REREVIEW_SAMPLE_RATE,rereviewMin=REREVIEW_SAMPLE_MIN,rereviewMax=REREVIEW_SAMPLE_MAX,
                     coverageSegments=COVERAGE_SEGMENTS,coverageMax=COVERAGE_MAX,
                     escalationRate=ESCALATION_RATE,escalationMin=ESCALATION_MIN,escalationMax=ESCALATION_MAX)
-EVIDENCE_POLICY = 'actionable-review-v4-' + digest([CANDIDATE_MATCH_POLICY, MISSING_POLICY, COUNT_POLICY])[7:23]
+EVIDENCE_POLICY = 'actionable-review-v6-' + digest([CANDIDATE_MATCH_POLICY, DUPLICATE_POLICY, MISSING_POLICY, COUNT_POLICY])[7:23]
 
 
 def migrate(c):
@@ -257,9 +260,20 @@ def candidate_overlaps(a, b):
             and max(aw/bw, bw/aw, ah/bh, bh/ah) <= CANDIDATE_MATCH_POLICY['maxSideRatio'])
 
 
+def same_head(a, b):
+    """Two boxes of comparable size around one head: each contains the other's centre."""
+    if not valid_box(a) or not valid_box(b):
+        return False
+    aw, ah, bw, bh = a[2]-a[0], a[3]-a[1], b[2]-b[0], b[3]-b[1]
+    if max(aw/bw, bw/aw, ah/bh, bh/ah) > DUPLICATE_POLICY['maxSideRatio']:
+        return False
+    (ax, ay), (bx, by) = _center(a), _center(b)
+    return b[0] <= ax <= b[2] and b[1] <= ay <= b[3] and a[0] <= bx <= a[2] and a[1] <= by <= a[3]
+
+
 def covered(box, objects):
     """Whether any current-content object already covers this pixel xyxy box."""
-    return any(candidate_overlaps(box, obj.get('bbox')) for obj in objects)
+    return any(candidate_overlaps(box, obj.get('bbox')) or same_head(box, obj.get('bbox')) for obj in objects)
 
 
 def head_stats(frames_list):
@@ -287,13 +301,22 @@ def area_ok(box, median_area):
 
 
 def active_exclusions(c, media_id):
-    out=[]
+    out=[];round_items={}
     for row in c.execute("SELECT * FROM annotation_review_exclusions WHERE media_id=? AND revoked_at IS NULL",(media_id,)):
         try:frames=json.loads(row['frames_json'])
         except (TypeError,json.JSONDecodeError):
             log.warning('annotation_review.exclusion_invalid media=%s exclusion=%s',media_id,row['id'])
             continue
-        out.append(dict(id=row['id'],source=row['source'],frames=[
+        source=row['source']
+        if source=='detector':
+            rid=row['review_id']
+            if rid not in round_items:
+                review=c.execute('SELECT items_json,checklist_history_json FROM annotation_reviews WHERE id=?',(rid,)).fetchone()
+                round_items[rid]=[] if review is None else json.loads(review['items_json'])+[i for version in json.loads(review['checklist_history_json'] or '[]') for i in version['items']]
+            if any(i.get('id')==row['item_id'] and i.get('category')=='static' and any(
+                o.get('frameIndex')==f.get('frameIndex') and o.get('candidates',[None])[0]==f.get('bbox')
+                for o in i.get('observations',[]) if o.get('candidates') for f in frames if isinstance(f,dict)) for i in round_items[rid]):source='static'
+        out.append(dict(id=row['id'],source=source,frames=[
             item for item in frames if isinstance(item,dict) and isinstance(item.get('frameIndex'),int)
             and valid_box(item.get('bbox'))]))
     return out
@@ -302,7 +325,7 @@ def active_exclusions(c, media_id):
 def excluded_candidate(frame, box, exclusions, *, any_frame=False):
     for exclusion in exclusions or []:
         for observed in exclusion['frames']:
-            if any_frame or abs(observed['frameIndex']-frame)<=DETECTOR_STEP:
+            if (any_frame and exclusion.get('source')=='static') or abs(observed['frameIndex']-frame)<=DETECTOR_STEP:
                 if candidate_overlaps(box,observed['bbox']):return True
     return False
 
@@ -344,6 +367,7 @@ def frame_findings(rows):
             if f['kind']=='unlabelled_candidate' and valid_box(f.get('bbox')):
                 associated=[o for o in objects if candidate_overlaps(f['bbox'],o.get('bbox'))]
                 if len(associated)==1:continue
+                if not associated and covered(f['bbox'],objects):continue
                 if len(associated)>1:
                     ids=sorted({o.get('object_id',o.get('objectId')) for o in associated})
                     for obj in associated:
@@ -392,6 +416,9 @@ def reverse_items(findings_by_frame, info, stats, frames_list=None, rows=None, e
     median_area=stats['area'] if stats else None
     head_w=stats['width'] if stats else None
     items=[]
+    used={obj.get('objectId',obj.get('object_id')) for objects in frames_list or [] for obj in objects or []}
+    reserved={}
+    next_id=max((oid for oid in used if isinstance(oid,int)),default=0)+1
     for (kind,tail),observed in sorted(groups.items(),key=lambda pair:(pair[0][0],str(pair[0][1]))):
         kept={fi:box for fi,box in observed.items() if not near_edge(box,width,height,head_w)
               and area_ok(box,median_area) and not excluded_candidate(fi,box,exclusions)}
@@ -407,16 +434,13 @@ def reverse_items(findings_by_frame, info, stats, frames_list=None, rows=None, e
                 from .endpoint_tracking import terminal_aliases
                 terminal=max(rows,key=lambda r:r.get('source_frame_index',r.get('frame_index',-1)))
                 canonical=terminal_aliases(terminal).get(tail,tail)
-            start,end=segment[0],segment[-1]
-            conflict=False
-            max_id=0
-            for fi,objects in enumerate(frames_list or []):
-                for obj in objects or []:
-                    oid=obj.get('objectId',obj.get('object_id'))
-                    if isinstance(oid,int) and not isinstance(oid,bool):
-                        max_id=max(max_id,oid)
-                        if start<=fi<=end and oid==canonical:conflict=True
-            adopt=max_id+1 if conflict else canonical
+            # A canonical ID already present anywhere may belong to another head.
+            if tail not in reserved:
+                if canonical in used or canonical in reserved.values():
+                    while next_id in used or next_id in reserved.values():next_id+=1
+                    reserved[tail]=next_id;next_id+=1
+                else:reserved[tail]=canonical
+            adopt=reserved[tail]
             source='reverse' if kind=='reverse_only' else 'disagreement'
             items.append(_location_item('missing',source,path,info,tailObjectId=tail,adoptObjectId=adopt))
     return items
@@ -427,16 +451,9 @@ def _center(box):
 
 
 def _global_translation(first,last,frames_list):
-    def by_id(objects):
-        return {obj.get('objectId',obj.get('object_id')):obj.get('bbox') for obj in (objects or []) if valid_box(obj.get('bbox'))}
-    if first>=len(frames_list) or last>=len(frames_list):return 0.,0.
-    a,b=by_id(frames_list[first]),by_id(frames_list[last])
-    deltas=[]
-    for oid in a.keys()&b.keys():
-        ca,cb=_center(a[oid]),_center(b[oid])
-        deltas.append((cb[0]-ca[0],cb[1]-ca[1]))
-    if not deltas:return 0.,0.
-    return statistics.median(d[0] for d in deltas),statistics.median(d[1] for d in deltas)
+    # Swimming targets are not a camera-motion estimator. Until an independent
+    # image-registration estimate is available, measure in original pixels.
+    return 0.,0.
 
 
 def detector_items(findings_by_frame, info, stats, claimed, frames_list=None, exclusions=None):
@@ -454,16 +471,22 @@ def detector_items(findings_by_frame, info, stats, claimed, frames_list=None, ex
                 candidates.append((fi,box))
     diagonal=stats['diagonal'] if stats else None
     paths=[]
-    for fi,box in sorted(candidates,key=lambda value:(value[0],value[1])):
-        center=_center(box);best=None
-        for path in paths:
+    for fi in sorted({frame for frame,_ in candidates}):
+        boxes=sorted([box for frame,box in candidates if frame==fi])
+        edges=[]
+        for pi,path in enumerate(paths):
             last_fi,last_box=path[-1]
-            if last_fi==fi or abs((fi-last_fi)-DETECTOR_STEP)>1:continue
-            distance=math.hypot(center[0]-_center(last_box)[0],center[1]-_center(last_box)[1])
-            if diagonal is not None and distance<diagonal*DETECTOR_LINK_RATIO and (best is None or distance<best[0]):
-                best=(distance,path)
-        if best is None:paths.append([(fi,box)])
-        else:best[1].append((fi,box))
+            if abs((fi-last_fi)-DETECTOR_STEP)>1:continue
+            for bi,box in enumerate(boxes):
+                a,b=_center(last_box),_center(box)
+                distance=math.hypot(b[0]-a[0],b[1]-a[1])
+                if diagonal is not None and distance<diagonal*DETECTOR_LINK_RATIO:
+                    edges.append((distance,pi,bi))
+        assigned_paths=set();assigned_boxes=set()
+        for _,pi,bi in sorted(edges):
+            if pi in assigned_paths or bi in assigned_boxes:continue
+            paths[pi].append((fi,boxes[bi]));assigned_paths.add(pi);assigned_boxes.add(bi)
+        paths.extend([[(fi,box)] for bi,box in enumerate(boxes) if bi not in assigned_boxes])
     items=[]
     for path in paths:
         if len(path)<2:
@@ -480,7 +503,7 @@ def detector_items(findings_by_frame, info, stats, claimed, frames_list=None, ex
     return items
 
 
-def track_ended_items(rows, frames_list, info, stats):
+def track_ended_items(rows, frames_list, info, stats, only=None):
     """A non-manual identity vanished inside the frame without an exit or tail match."""
     last={};objects_at={};manual_at={};exited=set();matched=set()
     for row in rows:
@@ -498,6 +521,7 @@ def track_ended_items(rows, frames_list, info, stats):
     final=len(frames_list)-1;width,height=(info or {}).get('width',0),(info or {}).get('height',0)
     head_w=stats['width'] if stats else None;items=[]
     for oid,fi in sorted(last.items()):
+        if only is not None and not only[0]<=fi+1<=only[1]:continue
         if fi>=final or oid in exited or oid in matched or oid in manual_at.get(fi,set()):continue
         box=next(obj['bbox'] for obj in objects_at[fi] if obj.get('objectId',obj.get('object_id'))==oid)
         if near_edge(box,width,height,head_w):continue
@@ -522,7 +546,7 @@ def doubt_items(rows, only=None, *, info=None, frames_list=None, exclusions=None
     claimed=[dict(frame=o['frameIndex'],box=o['candidates'][0],item=item)
              for item in items for o in item['observations']]
     items+=detector_items(findings_by_frame,info,stats,claimed,frames_list,exclusions)
-    items+=track_ended_items(rows,frames_list,info,stats)
+    items+=track_ended_items(rows,frames_list,info,stats,only)
     for category,findings in grouped.items():
         if category in ('missing','static'):continue
         batches=[]
@@ -577,10 +601,15 @@ def build_items(review_id, frames_list, rows, previous=None, *, info=None, exclu
     else:
         # Re-review after edits: what changed, doubts touching it, and fresh samples.
         changed = changed_frames(previous, frames_list)
+        windows=[]
         for start, end in spans(changed):
             items.append(dict(kind="changed", startFrame=start, endFrame=end, frame=start,
                               message="通过后有改动"))
-            items += doubt_items(rows, only=(max(0, start - 2), end + 2),info=info,frames_list=frames_list,exclusions=exclusions)
+            left,right=max(0,start-2),min(n-1,end+2)
+            if windows and left<=windows[-1][1]+1:windows[-1][1]=max(windows[-1][1],right)
+            else:windows.append([left,right])
+        for window in windows:
+            items += doubt_items(rows,only=window,info=info,frames_list=frames_list,exclusions=exclusions)
         items += [x for x in count_jumps(frames_list) if any(s <= x["frame"] + 2 and x["frame"] - 2 <= e for s, e in spans(changed))]
         sample_total = sample_count(n, rereview=True)
     items += samples(review_id, frames_list, items, sample_total, "sample")
@@ -618,20 +647,28 @@ def checks(c, review_id):
 
 def review_decisions(c, media_id, source_sha256):
     """Latest passed human judgement on candidate heads, for detector hard negatives."""
-    row=last_passed(c,media_id)
-    if row is None:return []
-    done=checks(c,row['id']);out=[]
-    for item in json.loads(row['items_json']):
-        if item.get('kind')!='doubt' or item.get('category') not in ('missing','static'):continue
-        check=done.get(item['id'])
-        if not check or check['result'] not in ('fixed','not_target'):continue
-        for observation in item.get('observations') or []:
-            candidates=observation.get('candidates') or []
-            if not candidates or not valid_box(candidates[0]):continue
-            out.append(dict(sourceSha256=source_sha256,frameIndex=observation['frameIndex'],bbox=list(candidates[0]),
+    by_frame={}
+    for row in c.execute("SELECT * FROM annotation_reviews WHERE media_id=? AND state='passed' ORDER BY round",(media_id,)):
+        versions=json.loads(row['checklist_history_json'] or '[]')
+        versions.append(dict(items=json.loads(row['items_json']),checks=checks(c,row['id'])))
+        for version in versions:
+            for item in version['items']:
+                if item.get('kind')!='doubt' or item.get('category') not in ('missing','static'):continue
+                check=version['checks'].get(item['id'])
+                if not check:continue
+                for observation in item.get('observations') or []:
+                    candidates=observation.get('candidates') or []
+                    if not candidates or not valid_box(candidates[0]):continue
+                    frame=observation['frameIndex'];box=list(candidates[0])
+                    # IDs repeat between rounds. Resolve by actual frame/location,
+                    # including a newer 'ok' which supersedes an older judgement.
+                    out=[d for d in by_frame.get(frame,[]) if not candidate_overlaps(box,d['bbox'])]
+                    by_frame[frame]=out
+                    if check['result'] in ('fixed','not_target'):
+                        out.append(dict(sourceSha256=source_sha256,frameIndex=frame,bbox=box,
                             category=item['category'],source=item.get('source'),result=check['result'],
                             reviewId=row['id'],itemId=item['id']))
-    return out
+    return [d for frame in sorted(by_frame) for d in by_frame[frame]]
 
 
 def refresh_doubts(c, row, frames_list, rows, info=None):
@@ -762,7 +799,9 @@ def open_round(c, media_id, review_id):
     return row
 
 
-def check(media_id, review_id, item_id, result, actor):
+def check(media_id, review_id, item_id, result, actor, current_frames=None):
+    """Record one item. ``current_frames`` lets an "already boxed" answer on a
+    location item become ``fixed`` when the reviewer edited those frames."""
     if result not in RESULTS:
         raise ReviewError("INVALID_RESULT", "检查结果无效", 422)
     with closing(connect()) as c, c:
@@ -776,6 +815,14 @@ def check(media_id, review_id, item_id, result, actor):
             raise ReviewError("INVALID_RESULT", "只有未标注的帧可以确认为无目标", 422)
         if result == "not_target" and item.get("category") not in ("missing", "static"):
             raise ReviewError("INVALID_RESULT", "只有漏标或静止目标项可以标记为不是精子", 422)
+        if result == "ok" and item.get("category") in ("missing", "static") and current_frames is not None:
+            start_frames = json.loads(row["start_frames_json"])
+            touched = [o["frameIndex"] for o in item.get("observations", [])
+                       if 0 <= o["frameIndex"] < min(len(start_frames), len(current_frames))
+                       and start_frames[o["frameIndex"]] != current_frames[o["frameIndex"]]]
+            if touched:
+                result = "fixed"
+                log.info("annotation_review.boxed_by_reviewer media=%s review=%s item=%s frames=%s", media_id, review_id, item_id, touched)
         previous = c.execute("SELECT result FROM annotation_review_checks WHERE review_id=? AND item_id=?",
                              (review_id, item_id)).fetchone()
         checked_at = now()
@@ -792,7 +839,7 @@ def check(media_id, review_id, item_id, result, actor):
                           for o in item.get("observations", []) if o.get("candidates") and valid_box(o["candidates"][0])]
                 c.execute("INSERT INTO annotation_review_exclusions(id,media_id,review_id,item_id,source,frames_json,actor_id,created_at) VALUES (?,?,?,?,?,?,?,?)",
                           ("arex_"+uuid.uuid4().hex, media_id, review_id, item_id,
-                           item.get("source") or item.get("category") or "", packed(frames), actor, checked_at))
+                           ("static" if item.get("category")=="static" else item.get("source") or item.get("category") or ""), packed(frames), actor, checked_at))
                 log.info("annotation_review.exclusion_recorded media=%s review=%s item=%s frames=%s", media_id, review_id, item_id, len(frames))
         else:
             c.execute("UPDATE annotation_review_exclusions SET revoked_at=?,revoked_by=? WHERE review_id=? AND item_id=? AND revoked_at IS NULL",

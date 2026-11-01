@@ -92,3 +92,25 @@ def test_terminal_manual_aliases_exempt_the_effective_object(source,converted):
 def test_check_failure_is_not_mistaken_for_a_suppressed_identity_signal():
     items=r.doubt_items([row(0,[f('check_failed',None)])])
     assert len(items)==1 and items[0]['message']=='自动检查失败' and items[0]['category']=='check'
+
+
+def test_reverse_track_offset_from_an_existing_box_is_a_duplicate_not_a_missed_head():
+    # Reverse SAM3 drew a looser, shifted box around a head that is already labelled:
+    # the boxes fail the strict IoU/containment match but each contains the other's centre.
+    rows=[row(fi,[dict(kind='endpoint_identity_uncertain',objectId=None,tailObjectId=9,bbox=[58,62,72,80])],
+              [dict(object_id=3,source='ai',bbox=[60,58,70,72])]) for fi in range(4)]
+    assert [i for i in r.doubt_items(rows) if i.get('source')!='track_ended']==[]
+
+
+def test_two_touching_heads_still_report_the_unlabelled_one():
+    # A neighbouring head next to an existing box is not swallowed by the duplicate rule.
+    rows=[row(fi,[dict(kind='endpoint_identity_uncertain',objectId=None,tailObjectId=9,bbox=[71,60,81,70])],
+              [dict(object_id=3,source='ai',bbox=[60,60,70,70])]) for fi in range(4)]
+    items=[i for i in r.doubt_items(rows) if i.get('source')!='track_ended']
+    assert [(i['category'],i['source'],i['startFrame'],i['endFrame']) for i in items]==[('missing','reverse',0,3)]
+
+
+def test_detector_candidate_offset_from_an_existing_box_is_not_a_missed_head():
+    rows=[row(fi,[f('unlabelled_candidate',None,[58,62,72,80])],[dict(object_id=3,source='ai',bbox=[60,58,70,72])])
+          for fi in (0,5,10)]
+    assert [i for i in r.doubt_items(rows) if i.get('source')!='track_ended']==[]
