@@ -169,7 +169,7 @@ try {
     // Another tab cuts the old future branch. The SPA must use the new source.
     const rewind=await api('/track/rewind','POST',{mediaId:mid,startFrame:0})
     assert.equal(rewind.removedRows,2)
-    await button('审查模式').click();await page.locator('.review-page').waitFor()
+    await button('审查模式').click();await page.getByTestId('review-panel').waitFor()
     await button('人工标注').click();await ready()
     const server=await api('/track/result/'+mid)
     const uiBeforeReload=await page.locator('.object-select').count()

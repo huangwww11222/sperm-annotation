@@ -16,9 +16,9 @@ function runtime(){
   const effects=[],ref=value=>({value}),zoom=ref(1)
   const stage={getBoundingClientRect:()=>({left:10,top:20,width:800*zoom.value,height:450*zoom.value})}
   const scroller={getBoundingClientRect:()=>({left:0,top:0,width:600,height:300}),scrollBy:(x,y)=>effects.push(['scroll',x,y]),scrollTo:(x,y)=>effects.push(['fit-scroll',x,y])}
-  const refs={zoom,stageRef:ref(stage),scrollContainerRef:ref(scroller),pauseStageMargins:ref(null),help:ref(false),focused:ref(false),hiddenBoxes:ref(false),spaceHeld:ref(false),mediaBusy:ref(false),workspaceRestoring:ref(false),jumpFrameInput:ref(null)}
+  const refs={zoom,stageRef:ref(stage),scrollContainerRef:ref(scroller),pauseStageMargins:ref(null),help:ref(false),focused:ref(false),hiddenBoxes:ref(false),spaceHeld:ref(false),mediaBusy:ref(false),workspaceRestoring:ref(false),jumpFrameInput:ref(null),reviewing:ref(false),userZoomedInReview:ref(false)}
   const code=`const {${Object.keys(refs).join(',')}}=refs;let pointerActive=false,pan=null;
-    const cancelPendingPauseView=()=>effects.push('cancel-view'),cancelAnnotationGesture=()=>effects.push('cancel-edit'),zoomReset=()=>{zoom.value=1;effects.push('reset')},fit=()=>effects.push('fit'),zoomIn=n=>{zoom.value+=n;effects.push('zoom-in')},zoomOut=n=>{zoom.value-=n;effects.push('zoom-out')},nextTick=async()=>{},toggleFocus=()=>effects.push('focus'),canvasZoomKey=()=>null;
+    const cancelReviewLocate=()=>effects.push('cancel-review-locate'),cancelPendingPauseView=()=>effects.push('cancel-view'),cancelAnnotationGesture=()=>effects.push('cancel-edit'),zoomReset=()=>{zoom.value=1;effects.push('reset')},fit=()=>effects.push('fit'),zoomIn=n=>{zoom.value+=n;effects.push('zoom-in')},zoomOut=n=>{zoom.value-=n;effects.push('zoom-out')},nextTick=async()=>{},toggleFocus=()=>effects.push('focus'),canvasZoomKey=()=>null;
     ${functions}\n({zoomAt,fitView,keys,setPointer:x=>pointerActive=x,setPan:x=>pan=x})`
   const api=vm.runInNewContext(ts.transpileModule(code,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,{refs,effects,document:{querySelector:()=>null}})
   const event=(key,options={})=>({key,keyCode:0,isComposing:false,repeat:false,ctrlKey:false,metaKey:false,altKey:false,shiftKey:false,target:{closest:()=>null},preventDefault(){effects.push('prevent')},...options})
@@ -49,6 +49,15 @@ test('after gesture release zoom and fit keep their existing normal behavior',as
   f.fitView();assert.equal(f.refs.zoom.value,1)
   assert.equal(f.effects.filter(x=>x==='cancel-edit').length,1)
   assert(f.effects.includes('fit'))
+})
+
+test('explicit review zoom and fit reserve scale control for the user',async()=>{
+  const f=runtime();f.refs.reviewing.value=true
+  await f.zoomAt(1)
+  assert.equal(f.refs.userZoomedInReview.value,true)
+  f.refs.userZoomedInReview.value=false
+  f.fitView()
+  assert.equal(f.refs.userZoomedInReview.value,true)
 })
 
 test('legacy IME key code 229 cannot enter focus or invoke canvas actions',()=>{

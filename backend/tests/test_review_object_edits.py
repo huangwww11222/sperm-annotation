@@ -9,7 +9,6 @@ from fastapi.testclient import TestClient
 
 from app import db, review_workflow as w, media_reimport
 from app.auth import sign_jwt
-from app.review_workflow_routes import router
 from .test_review_workflow import task, edit, done, count
 from .test_review_completion import source, finish as send_a, body as send_body
 
@@ -148,20 +147,6 @@ def test_return_permission_reason_revision_and_finish_conflicts(task):
     with pytest.raises(w.ReviewError): send_back(task)
 
 
-def test_http_add_delete_catalog_and_return_contract(task):
-    app = FastAPI(); app.include_router(router)
-    client = TestClient(app, headers={'Authorization': 'Bearer ' + sign_jwt({'uid': 2}), 'X-Review-Contract': '3'})
-    base = f'/api/review/sessions/{task}'
-    catalog = client.get(base + '/objects')
-    assert catalog.status_code == 200 and catalog.json()['items'][0]['origin'] == 'baseline'
-    new = client.post(base + '/objects', json={'expectedSessionRevision': w.get_session(task, 2)['revision']}, headers={'Idempotency-Key': 'http-allocate'})
-    assert new.status_code == 200 and new.json()['object']['objectId'] == 2
-    deleted = client.put(base + '/frames/0/draft', json={'expectedFrameRevision': 0, 'patch': [{'objectId': 1, 'op': 'delete'}]}, headers={'Idempotency-Key': 'http-delete'})
-    assert deleted.status_code == 200 and deleted.json()['frame']['effectiveObjects'] == []
-    returned = client.post(base + '/return-annotation', json={'expectedSessionRevision': w.get_session(task, 2)['revision'], 'reason': '需要全视频重新追踪'}, headers={'Idempotency-Key': 'http-return'})
-    assert returned.status_code == 200 and returned.json()['session']['state'] == 'returned_to_annotation'
-
-
 def test_changed_source_cannot_create_parallel_review_until_returned(source):
     first = send_a(source)
     sid = first['session']['id']
@@ -193,24 +178,6 @@ def test_old_contract_cannot_erase_structural_draft_or_committed_payload(task):
     with pytest.raises(w.ReviewError) as err:
         w.write('finish', task, 2, uuid.uuid4().hex, {'expectedSessionRevision': w.get_session(task, 2)['revision']}, contract='2')
     assert err.value.status == 428
-
-
-def test_contract_two_geometry_api_stays_compatible_but_presence_requires_three(task):
-    app = FastAPI(); app.include_router(router)
-    client = TestClient(app, headers={'Authorization': 'Bearer ' + sign_jwt({'uid': 2}), 'X-Review-Contract': '2'})
-    base = f'/api/review/sessions/{task}'
-    original = {'expectedFrameRevision': 0, 'patch': [{'objectId': 1, 'bbox': [11, 20, 31, 40]}]}
-    saved = client.put(base + '/frames/0/draft', json=original, headers={'Idempotency-Key': 'legacy-api'})
-    assert saved.status_code == 200
-    for path, payload in [('/objects', {'expectedSessionRevision': w.get_session(task, 2)['revision']}),
-                          ('/return-annotation', {'expectedSessionRevision': w.get_session(task, 2)['revision'], 'reason': '整段需重标'})]:
-        assert client.post(base + path, json=payload, headers={'Idempotency-Key': uuid.uuid4().hex}).status_code == 428
-    client.headers['X-Review-Contract'] = '3'
-    deleted = client.put(base + '/frames/0/draft', json={'expectedFrameRevision': w.get_frame(task, 0, 2)['frameRevision'], 'patch': [{'objectId': 1, 'op': 'delete'}]}, headers={'Idempotency-Key': 'three-delete'})
-    assert deleted.status_code == 200
-    client.headers['X-Review-Contract'] = '2'
-    assert client.put(base + '/frames/0/draft', json=original, headers={'Idempotency-Key': 'legacy-api'}).json() == saved.json()
-    assert client.post(base + '/frames/0/discard', json={'expectedFrameRevision': w.get_frame(task, 0, 2)['frameRevision']}, headers={'Idempotency-Key': 'two-discard'}).status_code == 428
 
 
 def test_return_failure_rolls_back_state_and_original_key_retries(task, caplog):

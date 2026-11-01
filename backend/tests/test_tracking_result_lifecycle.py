@@ -25,7 +25,7 @@ def test_fresh_upload_is_editable_without_inventing_reviewed_empty_frames(import
     assert response.status_code == 200
     assert response.json() == dict(format='sam3-tracking-results-jsonl', state='not_generated', frames=[], count=0)
     save_empty_workspace(client, mid)
-    assert client.get('/api/review/media/'+mid+'/completion-preview').json()['unknownFrames'] == 3
+    assert client.get('/api/datasets/annotations/'+mid+'/preview').json()['unknownFrames'] == 3
     assert not (main.media_dir(mid)/'tracker_results.json').exists()
 
 
@@ -95,7 +95,7 @@ def test_valid_zero_object_tracking_is_distinct_from_never_tracked(imports):
     assert body['state'] == 'available' and body['count'] == 1
     assert body['frames'][0]['annotations'] == []
     save_empty_workspace(client, mid)
-    assert client.get('/api/review/media/'+mid+'/completion-preview').json()['unknownFrames'] == 2
+    assert client.get('/api/datasets/annotations/'+mid+'/preview').json()['unknownFrames'] == 2
 
 
 def test_missing_generated_results_cannot_be_submitted_as_explicit_empty(imports, caplog):
@@ -104,11 +104,9 @@ def test_missing_generated_results_cannot_be_submitted_as_explicit_empty(imports
     save_empty_workspace(client, mid)
     directory = main.media_dir(mid)
     tracker._write_jsonl(directory/'tracker_results.json', [{'frame_index':0,'objects':[]}])
-    preview = client.get('/api/review/media/'+mid+'/completion-preview').json()
+    preview = client.get('/api/datasets/annotations/'+mid+'/preview').json()
     (directory/'tracker_results.json').unlink()
-    body = {'expectedSourceRevision':preview['sourceRevision'], 'confirmComplete':True,
-            'explicitEmptyFrameRanges':[{'start':0,'end':2}]}
-    response = client.post('/api/review/media/'+mid+'/complete', json=body, headers={'Idempotency-Key':'missing-result-submit'})
+    response = client.post('/api/annotation-review/media/'+mid+'/start')
     assert response.status_code == 409
     assert response.json()['code'] == 'TRACKING_RESULTS_MISSING'
     assert 'annotation.completion_results_missing' in caplog.text

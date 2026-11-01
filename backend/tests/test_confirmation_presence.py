@@ -19,7 +19,6 @@ from app import audit_export, db, main, quality_audit, statistics_export
 from app import training_export as export
 from app import review_workflow as review
 from app.auth import sign_jwt
-from app.confirmation_workflow_routes import router
 from app.review_repository import compute_file_sha256
 
 from .test_confirmation_workflow import claim, choose, write
@@ -65,27 +64,6 @@ def test_presence_api_has_null_sides_and_no_fake_geometry_metrics(presence):
     for item in [deleted, added]:
         assert item["metrics"]["changeType"] in ("补标", "删除")
         assert all(item["metrics"][key] is None for key in ("iou", "centerShiftPx", "deltaCenterX", "deltaCenterY", "deltaWidth", "deltaHeight"))
-
-
-def test_old_confirmation_page_cannot_accept_absence_but_committed_replay_survives(presence):
-    cid = presence['cid']
-    claim(cid)
-    app = FastAPI()
-    app.include_router(router)
-    client = TestClient(app)
-    auth = {'Authorization': 'Bearer ' + sign_jwt({'uid': 3}), 'X-Review-Contract': '2', 'Idempotency-Key': 'presence-decision'}
-    url = f'/api/confirmation/sessions/{cid}/changes/presence_1/decision'
-    body = {'choice': 'B', 'expectedDecisionRevision': 0}
-    old = client.put(url, json=body, headers=auth)
-    assert old.status_code == 428 and old.json()['code'] == 'CONTRACT_UPGRADE_REQUIRED'
-    saved = client.put(url, json=body, headers={**auth, 'X-Review-Contract': '3'})
-    assert saved.status_code == 200
-    assert client.put(url, json=body, headers=auth).json() == saved.json()
-    choose(cid, 1, 'A')
-    version = {'expectedSessionRevision': confirm.get_session(cid, 3)['revision']}
-    rejected = client.post(f'/api/confirmation/sessions/{cid}/finalize', json=version, headers={**auth, 'Idempotency-Key': 'presence-finish'})
-    assert rejected.status_code == 428
-    assert client.post(f'/api/confirmation/sessions/{cid}/finalize', json=version, headers={**auth, 'X-Review-Contract': '3', 'Idempotency-Key': 'presence-finish'}).status_code == 200
 
 
 def test_presence_finalize_storage_failure_preserves_choices_and_same_key_retry(presence, caplog):

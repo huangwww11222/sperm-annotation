@@ -2,17 +2,35 @@
 import { createRequestId } from '../utils/browserCompat'
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { useAuth } from '../stores/auth'
-import { trainingExportApi as api, type ExportJob, type ExportSettings, type ExportSummary } from '../api/trainingExportApi'
+import { trainingExportApi as api, type AnnotationSnapshotItem, type DatasetSplit, type ExportJob, type ExportSettings, type ExportSummary, type SplitOptions } from '../api/trainingExportApi'
 
 const props = defineProps<{ finalVersionId: string; mediaName: string; disabled?: boolean; hideTrigger?:boolean; annotationOnly?:boolean }>()
 const emit = defineEmits<{ open: [value: boolean]; busy: [value: boolean] }>()
 const opened = ref(false), busy = ref(false), error = ref('')
 const summary = ref<ExportSummary | null>(null), job = ref<ExportJob | null>(null)
-const format = ref<ExportSettings['format']>('yolo'), splitRatio = ref(.8)
+const format = ref<ExportSettings['format']>('yolo'), splitRatio = ref(.7), testRatio = ref(.15)
+const splitMode = ref<'video' | 'frame'>('video'), includeVideos = ref(true)
+// Other videos' still-valid annotation snapshots that can join this package (annotation page only).
+const others = ref<AnnotationSnapshotItem[]>([]), extraIds = ref<string[]>([]), overrides = ref<Record<string, DatasetSplit>>({})
+const planError = ref('')
+const splitNames: Record<DatasetSplit, string> = { train: '训练', val: '验证', test: '测试' }
+const presets = computed(() => splitMode.value === 'video' ? [[.7, .15], [.8, .1], [.8, 0]] : [[.7, 0], [.8, 0], [.9, 0]])
+const preset = computed({
+  get: () => `${splitRatio.value}/${testRatio.value}`,
+  set: (value: string) => { const [train, test] = value.split('/').map(Number); splitRatio.value = train; testRatio.value = test },
+})
+const percent = (x: number) => `${Math.round(x * 100)}%`
+const ids = computed(() => [props.finalVersionId, ...extraIds.value])
+const splitOptions = computed<SplitOptions>(() => splitMode.value === 'frame'
+  ? { splitRatio: splitRatio.value, splitMode: 'frame' }
+  : { splitRatio: splitRatio.value, splitMode: 'video', testRatio: testRatio.value, videoSplits: Object.fromEntries(Object.entries(overrides.value).filter(([id]) => ids.value.includes(id))) })
+const videoName = (id: string) => id === props.finalVersionId ? props.mediaName : others.value.find(o => o.finalVersionId === id)?.name || id
+const videoCount = (split: DatasetSplit) => summary.value?.videos?.filter(v => v.split === split).length || 0
 const dialog = ref<HTMLElement | null>(null)
 const storageKey = computed(() => `training-export:${useAuth().user.value?.id}:${props.finalVersionId}`)
 const working = computed(() => job.value?.state === 'queued' || job.value?.state === 'running')
 const trainCount = computed(() => summary.value ? Math.max(1, Math.min(summary.value.frameCount - 1, Math.floor(summary.value.frameCount * splitRatio.value))) : 0)
+let planSeq = 0
 const intent = ref<{ settings: ExportSettings; key: string; jobId?: string } | null>(null)
 type RetryPhase = 'preview' | 'create' | 'status' | 'download'
 const retryPhase = ref<RetryPhase>('preview')
@@ -40,17 +58,50 @@ function fail(e: unknown, phase: RetryPhase) {
   retryPhase.value = phase
   console.error('[dataset.operation_failed]', { phase, finalVersionId: props.finalVersionId, exportId: job.value?.exportId, error: e })
 }
+function modeChanged() {
+  if (splitMode.value === 'video') { splitRatio.value = .7; testRatio.value = .15 }
+  else { splitRatio.value = .8; testRatio.value = 0 }
+}
+async function refreshPlan() {
+  if (!opened.value) return
+  const seq = ++planSeq
+  try {
+    const next = await api.preview(ids.value, splitOptions.value)
+    if (seq === planSeq) { summary.value = next; planError.value = '' }
+  } catch (e) {
+    if (seq !== planSeq) return
+    const f = e as { message?: string }
+    planError.value = f.message || '无法预览划分，请重试'
+    console.error('[dataset.plan_failed]', { ids: ids.value, error: e })
+  }
+}
+watch([ids, splitOptions], () => { if (opened.value && summary.value) void refreshPlan() })
+function setOverride(id: string, value: string) {
+  const next = { ...overrides.value }
+  if (value) next[id] = value as DatasetSplit; else delete next[id]
+  overrides.value = next
+}
 async function open() {
   if (props.disabled || busy.value) return
-  opened.value = true; error.value = ''; busy.value = true
+  opened.value = true; error.value = ''; planError.value = ''; busy.value = true
   try {
-    summary.value = await api.preview([props.finalVersionId])
     try {
       const stored = JSON.parse(localStorage.getItem(storageKey.value) || 'null')
-      if (stored?.settings?.finalVersionIds?.length === 1 && stored.settings.finalVersionIds[0] === props.finalVersionId) intent.value = stored
+      if (stored?.settings?.finalVersionIds?.[0] === props.finalVersionId) intent.value = stored
     } catch (e) { console.warn('[dataset.restore_failed]', e) }
     if (intent.value) {
-      format.value = intent.value.settings.format; splitRatio.value = intent.value.settings.splitRatio
+      const saved = intent.value.settings
+      format.value = saved.format; splitMode.value = saved.splitMode || 'frame'
+      splitRatio.value = saved.splitRatio; testRatio.value = saved.testRatio || 0
+      overrides.value = { ...(saved.videoSplits || {}) }; extraIds.value = saved.finalVersionIds.slice(1)
+      includeVideos.value = !!saved.includeSourceVideos
+    }
+    if (props.annotationOnly) {
+      others.value = (await api.annotationSnapshots()).items.filter(o => o.finalVersionId !== props.finalVersionId)
+      extraIds.value = extraIds.value.filter(id => others.value.some(o => o.valid && o.finalVersionId === id))
+    }
+    summary.value = await api.preview(ids.value, splitOptions.value)
+    if (intent.value) {
       if (intent.value.jobId) {
         try { job.value = await api.status(intent.value.jobId) }
         catch (e) {
@@ -93,7 +144,7 @@ async function create(retry = false) {
   if (busy.value || !summary.value || working.value) return
   error.value = ''; busy.value = true
   if (!retry) {
-    intent.value = { settings: { finalVersionIds: [props.finalVersionId], format: format.value, splitRatio: splitRatio.value }, key: createRequestId() }
+    intent.value = { settings: { finalVersionIds: ids.value, format: format.value, ...splitOptions.value, includeSourceVideos: includeVideos.value }, key: createRequestId() }
     job.value = null; persist()
   }
   if (!intent.value) { busy.value = false; return }
@@ -112,7 +163,8 @@ async function download() {
   try {
     const blob = await api.download(job.value.exportId)
     const url = URL.createObjectURL(blob), link = document.createElement('a')
-    link.href = url; link.download = `${props.mediaName}-训练数据集-${job.value.exportId}.zip`
+    const count = intent.value?.settings.finalVersionIds.length || 1
+    link.href = url; link.download = `${props.mediaName}${count > 1 ? `等${count}个视频` : ''}-训练数据集-${job.value.exportId}.zip`
     link.click(); setTimeout(() => URL.revokeObjectURL(url), 2000)
   } catch (e) { fail(e, 'download') }
   finally { busy.value = false }
@@ -144,11 +196,11 @@ onUnmounted(() => { alive = false; stopPolling(); emit('open', false); emit('bus
     {{ working ? '查看数据集导出进度' : '导出训练数据集' }}
   </button>
   <Teleport to="body">
-    <div v-if="opened" class="confirmation-page training-export-host">
+    <div v-if="opened" class="dialog-host training-export-host">
       <div class="c-modal-mask" @click.self="close">
         <section ref="dialog" class="c-modal training-export-dialog" role="dialog" aria-modal="true" aria-labelledby="training-export-title">
           <h2 id="training-export-title">{{ annotationOnly?'导出训练数据集':'导出已确认训练数据集' }}</h2>
-          <p>{{ mediaName }} · {{ annotationOnly?'使用当前已保存并确认导出的标注快照。':'仅使用当前已完成审查与对比确认的最终版本。' }}</p>
+          <p>{{ mediaName }}{{ extraIds.length ? ` 等 ${ids.length} 个视频` : '' }} · {{ annotationOnly?'使用当前已保存并确认导出的标注快照。':'仅使用当前已完成审查与对比确认的最终版本。' }}</p>
           <div v-if="summary" class="training-export-summary">
             <span><b>{{ summary.frameCount }}</b>全部帧</span>
             <span><b>{{ summary.objectCount }}</b>最终标注框</span>
@@ -167,14 +219,45 @@ onUnmounted(() => { alive = false; stopPolling(); emit('open', false); emit('bus
                 <option value="both">YOLO + COCO</option>
               </select>
             </label>
-            <label class="training-export-field">训练 / 验证集划分
-              <select v-model.number="splitRatio" aria-label="训练验证比例" :disabled="busy || working || !!error">
-                <option :value=".7">70% / 30%</option>
-                <option :value=".8">80% / 20%</option>
-                <option :value=".9">90% / 10%</option>
+            <label class="training-export-field">划分方式
+              <select v-model="splitMode" aria-label="划分方式" :disabled="busy || working || !!error" @change="modeChanged">
+                <option value="video">按视频划分（推荐）</option>
+                <option value="frame">按帧划分（仅调试）</option>
               </select>
             </label>
-            <p>预计训练 {{ trainCount }} 帧、验证 {{ summary.frameCount - trainCount }} 帧。保留空帧与未修改对象；真实图像与标签逐帧对应。按帧序划分，必要时交换样本，让训练与验证尽量都含有目标。</p>
+            <label class="training-export-field">{{ splitMode === 'video' ? '训练 / 验证 / 测试' : '训练 / 验证集划分' }}
+              <select v-model="preset" aria-label="训练验证比例" :disabled="busy || working || !!error">
+                <option v-for="[train, test] in presets" :key="`${train}/${test}`" :value="`${train}/${test}`">
+                  {{ percent(train) }} / {{ percent(1 - train - test) }}{{ splitMode === 'video' ? ` / ${percent(test)}` : '' }}
+                </option>
+              </select>
+            </label>
+            <div v-if="annotationOnly && others.length" class="training-export-videos">
+              <strong>合并其他已导出的视频</strong>
+              <small>列出你在标注页导出过、之后没有再修改的视频。标注有变化的视频需要回到该视频重新导出。</small>
+              <label v-for="o in others" :key="o.finalVersionId" :title="o.reason || ''">
+                <input v-model="extraIds" type="checkbox" :value="o.finalVersionId" :disabled="busy || working || !!error || !o.valid" />
+                <span>{{ o.name }} · {{ o.frameCount }} 帧</span><em v-if="!o.valid">{{ o.reason }}</em>
+              </label>
+            </div>
+            <div v-if="splitMode === 'video' && summary.videos" class="training-export-videos">
+              <strong>每个视频的去向</strong>
+              <label v-for="v in summary.videos" :key="v.finalVersionId">
+                <span>{{ videoName(v.finalVersionId) }} · {{ v.frameCount }} 帧</span>
+                <select :aria-label="`${videoName(v.finalVersionId)} 的划分`" :value="overrides[v.finalVersionId] || ''" :disabled="busy || working || !!error" @change="setOverride(v.finalVersionId, ($event.target as HTMLSelectElement).value)">
+                  <option value="">自动：{{ v.split ? splitNames[v.split] : '' }}</option>
+                  <option value="train">训练</option><option value="val">验证</option><option value="test">测试</option>
+                </select>
+              </label>
+            </div>
+            <p v-if="planError" role="alert" class="confirmation-error">{{ planError }}</p>
+            <p v-if="splitMode === 'video' && summary.splitFrames">
+              训练 {{ summary.splitFrames.train }} 帧（{{ videoCount('train') }} 个视频）、验证 {{ summary.splitFrames.val }} 帧（{{ videoCount('val') }} 个）、测试 {{ summary.splitFrames.test }} 帧（{{ videoCount('test') }} 个）。
+              同一视频的所有帧只进一个集合，验证和测试反映模型在没见过的视频上的效果。自动划分按视频内容固定，重复或分批导出时去向不变；视频少时比例会有偏差，可手动指定。
+              <template v-if="ids.length === 1">只导出一个视频时，整段视频进入同一个集合，{{ annotationOnly && others.length ? '请勾选上面的其他视频一起导出，或' : '请' }}之后用合并脚本与其他视频合并。</template>
+            </p>
+            <p v-else>预计训练 {{ trainCount }} 帧、验证 {{ summary.frameCount - trainCount }} 帧。按帧序划分，相邻帧几乎相同，验证指标会偏高，只适合调试。</p>
+            <label class="training-export-check"><input v-model="includeVideos" type="checkbox" :disabled="busy || working || !!error" />同时导出原视频（放在 videos/，体积会明显增大）</label>
             <p v-if="format !== 'coco'">ZIP 包含 images/、labels/、data.yaml 和版本追溯信息。解压后使用 data.yaml 训练。</p>
           </template>
           <div v-if="job" class="training-export-job" aria-live="polite">
@@ -185,7 +268,7 @@ onUnmounted(() => { alive = false; stopPolling(); emit('open', false); emit('bus
             </template>
             <template v-else-if="job.state === 'ready'">
               <strong>数据集已生成（{{ intent?.settings.format.toUpperCase() }}）</strong>
-              <p>训练 {{ job.manifest?.counts.train }} 帧 · 验证 {{ job.manifest?.counts.val }} 帧</p>
+              <p>训练 {{ job.manifest?.counts.train }} 帧 · 验证 {{ job.manifest?.counts.val }} 帧<template v-if="job.manifest?.counts.test"> · 测试 {{ job.manifest?.counts.test }} 帧</template></p>
             </template>
             <template v-else><strong>导出未完成</strong><p role="alert">{{ job.errorMessage }}</p></template>
             <small class="training-export-id">任务号：{{ job.exportId }}</small>
@@ -193,7 +276,7 @@ onUnmounted(() => { alive = false; stopPolling(); emit('open', false); emit('bus
           <p v-if="!summary && !error">正在校验最终版本…</p>
           <div class="training-export-actions">
             <button :disabled="busy" @click="close">{{ working ? '后台继续' : '关闭' }}</button>
-            <button v-if="summary && !working && job?.state !== 'invalidated'" class="c-primary" :disabled="busy || (!!error && (retryPhase === 'create' || retryPhase === 'preview'))" @click="create(false)">
+            <button v-if="summary && !working && job?.state !== 'invalidated'" class="c-primary" :disabled="busy || !!planError || (!!error && (retryPhase === 'create' || retryPhase === 'preview'))" @click="create(false)">
               {{ busy ? '正在处理…' : job ? '重新生成 ZIP' : '生成并下载 ZIP' }}
             </button>
             <button v-if="job?.state === 'ready'" class="c-primary" :disabled="busy" @click="download">下载 ZIP</button>
@@ -204,6 +287,7 @@ onUnmounted(() => { alive = false; stopPolling(); emit('open', false); emit('bus
   </Teleport>
 </template>
 
+<style src="./export-dialog.css"></style>
 <style scoped>
 .training-export-host { min-height: 0; padding: 0; }
 .training-export-dialog { width: 570px; }
@@ -215,5 +299,11 @@ onUnmounted(() => { alive = false; stopPolling(); emit('open', false); emit('bus
 .training-export-job { display: flex; flex-direction: column; gap: 10px; background: var(--surface-subtle); border: 1px solid var(--line); border-radius: 5px; padding: 12px; margin-top: 14px; }
 .training-export-job p { margin-bottom: 0; }
 .training-export-id { overflow-wrap: anywhere; }
+.training-export-videos { display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow-y: auto; padding: 10px 12px; margin: 10px 0; background: var(--surface-subtle); border: 1px solid var(--line); border-radius: 5px; }
+.training-export-videos small, .training-export-videos em { color: var(--muted); font-style: normal; }
+.training-export-videos label { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--text); }
+.training-export-videos label span { flex: 1; overflow-wrap: anywhere; }
+.training-export-videos select { background: var(--surface); border: 1px solid var(--line); border-radius: 5px; padding: 4px 8px; color: var(--text); }
+.training-export-check { display: flex; gap: 8px; align-items: center; margin: 12px 0; color: var(--text); }
 .training-export-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; margin-top: 14px; }
 </style>

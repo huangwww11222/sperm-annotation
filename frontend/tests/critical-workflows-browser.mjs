@@ -1,12 +1,9 @@
-import {legacySubmit} from './legacy-tracking-probe.mjs'
 // Works against production bundles too. No store imports or prepared annotation state.
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { useLegacyBrowserAPIs } from './legacy-browser-profile.mjs'
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright')
-// The task list is a drawer that stays closed while a task is open.
-const openTask=async(target,selector)=>{const card=target.locator(selector),toggle=target.getByTestId('toggle-workbench-library');for(let i=0;i<40;i++){if(await card.isVisible()){try{await card.click({timeout:1500});return}catch{}}else if(await toggle.isVisible())await toggle.click();await target.waitForTimeout(250)}await card.click()}
 const origin = process.env.CRITICAL_ORIGIN || 'http://127.0.0.1:5373'
 assert(['localhost', '127.0.0.1'].includes(new URL(origin).hostname), 'Local isolated server required')
 const video = path.resolve(process.env.CRITICAL_VIDEO || 'work/critical-upload.avi')
@@ -22,7 +19,7 @@ page.on('pageerror', e => errors.push(String(e)))
 page.on('response', r => { if (r.status() >= 400) requests.push({ method:r.request().method(), path:new URL(r.url()).pathname, status:r.status() }) })
 page.on('dialog', d => d.accept())
 const button = name => page.getByRole('button', { name, exact:true })
-let token, mid, sid
+let token, mid
 const api = async (url, method='GET', body) => {
   const response = await page.request.fetch(origin+'/api'+url, { method, data:body, headers:{ Authorization:'Bearer '+token, 'X-Review-Contract':'2', 'Idempotency-Key':crypto.randomUUID() } })
   assert(response.ok(), `${method} ${url}: ${response.status()} ${await response.text()}`)
@@ -142,6 +139,38 @@ try {
     for (const n of [2,3]) {await jump(n);await button('复制上一帧 C').click();await poll(async () => (await workspace()).manualAnnotations.length===n,'copied frame saved')}
   }
   check(await button('AI Tracking').count()===0, 'retired tracking button is absent')
+  // Export stays locked until the same annotation passes review.
+  check(await page.getByTestId('annotation-export').isDisabled(),'export is locked before review')
+  const reviewState=()=>api('/annotation-review/media/'+mid)
+  await page.route('**/api/annotation-review/media/*/start',route=>route.fulfill({status:503,json:{message:'injected review start failure'}}))
+  await page.getByTestId('go-review').click();await page.waitForURL('**/review');await ready()
+  await page.getByTestId('review-start').click()
+  await page.getByRole('alert').filter({hasText:'injected review start failure'}).waitFor()
+  check((await reviewState()).status==='none','a failed start shows the error and creates no review round')
+  await page.unroute('**/api/annotation-review/media/*/start')
+  await page.getByTestId('review-start').click();await page.getByTestId('review-progress').waitFor()
+  check((await reviewState()).status==='open','review starts through the real page')
+  for(let i=0;i<60;i++){
+    if(!await page.locator('[data-review-item]:not(.done)').count())break
+    const done=await page.locator('[data-review-item].done').count()
+    const action=page.getByTestId('review-current').getByRole('button',{name:/^(无误|确认无目标)$/}).first()
+    await poll(()=>action.isEnabled(),'review action ready');await action.click()
+    await poll(async()=>(await page.locator('[data-review-item].done').count())>done,'review item recorded')
+  }
+  await poll(()=>page.getByTestId('review-pass').isEnabled(),'review pass enabled')
+  await page.getByTestId('review-pass').click();await page.getByTestId('review-changes').waitFor()
+  check((await reviewState()).status==='passed','every checklist item handled, then an explicit pass')
+  check(await page.getByRole('button',{name:'对比确认',exact:true}).count()===0,'workflow has only annotation and review navigation')
+  for(const [width,height] of [[1366,768],[1180,760],[760,760],[390,760]]) {
+    await page.setViewportSize({width,height})
+    for(const theme of ['light','dark']) {
+      if(await page.locator('html').getAttribute('data-theme')!==theme)await button(theme==='dark'?'切换深色主题':'切换浅色主题').click()
+      check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),`review page has no horizontal page overflow ${width} ${theme}`)
+      await page.screenshot({path:`output/playwright/review-${width}-${theme}.png`,animations:'disabled',fullPage:width<960})
+    }
+  }
+  await page.setViewportSize({width:1366,height:768})
+
   let lostSnapshot=true;const snapshotRequests=[]
   await page.route('**/api/datasets/annotations/*/snapshot',async route=>{
     snapshotRequests.push({key:route.request().headers()['idempotency-key'],body:route.request().postDataJSON()})
@@ -155,77 +184,21 @@ try {
   await page.getByRole('dialog',{name:'导出训练数据集'}).waitFor()
   check(snapshotRequests.length===2&&snapshotRequests[0].key===snapshotRequests[1].key&&JSON.stringify(snapshotRequests[0].body)===JSON.stringify(snapshotRequests[1].body),'snapshot response loss refresh replays original key and body')
   await page.unroute('**/api/datasets/annotations/*/snapshot')
-  await page.getByRole('dialog',{name:'导出训练数据集'}).waitFor()
   await page.screenshot({path:'output/playwright/direct-annotation-export-settings.png'})
-  const directDownload=page.waitForEvent('download')
+  const download=page.waitForEvent('download')
   await button('生成并下载 ZIP').click()
-  const directFile=await directDownload
-  await directFile.saveAs('output/playwright/direct-annotation-dataset.zip')
-  check(true,'annotation exports a real training ZIP without creating a review task')
+  const file=await download;const bytes=fs.readFileSync(await file.path())
+  check(bytes.subarray(0,2).toString()==='PK','annotation to review produces a real downloadable training ZIP')
   await button('关闭').click()
-  await page.reload();await ready();await button('导出训练数据集').click()
-  await page.getByRole('dialog',{name:'导出训练数据集'}).waitFor()
-  check(await page.getByRole('dialog',{name:'导出需要处理'}).count()===0,'complete annotations open export settings without an extra confirmation dialog')
-  await button('下载 ZIP').waitFor();await button('关闭').click()
-  sid=(await legacySubmit(page,token,mid)).session.id
-  check((await api('/review/sessions/'+sid)).progress.submittedFrames===0, 'submission does not pre-submit B frames')
-  if(modelMode==='simulated')await page.route('**/api/review/sessions/*/evidence',route=>route.fulfill({status:503,json:{message:'injected evidence read failure'}}))
-  await page.goto(origin+'/review'); await openTask(page,`[data-session-id="${sid}"]`); await page.locator('.review-drawing').waitFor()
-  if(await button('继续编辑').count()) await button('继续编辑').click()
-  if(modelMode==='simulated') {
-    await page.getByRole('alert').filter({hasText:'疑点读取失败'}).waitFor()
-    check(await button('完成视频审查').isDisabled(),'evidence load failure cannot look like an empty successful queue')
-    await page.unroute('**/api/review/sessions/*/evidence')
-    await page.route('**/api/review/sessions/*/evidence',route=>route.fulfill({status:200,json:{groups:null}}))
-    await button('重试读取疑点').click();await page.getByRole('alert').filter({hasText:'疑点读取失败'}).waitFor()
-    check((await api('/review/sessions/'+sid)).progress.submittedFrames===0,'malformed successful evidence response never approves frames')
-    await page.unroute('**/api/review/sessions/*/evidence');await button('重试读取疑点').click()
-    await page.getByRole('region',{name:'集中审查疑点'}).count() // Region remains in the normal inspector.
-    await poll(async()=>await page.locator('.review-doubt').count()>0,'detector uncertainty enters review queue')
-    const doubtStart=(await api('/review/sessions/'+sid+'/evidence')).groups[0].startFrame+1
-    await page.locator('.review-doubt').first().click()
-    await poll(async()=>await page.getByRole('textbox',{name:'跳转帧号',exact:true}).inputValue()===String(doubtStart)&&await page.getByRole('textbox',{name:'跳转帧号',exact:true}).isEnabled(),'doubt opens its original frame')
-    check((await page.locator('.review-drawing [data-box]').count())>0,'selecting a doubt keeps complete frame annotations visible')
-    await page.screenshot({path:'output/playwright/concentrated-review-doubt.png',animations:'disabled'})
-    for(const [width,height] of [[1366,768],[1180,760],[760,760],[390,760]]) {
-      await page.setViewportSize({width,height})
-      for(const theme of ['light','dark']) {
-        if(await page.locator('html').getAttribute('data-theme')!==theme)await button(theme==='dark'?'切换深色主题':'切换浅色主题').click()
-        check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),`concentrated review has no horizontal page overflow ${width} ${theme}`)
-        await page.screenshot({path:`output/playwright/concentrated-review-${width}-${theme}.png`,animations:'disabled',fullPage:width<960})
-      }
-    }
-    await page.setViewportSize({width:1366,height:768})
-    await button('进入专注').click();await poll(async()=>await page.locator('.review-page').getAttribute('data-focused')==='true','concentrated review enters focus')
-    check(await page.locator('.review-doubt').first().isVisible(),'doubt selection remains available in focus')
-    await page.screenshot({path:'output/playwright/concentrated-review-focus.png',animations:'disabled'})
-    await button('退出专注').click()
 
-    // Return through the actual frame navigation without creating a submission.
-    const jumpInput=page.getByRole('textbox',{name:'跳转帧号',exact:true})
-    await jumpInput.fill('1');await jumpInput.press('Enter')
-    await poll(async()=>await jumpInput.isEnabled()&&await jumpInput.inputValue()==='1','return to first frame after doubt navigation')
-    await poll(async()=> (await api('/review/sessions/'+sid)).progress.submittedFrames===0,'doubt navigation does not approve frames')
-  }
-  const r=await page.locator('[data-box="1"] rect').boundingBox(); assert(r)
-  await page.mouse.move(r.x+r.width/2,r.y+r.height/2);await page.mouse.down();await page.mouse.move(r.x+r.width/2+8,r.y+r.height/2+3,{steps:4});await page.mouse.up()
-  await poll(async ()=>(await api(`/review/sessions/${sid}/frames/0`)).hasDraft,'B draft saved')
-  check((await api('/review/sessions/'+sid)).progress.submittedFrames===0,'B draft does not count as submitted')
-  for(let i=0;i<3;i++) {await page.getByTestId('submit-frame').click();await poll(async ()=>(await api('/review/sessions/'+sid)).progress.submittedFrames===i+1,'B frame submitted')}
-  await button('继续检查').click()
-  check((await api('/review/sessions/'+sid)).state==='in_progress','100 percent B progress still requires explicit completion')
-  await button('完成视频审查').click();await button('确认完成视频审查').click()
-  await poll(async ()=>(await api('/review/sessions/'+sid)).state==='reviewed','B explicitly finished')
-  const reviewed=await api('/review/sessions/'+sid)
-  check(reviewed.workflow==='concentrated' && !!reviewed.finalVersionId,'explicit review completion creates the accepted final version without a C operation')
-  check(await page.getByRole('button',{name:'对比确认',exact:true}).count()===0,'new workflow has only annotation and review navigation')
-  await page.getByTestId('export-training').waitFor();await page.getByTestId('export-training').click()
-  const download=page.waitForEvent('download');await button('生成并下载 ZIP').click()
-  const file=await download;const bytes=fs.readFileSync(await file.path());check(bytes.subarray(0,2).toString()==='PK','annotation to review produces a real downloadable training ZIP')
-  await button('关闭').click();await button('重新审查本帧').click();await button('确认重新审查').click()
-  await poll(async ()=>(await api('/review/sessions/'+sid)).state==='in_progress','reopen frame returns to review')
-  await poll(async()=>await page.getByTestId('export-training').count()===0,'reopening review removes current export entry after response')
-  check(await page.getByTestId('export-training').count()===0,'reopening review closes training export again')
+  // Editing after the pass (here, on the review page itself) makes it stale.
+  await jump(1);await page.locator('.shell-rail').click({position:{x:22,y:300}});await page.keyboard.press('v')
+  const target=await page.locator('.annotation-box').first().boundingBox();assert(target)
+  await page.mouse.move(target.x+target.width/2,target.y+target.height/2);await page.mouse.down()
+  await page.mouse.move(target.x+target.width/2+8,target.y+target.height/2+3,{steps:4});await page.mouse.up()
+  await poll(async()=>(await reviewState()).status==='stale','edit after pass makes review stale')
+  await poll(async()=>await page.getByTestId('annotation-export').isDisabled(),'export locks after edit')
+  check(true,'an edit after passing locks export until re-review')
   check(errors.length===0,'no uncaught browser errors through the full user lifecycle')
   await page.screenshot({path:'output/playwright/critical-workflows.png'})
   await import('./endpoint-tracking-browser.mjs')

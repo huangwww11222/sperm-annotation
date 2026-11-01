@@ -151,18 +151,19 @@ def test_committed_crash_cleanup_does_not_restore_over_later_edits(restart_case,
     assert annotation_state.read_state(directory)["revision"] == 5
 
 
-def test_busy_and_submitted_sources_reject_without_truncation(restart_case, monkeypatch):
+def test_busy_source_rejects_without_truncation_and_old_reviews_do_not_lock(restart_case, monkeypatch):
     from app.review_repository import create_review_session, freeze_baseline, upsert_media_revision
     directory = restart_case[1]
     original = (directory / "tracker_results.json").read_bytes()
     monkeypatch.setattr(main, "TASKS", {"busy": {"status": "running"}})
     assert restart(restart_case).status_code == 409
+    assert (directory / "tracker_results.json").read_bytes() == original
+    # Retired review history no longer locks tracking restarts.
     monkeypatch.setattr(main, "TASKS", {})
     mid = upsert_media_revision("control-video", "c" * 64, 10, 100, 100, 30, 4)
     baseline = freeze_baseline(mid, "control-video", 1, [dict(frameIndex=i, coverage="empty", objects=[]) for i in range(4)])
     create_review_session(baseline["id"])
-    assert restart(restart_case).status_code == 409
-    assert (directory / "tracker_results.json").read_bytes() == original
+    assert restart(restart_case).status_code == 200
 
 
 @pytest.mark.parametrize("fault", ["no_seed", "no_result", "corrupt_result", "fake_pause"])

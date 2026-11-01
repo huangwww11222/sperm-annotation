@@ -12,6 +12,31 @@ from .review_evidence import valid_box
 
 log = logging.getLogger('review.tracking')
 
+# Review-only tolerance, in native pixels and relative to the smaller head.
+# Raw forward/reverse observations and identity matching are never changed.
+ENDPOINT_REVIEW_TOLERANCE = dict(version=1, iou=.5, centerRatio=.35,
+                                minCenterPx=2., containment=.85, maxSideRatio=2.)
+
+
+def endpoint_disagreement_requires_review(finding):
+    """Padding around the same head is not an identity/location disagreement.
+
+    Unknown geometry remains reviewable. Independent lost/shared-head findings
+    are deliberately outside this function and must never be hidden by it.
+    """
+    if finding.get('kind') != 'endpoint_disagreement':return True
+    a,b=finding.get('bbox'),finding.get('reverseBox')
+    if not valid_box(a) or not valid_box(b):return True
+    policy=ENDPOINT_REVIEW_TOLERANCE
+    if iou(a,b)>=policy['iou']:return False
+    aw,ah=a[2]-a[0],a[3]-a[1];bw,bh=b[2]-b[0],b[3]-b[1]
+    distance=math.hypot((a[0]+a[2]-b[0]-b[2])/2,(a[1]+a[3]-b[1]-b[3])/2)
+    inter=max(0,min(a[2],b[2])-max(a[0],b[0]))*max(0,min(a[3],b[3])-max(a[1],b[1]))
+    close=(distance<=max(policy['minCenterPx'],policy['centerRatio']*min(aw,ah,bw,bh))
+           and inter/min(aw*ah,bw*bh)>=policy['containment']
+           and max(aw/bw,bw/aw,ah/bh,bh/ah)<=policy['maxSideRatio'])
+    return not close
+
 
 def validate_endpoints(workspace, head, tail, width, height, count):
     if count < 2 or not head:

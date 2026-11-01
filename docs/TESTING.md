@@ -1,14 +1,18 @@
 # 测试与日志排查
 
-## 2026-10-29 当前入口
+## 2026-11-01 当前入口
 
-当前新流程为标注页直接导出；旧单向追踪和送审UI已移除，兼容用例通过命名明确的 legacy-tracking-probe / authenticated legacy complete API 验证底层恢复；不能将其记为新UI入口测试。新主流程必须从真实画框、首尾追踪到直接ZIP下载。test_annotation_export.py 覆盖来源完整性、显式空帧、版本/账号、原键重放、真实原视频ZIP与编辑后旧下载撤销。
+当前流程为标注 → 审查 → 导出。审查是标注页的审查模式；旧审查页、对比确认页及其浏览器测试已删除（A/B/C/F 数据层的后端测试仍保留，因为统计/审计导出读取这些历史表）。新主流程必须从真实画框、首尾追踪、在审查页完成清单并通过，到下载 ZIP。
 
-测试需要证明目标行为和核心边界；不要为纯文案反复跑 GPU，也不要以构建通过代替交互验证。
+- `test_annotation_review.py`：清单五类项、计数突变与疑点范围、随机抽检随帧数缩放、整帧检查点、加严抽检只追加一次、未知帧必须处理、通过时的修改记录与检查人、通过后改动变为 stale、重新审查只列改动、未保存工作区返回 notReady、HTTP 往返与错误码；反向独有轨迹的连续/断帧/贴边/面积/单帧、检测器单点丢弃与静止分类、检测候选与反向轨迹一致性、采用编号冲突、轨迹中途结束、`not_target` 校验与同事务排除/撤销、最近操作人、状态缓存按 revision 失效。
+- `test_annotation_export.py` 覆盖 `review/decisions.jsonl`：有 `not_target` 判断时行数和字段正确，没有判断时 manifest count=0 且 ZIP 不含文件。 `test_training_export.py` 的合并脚本用例验证混合多视频包与新版重复视频的两种输入顺序：只保留实际选中视频版本的判断，不重复追加其他视频的行，并拒绝判断文件缺失或行数不符。
+- `test_endpoint_review_tolerance.py`：小头框低IoU但包含/近中心、原图分辨率缩放一致、真正偏移/严重尺寸变化、坏证据与独立身份风险保留；旧清单只升级一次、普通检查保留、新风险不继承旧勾选、历史归档、已通过轮次不重写及重建失败/恢复。`training-export-browser.mjs` 通过专用隔离夹具注入旧清单和小差异/真实偏移，验证真实刷新后去噪、保留强风险定位、再次刷新不复活/重复，截图 `endpoint-review-tolerance.png`；同一隔离夹具为 `ux-video` 第 20–24 帧写入尾帧对象 9 的反向独有框，浏览器实际点击“采用这段轨迹”，核对工作区五帧新增同编号人工框及 `origin=review_adopted`、检查结果改为 fixed，并在改动第 20 帧后的新一轮清单中确认不再出现。`training-export-browser.mjs` 还通过真实补框/保存/审查链路验证任务D：模拟模型返回有效框后只在当前帧新增一个人工框且保存后才记fixed；再次命中已有框不重复新增、不改检查时间；模型503保留错误、人工补框提示和原数据/检查结果。夹具清理由正常撤销与保存完成。`workbench-consistency-browser.mjs` 的Z使用该套件真实存在的反向漏标项，先展开分组，不假定一定有检测器路径。`workbench-consistency-browser.mjs` 验证卡片放大图有像素、选择工具点击圆圈放大且圆圈在视口内、Esc 恢复倍率和滚动、画框工具不触发放大，以及 `1/2/3/N/Z`、输入框隔离、已检查项“改判”入口和另一账号近期操作提示。`annotation_ux_fixture` 的末帧带显式边界退出，避免把正常清空的末帧误当轨迹中断。仍须运行完整七组回归；模型为模拟，真实业务样本仅在副本中做保存结果回放。
+- `test_annotation_export.py`：导出快照先要求审查通过（REVIEW_REQUIRED），审查确认无目标的帧作为显式空帧；来源完整性、版本/账号、原键重放、真实原视频 ZIP 与编辑后旧下载撤销。
+- `test_media_reimport.py` / `test_tracking_restart.py`：旧审查历史不再锁住覆盖重标和重新追踪。
 
 ## 固定回归入口与发布门禁
 
-修改工作区加载、认证、持久化/重试、公共 API、缓存、依赖或构建时，在专项测试之外必须运行下列固定入口。它从新的隔离目录启动自己的服务，顺序生成各套夹具，执行全部十组浏览器回归，结束后只关闭自己启动的进程。不能手工挑掉失败的套件后宣称完整回归通过。
+修改工作区加载、认证、持久化/重试、公共 API、缓存、依赖或构建时，在专项测试之外必须运行下列固定入口。它从新的隔离目录启动自己的服务，顺序生成各套夹具，执行全部七组浏览器回归，结束后只关闭自己启动的进程。不能手工挑掉失败的套件后宣称完整回归通过。
 
 ```bash
 npm ci --prefix frontend
@@ -18,9 +22,9 @@ python3 scripts/run_browser_regression.py --python work/review-venv/bin/python -
 
 也可用本机 Chrome：`--channel chrome`。CI 使用已构建的 Python 3.12 后端镜像：`python3 scripts/run_browser_regression.py --backend-image annotation-ci-backend:cpu --channel chromium`。镜像模式仍使用独立 `work/e2e-confirm-ux-regression-*` 数据和单后端进程。`--critical-only` 或可重复的 `--only <套件名>` 仅用于定位问题，不能同时使用，也不能用于完整验收。例如 `--only workbench-consistency --only independent-integrity` 只运行这两组；最终验收须去掉筛选参数重新运行全部十组。
 
-`run.json` 的 `requiredSuites` 始终列出十组固定范围，`selectedSuites` 记录本次实际选择，`scope` 区分完整与诊断运行。子集可记录本次 `status: passed`，但 `fullRegressionPassed` 仍为 `false`；只有未使用筛选参数的完整运行全部通过时才为 `true`。不能拼接分批通过记录代替同一批源码的一次完整回归。运行器在占用共享夹具锁前校验参数，初始化失败也清理自己取得的锁；其他进程持有的锁不得删除。
+`run.json` 的 `requiredSuites` 始终列出七组固定范围，`selectedSuites` 记录本次实际选择，`scope` 区分完整与诊断运行。子集可记录本次 `status: passed`，但 `fullRegressionPassed` 仍为 `false`；只有未使用筛选参数的完整运行全部通过时才为 `true`。不能拼接分批通过记录代替同一批源码的一次完整回归。运行器在占用共享夹具锁前校验参数，初始化失败也清理自己取得的锁；其他进程持有的锁不得删除。
 
-固定套件：`critical-workflows`、`workflow-transitions`、`annotation-ux`、`tracking-recovery`、`review-failure`、`confirmation-failure`、`confirmation`、`training-export`、`workbench-consistency`、`independent-integrity`。每组前按依赖重建夹具；不得并行消费或重置共享夹具。执行记录、版本/未提交文件清单、各组退出状态、耗时与日志保存在该次隔离目录；失败会非零退出并记录尚未执行的范围，不能把旧报告当成本次结果。CI 保留服务/套件日志及截图子目录；夹具 JSON 可能包含 token，禁止上传。
+固定套件：`critical-workflows`、`workflow-transitions`、`annotation-ux`、`tracking-recovery`、`training-export`、`workbench-consistency`、`independent-integrity`。每组前按依赖重建夹具；不得并行消费或重置共享夹具。执行记录、版本/未提交文件清单、各组退出状态、耗时与日志保存在该次隔离目录；失败会非零退出并记录尚未执行的范围，不能把旧报告当成本次结果。CI 保留服务/套件日志及截图子目录；夹具 JSON 可能包含 token，禁止上传。
 
 容器模式按宿主 UID/GID 生成夹具，避免 Linux CI 中 root 文件阻止后续翻译或清理。`tracking-recovery` 的模拟结果与暂停夹具通过 `TEST_PYTHON` 在后端相同运行环境原子发布；不要从宿主机替换 Docker 共享目录文件后假定容器立即可读，也不要用固定等待放宽故障断言。刷新断言须等待目标原帧、图像及结果加载完成，单看初始 idle 不等于恢复完成。运行记录注明后端模式、解释器/镜像及浏览器；结束时将实际后端 `data/logs/review.log*` 脱敏复制到回归目录的 `review*.log`，与现有 CI 日志一并保留。
 
@@ -32,7 +36,7 @@ python3 scripts/run_browser_regression.py --python work/review-venv/bin/python -
 
 后端 `test_independent_integrity_audit.py` 保留独立审查用例；`test_integrity_recovery.py` 补 seed 临时写/替换失败、坏历史来源、合法点与像素边界、同事件循环慢盘上传时读取/另一视频写入、查重途中删除的竞态、长期反馈回执体积及重置后的准确重放。前端 `tracking-result.test.mjs` 通过 `npm run test:annotation` 校验结构故障组合，不能只靠静态源码断言。规范 ID 校验后，路径探针直接构造不安全目标；原子 seed 修复后，磁盘故障注入同时覆盖目标和临时文件，保留所有旧数据与错误断言。
 
-`critical-workflows-browser.mjs` 不导入前端 store，也不预先生成工作区、AI 结果或 A/B/C 任务：真实登录 → 上传原视频 → 画框保存/刷新 → 保存成功但响应丢失 → 刷新沿用原键/原正文重放 → 再次画框保存/刷新 → 删除重传 → 取消/覆盖重标 → 追踪 → 送审 → B 改框、逐帧提交、显式完成 → C 选择、显式完成 → 下载真实 ZIP → 重新确认关闭导出。夹具只产生输入视频。CI 还在实际生产前端镜像上运行同一用例的 CPU 模式，并启用旧浏览器 API 兼容检查，避免只验证 Vite 开发页面。
+`critical-workflows-browser.mjs` 不导入前端 store，也不预先生成工作区、AI 结果或审查记录：真实登录 → 上传原视频 → 画框保存/刷新 → 保存成功但响应丢失 → 刷新沿用原键/原正文重放 → 再次画框保存/刷新 → 删除重传 → 取消/覆盖重标 → 追踪 → 导出被锁 → 去审查（注入开始失败后重试）→ 逐项检查 → 审查通过 → 快照响应丢失后刷新原键重放 → 下载真实 ZIP → 审查页内改框使通过失效并锁住导出。夹具只产生输入视频。CI 还在实际生产前端镜像上运行同一用例的 CPU 模式，并启用旧浏览器 API 兼容检查，避免只验证 Vite 开发页面。
 
 `training-export` 固定套件同时执行 `statistics-export-checks.mjs`：从真实 A/B/C/F 数据生成全量统计 ZIP，核验文件校验和、空帧和历史/当前 F、密码与原视频排除；验证匿名/跨账号下载拒绝、创建提交后响应丢失及刷新原键重放、查询失败恢复、下载原包重试、过期重新生成，并检查 1366×768 / 1180×760 浅深主题、弹窗焦点和共用使用说明。它使用 Chrome 93 API 兼容配置，不执行模型推理。统计 ZIP 后端专项用例见 `test_statistics_export.py`；仍须运行全部十组，不能用此新增场景代替固定门禁。
 
@@ -47,14 +51,14 @@ python3 scripts/run_browser_regression.py --python work/review-venv/bin/python -
 | 认证/首次进入 | 真实登录、空服务器、默认本地图片、首次上传可操作 | 账号变化后的锁只保护需要重新读取的服务器数据，不能永久锁住本地图片和导入 |
 | AI 结果读取 | 尚未生成、有效零对象、有对象、人工与 AI 合并 | 断网、超时、404 媒体缺失、500、200 坏 JSON、已生成文件丢失；保留数据，恢复后可再次操作 |
 | 列表/详情/原始结果下载 | 文件/标记四种组合，列表不读取全量 JSONL；旧文件首次读取补记 | marker 存在而结果丢失均明确异常；恢复真实文件后各端点恢复；坏格式/几何不能下载为成功结果 |
-| 删除/覆盖 | 删除后重传、覆盖后刷新和新标注保存、取消保留旧数据 | 拒绝已送审覆盖、版本冲突、提交成功但响应丢失的原键重放 |
-| 工作流转换 | 草稿→逐帧提交→显式完成 B→逐项选择→显式完成 C→真实导出 | 保存失败不增进度、不离页；100% 不自动完成；重审/重新确认立即关闭旧导出 |
+| 删除/覆盖 | 删除后重传、覆盖后刷新和新标注保存、取消保留旧数据；旧审查历史不阻止覆盖 | 版本冲突、提交成功但响应丢失的原键重放 |
+| 审查与导出 | 开始审查→逐项检查/就地纠错→显式通过→真实导出；改动后重新审查只列改动 | 开始/检查失败不产生假进度；全部勾完前不能通过；通过后任何改动立即锁住导出、旧包停止下载 |
 
 - 新增读取失败保护时，必须同时证明健康空态不会被锁；新增重试时，既测试持续故障，也测试恢复后再次完成实际操作。
 - 回归缺陷先补行为测试，并记录修复前的预期失败；不能用搜索某段源码存在代替行为验证。性能夹具预置结果可以用于测量，但不能替代全新上传的验收。
 - 断言检查实际画框/保存/刷新后的数据和用户下一步能否完成，不能止于“接口返回 200”“页面显示空列表”“错误条消失”。不能为了通过而删除保护断言；业务契约改变时同时解释并更新正常/失败两侧用例。
 - CI 的浏览器步骤与后端/单元测试同为发布条件，不使用 `continue-on-error`。发布/交付说明分别列出实际通过、失败、未执行及模拟范围。分支保护是否将工作流设为必需检查属于仓库设置，不能仅凭本地 YAML 声称已经启用。
-- 子套件打印 PASS 但运行器整体退出非零时，只能记录该子套件通过及进程/清理故障，不能判定完整验收通过；修正执行环境后重跑取得实际退出码。`--critical-only` 也不能代替十组固定回归。
+- 子套件打印 PASS 但运行器整体退出非零时，只能记录该子套件通过及进程/清理故障，不能判定完整验收通过；修正执行环境后重跑取得实际退出码。`--critical-only` 也不能代替七组固定回归。
 
 ## 先隔离数据
 
@@ -71,14 +75,16 @@ PYTHONPATH=backend work/review-venv/bin/python -m pytest backend/tests -q
 npm run test:workbench --prefix frontend
 npm run test:compatibility --prefix frontend
 npm run test:annotation --prefix frontend
-npm run test:review --prefix frontend
-npm run test:confirmation --prefix frontend
 npm run build --prefix frontend
 ```
 
 构建包含类型检查。已有混合静态/动态导入和 Python 弃用警告应与新错误区分，不能因为日志有 warning 就猜测业务失败。
 
 ## 按修改选择测试
+
+审查信号/轻量标记专项：`test_review_actionable_signals.py` 验证身份证据保留但不生成项、人工框所在帧豁免（独立尾ID转换前后均覆盖）、AI其他帧仍检查、已有框候选不重复提示、每项3对象上限及逐帧位置、密集连续分组不漏项、检查失败明确保留。`test_endpoint_review_tolerance.py` 验证候选对应的几何容差和旧清单升级、历史/检查保留、失败回滚及恢复。前端 `review-presentation.test.mjs` 验证逐帧强调、人工豁免、候选圆圈与短标签；固定 `training-export` 套件通过隔离旧清单 fixture 验证升级、排序、真实SVG不增加框、漏标只显示圆圈、普通/专注/窄屏浅深主题、几何不变及后续纠错、审查通过与导出。模型模拟，不代表算法召回率验收。完整七组入口仍必须通过。 `test_annotation_review.py` 补充同位置连续4帧合并、同帧5处编号和九宫格方位、远距离/同帧邻近双候选不混合、断帧/5帧上限、候选多框改列关联及原始证据不变；候选对应与首尾容差解耦，坏坐标保持检查失败。`review-location-checks.mjs` 随固定training-export执行：实际界面先保存人工修框，夹具只原子更新隔离Tracking证据及旧清单，不直接覆盖运行中工作区；核验自动放大、手动倍率保留、强制左上视野后右下候选落在可见画布（含elementFromPoint）、已可见不移动、序号/列表一致、前后切换、读帧失败隐藏标记且不定位旧图、显式重试恢复、迟到帧不抢定位、几何与检查进度不变，审查专注中定位可用，检查面板收起可回全宽并可重新展开。
+
+
 
 三路综合专项：`test_joint_tracking.py` 验证正向漂移实际修框、反向漂移保留正确输出、检测细化、已知身份找回、两侧缺失不补假框、检测缺失不删目标、内部未知候选不扩范围、自然重叠不合并、人工框与删除优先、30对象身份不变、全输入结构验证后才修改、原图/检测失败释放与恢复，以及 worker 失败保留几何/记录日志、缺端点启动不写seed。`test_endpoint_tracking.py` 仍验证旧仅核验兼容。固定 critical-workflows 的 endpoint-tracking-browser 验证 combineResults 原键恢复、实际中间几何来自综合而非复制正向、画面只有一套框、微调/撤销、整段删除/刷新/撤销、旧后端缺综合结果不假成功、送审冻结后的简短状态。浏览器模型均模拟；专项不能替代完整十组固定回归。
 
@@ -92,11 +98,10 @@ npm run build --prefix frontend
 
 服务器组件验证样例位于本地 `work/endpoint-tracking/`，记录已有1.mp4短片段11帧/4对象的真实SAM3反追。其尾帧提示是已有AI观察测试夹具，不是用户人工金标；只验证模型/API/窗口映射可运行，不代表首尾人工标注后的查错准确率、全视频或医院验收。后续质量验收需要真实人工首尾与独立中间帧核对。
 
-三页观看操作专项：`npm run test:workbench --prefix frontend` 验证键位、4K适应边界和指针锚点；固定 `workbench-consistency` 调用 `workbench-shortcuts-checks.mjs`，在真实浏览器分别测A/B/C的加减/适应/组合滚轮、Space/中键平移、H显隐、F专注与G跳转、只读观看、输入/IME/帮助和导出弹窗隔离。B/C观看前后校验真实API几何/提交/决定不变；拖框/角点开始后不得被缩放打断，手势失焦/离页/弹窗复位，C局部倍率不改变全帧倍率。复现先保留旧B/C快捷键不改变图像尺寸的失败，再跑恢复与完整十组。截图保留1366/1180浅深及窄窗，使用占位滚动条（不使用--hide-scrollbars）验证ResizeObserver不会重置手动倍率。
+观看操作专项：`npm run test:workbench --prefix frontend` 验证键位、4K 适应边界和指针锚点；标注页快捷键由 `annotation-ux`、`annotation-ui-consistency` 覆盖，审查模式复用同一画布与键位。（原跨 A/B/C 三页的 `workbench-shortcuts-checks.mjs` 已随旧页面删除。）
 
-审查补标/删除/退回人工专项：`test_review_object_edits.py` 与 `test_confirmation_presence.py` 先在旧实现记录预期失败，再成对验证正常与故障恢复。覆盖稳定身份/跨帧补标、真实 rare sperm 类别继承/空A默认/多类必须选择、删除只影响本帧、撤销恢复、零净差量、分配ID/写入/退回事务失败与原键重放、旧协议防擦除、A及审查历史不变、退回后重送新任务、C接受/拒绝新增及删除、空帧与真实YOLO/COCO标签、缺席决定审计、重审继承及旧训练包门禁。前端 `test:review` 含 `review-presence.test.mjs` 与 `review-intent.test.mjs`（真实Vue函数、确定性API桩验证两阶段意图，不代替浏览器），`test:confirmation` 含null侧共享裁剪与选择文案测试。
+历史 A/B/C/F 数据层专项：`test_review_workflow.py`、`test_review_object_edits.py`、`test_confirmation_workflow.py`、`test_confirmation_presence.py` 等继续验证数据层不变量（统计/审计导出读取这些表）；它们不再对应任何页面，删除路由的 HTTP 用例已移除。
 
-固定 `workflow-transitions` 还加载独立 `review_presence_browser_fixture.py` 并串行执行 `review-presence-browser.mjs`。使用合成真实视频、真实前后端和数据库，验证画框补标/关联已有对象、删除恢复/撤销/刷新、失败原键重试、逐帧提交/完成B、C八种存在性选择、真实ZIP内容及空标签、撤回不领取、整段退回后新A/任务、C本帧重审与历史留存；补标两阶段恢复额外覆盖：reserve成功丢响应、draft成功丢响应、刷新原键原正文重放、另一窗口已修框时不重新基于最新版本构造旧draft、旧回执后的当前态读取失败仍保留原意图。两窗口浅深主题及窄窗口截图保存在 `output/playwright/review-presence/`。它不运行模型推理，不能称为医院GPU验证。仍需完整十组固定回归，专项不能替代。
 
 
 整帧人工检查点专项：`test_tracking_frame_checkpoint.py` 验证一次确认含未报异常对象、已保存人工修框/新框优先、删除排除、固定基准替换与恢复、缺失/坏框/错误帧/版本冲突不部分提交、原子发布失败及原键恢复。固定 `independent-integrity` 的 tracking-policy 场景验证真实页面一次确认全部对象、刷新及续追；只有模型预测模拟。Windows 可使用 `backend/.venv/Scripts/python.exe scripts/run_browser_regression.py --python backend/.venv/Scripts/python.exe --channel chrome`，建议设置 `PYTHONUTF8=1`；运行器使用本机解释器、Vite 和自己启动的进程树，不终止已有开发服务。
@@ -136,19 +141,15 @@ work/review-venv/bin/python scripts/replay_tracking_pause_cases.py work/replay-i
 | 删除范围、人工正常反馈、重试 | `test:annotation`（含写入队列重放/账号隔离/版本冲突）；`test_annotation_controls.py`、`test_anomaly_detector.py`、`test_tracking_adaptive_feedback.py` | `annotation-delete-feedback-browser.mjs`（67；反馈/删除真后端，GPU模拟） |
 | Tracking 调用/完成定位 | seed、rewind、timing、manual baseline、frontend tracking contract pytest | `annotation-tracking-ui.mjs`（14，模拟响应，无真实 GPU） |
 | 4K 准备、保存锁与失败恢复 | `test_tracking_performance.py`、`test_video_timing.py`、`test_tracking_adaptive_feedback.py`；真实 4K 连续窗口/坐标、慢模型期间读写、启动重放、预览缓存和原子发布失败 | `tracking-recovery-browser.mjs`（25；真实 4K 视频/保存/抽帧，模拟模型与网络故障，查询恢复/原键重放/冲突备份） |
-| 工作区初始状态、结果生命周期、删除重传 | `test_tracking_result_lifecycle.py`；尚未生成/零对象/损坏/丢失、重置回滚、缺失结果不能当空帧送审 | 固定十组回归；`critical-workflows-browser.mjs` 必须从真实登录和原视频上传开始，不预置结果 |
+| 工作区初始状态、结果生命周期、删除重传 | `test_tracking_result_lifecycle.py`；尚未生成/零对象/损坏/丢失、重置回滚、缺失结果不能当空帧送审 | 固定七组回归；`critical-workflows-browser.mjs` 必须从真实登录和原视频上传开始，不预置结果 |
 | 帧解码、追踪内存、大量修改项性能 | `test_video_frames.py`（逐帧身份/随机访问/失败 seek/缓存限量与原子失败/真实 processor 输入一致/掩码几何一致/首次模型 dtype）、`test_confirmation_performance.py`（5,000 项/紧凑回执/升级前重放/精确进度） | `performance-browser.mjs`（27；外部真实 4K 副本、50,000 AI 对象、初次读取失败/坏 JPEG 原位重试、C 同帧图像复用/增量回复/并发版本跳变） |
 | Chrome 93 / HTTP、素材删除 | `test:compatibility`、`test_media_deletion.py` | `browser-compat-media.mjs`；下述旧 API 回归模式 |
-| 送审 | `test_review_completion.py` | `review-ingress-browser.mjs`（6） |
-| 撤回、重复视频覆盖、本帧重审 | `test_workflow_transitions.py`、`test_media_reimport.py`、`test_tracking_adaptive_feedback.py`；撤回/领取竞争、回滚/重放、导出门禁和审计继承 | `workflow-transitions-browser.mjs`（37；真实源视频/接口，覆盖成功响应丢失、旧窗口待重试草稿、新轮次人工记录/seed，两尺寸浅深主题） |
-| B 草稿/提交/恢复 | `test_review_workflow.py`、`test:review` | `review-browser.mjs`（27）、`review-failure-browser.mjs`（19） |
-| C 选择/恢复/最终版本 | `test_confirmation_workflow.py`、`test:confirmation` | `confirmation-browser.mjs`（40）、`confirmation-failure-browser.mjs`（34） |
-| 训练导出/门禁/版本 | `test_training_export.py`、`test_quality_audit.py`、`test_export_audit_script.py` | `training-export-browser.mjs`（29） |
-| 全窗口专注、视频进度 | 上述对应页面回归、构建 | `workspace-layout-browser.mjs`（49） |
-| 三页工作台一致性、紧凑对象导航、审查缩放 | 上述对应页面回归、构建 | `workbench-consistency-browser.mjs`（含 `review-zoom-checks.mjs`）；包含两尺寸浅深主题、跨页收起、专注、原生折叠、对象/修改项导航与保存、手动倍率保持与自动适应 |
+| 重复视频覆盖、旧历史不锁定 | `test_workflow_transitions.py`、`test_media_reimport.py` | `workflow-transitions-browser.mjs`（重复导入/覆盖/响应丢失重放/旧审查历史不再阻止覆盖） |
+| 审查清单/纠错/通过/失效 | `test_annotation_review.py`、`test_annotation_export.py` | `training-export-browser.mjs`、`critical-workflows-browser.mjs` |
+| 训练导出/门禁/版本 | `test_training_export.py`、`test_quality_audit.py`、`test_export_audit_script.py` | `training-export-browser.mjs`（审查门槛、按视频划分、附原视频、多视频合并、响应丢失重放、改动后失效、统计导出） |
+| 标注/审查工作台一致性 | 上述对应页面回归、构建 | `workbench-consistency-browser.mjs`：两种模式两尺寸浅深主题、同一画布与工具、审查隐藏追踪、清单定位与帧条、专注、760/390 窄屏与使用说明隔离 |
 | 数据库查询/升级、Docker 发布 | `test_annotation_result_dedupe.py`、`test_deployment_preflight.py`、`test_docker_deployment_contract.py`、`test_model_distribution.py` | 下方容器验收；不是只运行前端构建 |
 | 完整离线包、旧版识别、备份升级与回滚 | `test_offline_update.py`、`scripts/test_build_offline.ps1` | 下方离线升级验收；模拟 Docker 不代替真实导入和数据恢复 |
-| 核心操作优先级、用户说明 | 上述 B/C/导出回归、构建 | `workspace-priority-browser.mjs`（36） |
 
 括号为当前脚本检查数量，**不是每次修改自动通过的结果**。测试源位于 `backend/tests/` 与 `frontend/tests/`。
 
@@ -168,7 +169,6 @@ export PYTHONPATH=backend
 mkdir -p work output/playwright
 work/review-venv/bin/python backend/tests/confirmation_browser_fixture.py
 work/review-venv/bin/python backend/tests/annotation_ux_fixture.py
-work/review-venv/bin/python backend/tests/review_browser_fixture.py
 ```
 
 先生成 C 夹具建立固定测试用户 ID，再生成其他夹具。UX 脚本要求路径含 `/work/e2e-confirm-ux`，生成横/竖两个 60 帧真实 AVI，并**重置测试媒体工作区**。C 夹具生成 main、zero、failure、many、portrait 五个独立任务；many 含 45 个真实修改项，用于分页导航，portrait 是 450×800 真实竖向视频，用于检查全幅主图比例和可见边界。B 夹具生成一个三帧任务。token 在 `work/*fixture.json`，不要输出到报告。
@@ -191,32 +191,16 @@ work/review-venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 3301
 API_PROXY_TARGET=http://127.0.0.1:3301 npm run dev --prefix frontend -- --host 127.0.0.1 --port 5373 --strictPort
 ```
 
-### 3. 按状态消耗顺序运行
+### 3. 单独运行套件
+
+固定套件可用运行器的 `--only <套件名>` 单独定位问题（不能代替完整回归）。手动运行时，按上面的环境启动服务并生成对应夹具后执行，例如：
 
 ```bash
-node frontend/tests/workspace-layout-browser.mjs
+CONFIRMATION_ORIGIN=http://127.0.0.1:5373 node frontend/tests/training-export-browser.mjs
+CONFIRMATION_ORIGIN=http://127.0.0.1:5373 node frontend/tests/workbench-consistency-browser.mjs
 ```
 
-这个脚本同时使用 B/C/UX 夹具，检查横竖素材、纵向增益、原图比例、退出恢复、手势取消、窗口缩高、离页清理、顶部进度、100% 与完成、零修改。它会改变 B 与 C 状态，跑其他状态测试前重新生成相应夹具。
-
-`node frontend/tests/workspace-priority-browser.mjs` 同样需要 B/C/UX 夹具；检查 1366×768、1180×760 的顶部进度和右上提交可见性、C 首屏操作与完成后导出顺序、说明章节/搜索/深色主题/Markdown 原文下载，以及说明窗口中的键盘隔离、焦点循环、退出滚动恢复和章节滚动重置。它会完成 C main，运行其他 C 正常测试前需重新生成夹具。
-
-`node frontend/tests/workbench-consistency-browser.mjs` 使用同一套 B/C/UX 夹具；`CONFIRMATION_ORIGIN` 可指定前端地址。检查三页在 1366×768、1180×760 及浅深主题下的共用区域、核心操作、列表独立滚动、跨页视频库收起和专注全宽、A/B 折叠详情的键盘行为、B 筛选定位与真实草稿、C 分组导航/回访、长文件名、45 项分页定位、说明隔离及零修改显式完成。C 完整帧还检查横竖源图四角与等比例显示、主图及局部图首屏大小、图上鼠标/键盘选择联动且不产生决定、未修改对象非交互、弹窗内图像读取和位置保存失败的分别重试。会写 B 草稿、消费 C main/zero，并浏览 many/portrait；后续 B/C 正常或故障脚本前必须重新生成对应夹具，不能并行重置同一批任务。
-
-该套件还覆盖 760×900、390×844：视频库搜索/筛选与列表分区，条目在实际裁剪区内可命中并真实切换，收起/展开后释放纵向空间，三页无页面横向溢出；字号、选框、帧/修改项往返、专注退出和桌面恢复均检查真实状态。C 窄屏完整帧在上、A/B 局部图在下且等比例显示。390 浅深主题的使用说明检查正文可读宽高、目录位置、Tab 焦点循环、业务快捷键隔离及 Esc 回焦点；不能只测容器存在、一次截图或 CSS 字符串。短高专注窗口额外检查 390×480、320×480 的暂停/未暂停 × 增强/无增强组合：实际滚动到确认、修正、帧跳转和退出并验证中心命中，不能让 `overflow:hidden` 裁掉核心操作；1366×768 对照不能出现新增的多余滚动。登录和标注记录的视觉复核还需含登录错误、记录空态/密集列表、查询筛选、表格自身横滚及分页，模拟记录要与真实API夹具明确区分。 同时将实际进度组件样式移到最后加载，并在窄屏已有页面滚动时核验进度卡不遮视频入口、条目中心仍真实命中，导航前后不产生新的选择或确认决定。
-
-该固定套件同时执行 `review-zoom-checks.mjs`，验证审查页的自动适应与手动缩放：连续放大、缩小后再放大超过初始倍率；手动倍率在换帧、滚动条出现、收起视频列表及窗口变化后保留；显式“适应窗口”恢复自动模式，随后窗口变化继续自适应；切换视频重新适应。缩放不得改变框的原图坐标、草稿或提交进度。占位式滚动条会改变 viewport 的可用尺寸，必须与不占位滚动条的正常场景成对测试；仅在默认无占位的无头浏览器里点击一次放大不能替代。固定用例关闭无头浏览器默认的隐藏滚动条选项，只在测试页面设置 15 px 占位滚动条，并断言真实占位宽度，不模拟 ResizeObserver 或缩放状态。`REVIEW_ZOOM_NATIVE_SCROLLBARS=1` 可省略测试样式，作为系统原生环境对照。真实可见 Chrome 中按相同步骤复测，保存操作前后截图与倍率、SVG/viewport 尺寸记录，保留修复前失败证据。固定套件还检查至少 120% 手动倍率下真实拖框的原图坐标换算、保存与撤销。旧 API 配置与 macOS 可见 Chrome 验证不等于医院真实 Windows / Chrome 93 引擎验收。
-
-同套隔离 B 夹具也可单独运行缩放复现入口；`REVIEW_FIXTURE` 指向该批审查夹具 JSON，`REVIEW_ORIGIN` 指向自己的测试前端。需要观察实际窗口时使用 `REVIEW_ZOOM_HEADED=1`，并用 `LEGACY_BROWSER=1` 检查缺失新 API 的配置；不得指向用户正在编辑的业务任务。
-
-```bash
-REVIEW_ZOOM_HEADED=1 LEGACY_BROWSER=1 REVIEW_ORIGIN=http://127.0.0.1:5373 node frontend/tests/review-zoom-browser.mjs
-```
-
-其他脚本按上表选择 `node frontend/tests/<脚本>.mjs`：
-
-- `annotation-ux-browser` 前重置 UX；外观、模拟 Tracking 不需要新 C 任务，但需要可用账号。
-- `tracking-recovery-browser` 前在同一隔离环境运行 `backend/tests/tracking_recovery_fixture.py`（要求 `/work/e2e-confirm-ux*`，先用 C 夹具建立用户）；测试后端开启 SAM3_ENABLED 以走真实 rewind/seed，但模型响应由浏览器模拟，不加载权重。运行 `CONFIRMATION_ORIGIN=http://127.0.0.1:5373 node frontend/tests/tracking-recovery-browser.mjs`。脚本只修改本批隔离媒体，需重跑先重新生成夹具；HTTP 30 秒计时器缩短为 300ms 复现同一取消路径，不是等待真实 30 秒。GPU 输出模拟原始帧 JSONL，保存、抽帧、冲突和原键重放使用真后端。截图/失败诊断位于 `output/playwright/tracking-recovery-*`，不能将其称为真实模型 4K 效果验收。
+`training-export` 与 `workbench-consistency` 需要 `confirmation_browser_fixture.py`（测试用户与统计导出用的历史数据）和 `annotation_ux_fixture.py`（两段 60 帧视频与追踪结果）；脚本先为两段视频保存空工作区，使追踪结果可以审查。`performance-browser.mjs` 只保留标注页部分。`browser-compat-media.mjs` 仍点击早已移除的“完成标注并送审”按钮，在本次改动前就已过时，需要单独更新后才能使用。
 
 ### 外部真实视频性能测量
 
@@ -233,9 +217,7 @@ work/review-venv/bin/python backend/tests/real_video_benchmark.py --source-dir "
 真实素材浏览器用例先生成 C/UX/B 基础夹具，再在同一 `/work/e2e-confirm-ux-*` 环境运行 `backend/tests/real_4k_browser_fixture.py --source-dir "/实际视频目录"`；生成的测试标注不代表该视频真实目标。随后运行 `CONFIRMATION_ORIGIN=http://127.0.0.1:5373 node frontend/tests/performance-browser.mjs`，会消费本批 C 决定；重新运行先生成新任务。截图/指标在 `output/playwright/performance-results.json` 和 `real-4k-performance.png`。
 - `annotation-delete-feedback-browser` 前在同一隔离环境运行 `backend/tests/annotation_controls_fixture.py`，只重置六个 `controls-*` 媒体，凭证留在 `work/annotation-controls-browser-fixture.json`。环境路径支持 `/work/e2e-confirm-ux*` 或单独 `/work/e2e-annotation-controls*`；前端地址用 `ANNOTATION_ORIGIN`。覆盖当前帧/全视频删除、统计取消/确认、跨帧撤销、刷新、正常/仅本次/实际修框、尺寸误报无须重画的人工参照保存与恢复、校准重置、两类写入成功但响应丢失的原键重放、帮助下载一致及小窗口首屏。其后续 GPU job 响应模拟，保存/反馈/seed/rewind与原视频帧走真实后端；不能称真实模型验收。
 - `test_tracking_adaptive_feedback.py`、`test_tracking_pause_policy.py`、`test_tracking_confirmation_policy.py`、`test_tracking_pause_publication.py` 使用真实检测与反馈持久化、合成框或模拟推理输出，验证普通风险的持续观察与方向切换、30 对象在 44.2 FPS 下的轻微变化、原形状往返、已确认正常形态、重启读取、跨轮首次风险发布、回退帧界限、活动参照损坏与重置恢复、逐渐丢尾、新对象对风险和极端缩框的成对路径。它们随后端全量入口执行，不代表真实 GPU 推理。前端 `pause-diagnostics.test.mjs` 与 `tracking-calibration.test.mjs` 随 `test:annotation` 验证服务端明确指标/界限的解释、软提示与触发指标的区分、多个 partner、重置显示与历史证据缺字段，不用它们替代实际浏览器确认流程。
-- `review-browser` 和 `review-failure-browser` 每组前重新生成 B 夹具。
-- C 正常用 main/zero，C 故障用 failure，二者可依次运行；整组重跑需新 C 夹具。
-- `training-export-browser` 前重新生成 C 夹具，因为它消费 main/zero。
+- `training-export-browser` 会通过审查并导出 `ux-video`，重跑前重新生成 UX 与 C 夹具。
 - 测试执行时不修改前端文件，避免 HMR 改变正在运行的实例。
 
 Vite 调试脚本若需要访问 workspace，须导入浏览器实际已加载的模块 URL（包含可能的 `?t=`），不要无条件二次 `import('/src/stores/workspace.ts')` 建立独立实例。
@@ -244,15 +226,12 @@ Vite 调试脚本若需要访问 workspace，须导入浏览器实际已加载�
 
 ### Chrome 93 / HTTP 专项回归
 
-`browser-compat-media.mjs` 覆盖素材列表仅保留删除、本地图片删除范围提示、取消与刷新不复活，并使用真实上传的短 AVI、送审接口和删除接口；拒绝非 `work/` 夹具路径。沿用以上 B/C/UX 夹具，推荐独立数据根 `work/e2e-confirm-ux-compat-*`。启动后端 3307；前端用 `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=hospital-test.local API_PROXY_TARGET=http://127.0.0.1:3307 npm run dev --prefix frontend -- --host 127.0.0.1 --port 5377 --strictPort`。
+（2026-11-01：`browser-compat-media.mjs` 仍依赖早已移除的送审按钮，需更新后才能使用。）`browser-compat-media.mjs` 覆盖素材列表仅保留删除、本地图片删除范围提示、取消与刷新不复活，并使用真实上传的短 AVI、送审接口和删除接口；拒绝非 `work/` 夹具路径。沿用以上 B/C/UX 夹具，推荐独立数据根 `work/e2e-confirm-ux-compat-*`。启动后端 3307；前端用 `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=hospital-test.local API_PROXY_TARGET=http://127.0.0.1:3307 npm run dev --prefix frontend -- --host 127.0.0.1 --port 5377 --strictPort`。
 
 ```bash
 # 库路径按前述 PLAYWRIGHT_MODULE 设置；COMPAT_VIDEO 可指定生成的 AVI。
 node frontend/tests/browser-compat-media.mjs
-LEGACY_BROWSER=1 REVIEW_ORIGIN=http://127.0.0.1:5377 node frontend/tests/review-browser.mjs
-LEGACY_BROWSER=1 CONFIRMATION_ORIGIN=http://127.0.0.1:5377 node frontend/tests/confirmation-browser.mjs
-LEGACY_BROWSER=1 CONFIRMATION_ORIGIN=http://127.0.0.1:5377 node frontend/tests/confirmation-failure-browser.mjs
-# 重新生成 C 夹具后再执行导出测试。
+# 重新生成 UX 与 C 夹具后再执行导出测试。
 LEGACY_BROWSER=1 CONFIRMATION_ORIGIN=http://127.0.0.1:5377 node frontend/tests/training-export-browser.mjs
 ```
 

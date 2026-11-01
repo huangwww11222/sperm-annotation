@@ -9,7 +9,6 @@ from app import confirmation_workflow as cflow
 from app import db
 from app import review_workflow as review
 from app.auth import sign_jwt
-from app.confirmation_workflow_routes import final_router, router
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -314,55 +313,6 @@ def test_invalid_legacy_snapshot_is_readonly(confirmation):
     assert s["readOnlyReason"] and not s["permissions"]["canClaim"]
     with pytest.raises(review.ReviewError):
         claim(confirmation)
-
-
-def test_api_auth_contract_strict_choices_foreign_change_and_export(confirmation):
-    cid = confirmation
-    app = FastAPI()
-    app.include_router(router)
-    app.include_router(final_router)
-    client = TestClient(app)
-    url = f"/api/confirmation/sessions/{cid}"
-    assert client.get(url).status_code == 401
-    client.headers.update({"Authorization": "Bearer " + sign_jwt({"uid": 3})})
-    assert client.post(url + "/claim").status_code == 428
-    client.headers.update({"X-Review-Contract": "2", "Idempotency-Key": "claim-api"})
-    assert client.post(url + "/claim").status_code == 200
-    change = cflow.list_changes(cid, 3)[0]["changeId"]
-    endpoint = url + f"/changes/{change}/decision"
-    assert (
-        client.put(
-            endpoint, json={"choice": "C", "expectedDecisionRevision": 0}
-        ).status_code
-        == 422
-    )
-    assert (
-        client.put(
-            endpoint,
-            json={"choice": "A", "expectedDecisionRevision": 0, "bbox": [0, 0, 10, 10]},
-        ).status_code
-        == 422
-    )
-    client.headers["Idempotency-Key"] = "foreign"
-    assert (
-        client.put(
-            url + "/changes/missing/decision",
-            json={"choice": "A", "expectedDecisionRevision": 0},
-        ).status_code
-        == 404
-    )
-    choose(cid, 0, "A")
-    choose(cid, 1, "B")
-    r = write(cid, "finish")
-    dl = client.get(
-        "/api/final-versions/" + r["session"]["finalVersionId"] + "/download"
-    )
-    assert (
-        dl.status_code == 200
-        and len(dl.json()["frames"]) == 3
-        and "attachment" in dl.headers["Content-Disposition"]
-    )
-    assert dl.headers["X-Request-ID"]
 
 
 @pytest.mark.parametrize("action", ["undo", "finish", "reopen", "cursor"])

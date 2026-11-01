@@ -63,5 +63,9 @@ function pick(event: MouseEvent) {
 .frame-strip i.draft{background:var(--warning-soft);border-color:var(--warning)}
 .frame-strip i.anomaly::after,.frame-strip i.returned::after{content:'';position:absolute;left:0;right:0;bottom:-1px;height:3px;background:var(--danger);border-radius:0 0 2px 2px}
 .frame-strip i.paused{outline:2px solid var(--warning);outline-offset:0}
+/* Review checklist: frames still to check, and frames already checked. */
+.frame-strip i.review-todo::after,.frame-strip i.review-done::after{content:'';position:absolute;left:0;right:0;bottom:-1px;height:3px;border-radius:0 0 2px 2px}
+.frame-strip i.review-todo::after{background:var(--accent)}
+.frame-strip i.review-done::after{background:var(--success);opacity:.55}
 .frame-strip i.current{border:2px solid var(--text);transform:scaleY(1.12)}
 </style>

@@ -1,16 +1,35 @@
 import { withRequestTimeout } from '../utils/browserCompat'
 import { tokenStore } from './http'
 
-export interface ExportSettings {
+export type DatasetSplit = 'train' | 'val' | 'test'
+export interface SplitOptions {
+  splitRatio: number
+  splitMode?: 'frame' | 'video'
+  testRatio?: number
+  videoSplits?: Record<string, DatasetSplit>
+}
+export interface ExportSettings extends SplitOptions {
   finalVersionIds: string[]
   format: 'yolo' | 'coco' | 'both'
-  splitRatio: number
+  includeSourceVideos?: boolean
 }
 export interface ExportSummary {
   frameCount: number
   objectCount: number
   emptyFrames: number
   classNames: string[]
+  splitMode?: 'frame' | 'video'
+  splitFrames?: Record<DatasetSplit, number>
+  videos?: { finalVersionId: string; frameCount: number; objectCount: number; split: DatasetSplit | null }[]
+}
+export interface AnnotationSnapshotItem {
+  finalVersionId: string
+  mediaId: string
+  name: string
+  frameCount: number
+  createdAt: string
+  valid: boolean
+  reason: string | null
 }
 export interface ExportJob {
   exportId: string
@@ -20,7 +39,7 @@ export interface ExportJob {
   errorCode: string | null
   errorMessage: string | null
   downloadUrl: string | null
-  manifest: { counts: ExportSummary & { train: number; val: number } } | null
+  manifest: { counts: ExportSummary & { train: number; val: number; test?: number } } | null
 }
 
 async function request<T>(path: string, method = 'GET', body?: unknown, key?: string, blob = false): Promise<T> {
@@ -55,7 +74,8 @@ async function request<T>(path: string, method = 'GET', body?: unknown, key?: st
 
 export const trainingExportApi = {
   annotationSnapshot: (mediaId:string, body:unknown, key:string) => request<{finalVersionId:string}>(`/annotations/${mediaId}/snapshot`, 'POST', body, key),
-  preview: (ids: string[]) => request<ExportSummary>('/exports/preview', 'POST', { finalVersionIds: ids }),
+  preview: (ids: string[], split?: SplitOptions) => request<ExportSummary>('/exports/preview', 'POST', { finalVersionIds: ids, ...split }),
+  annotationSnapshots: () => request<{ items: AnnotationSnapshotItem[] }>('/annotations/snapshots'),
   create: (settings: ExportSettings, key: string) => request<ExportJob>('/exports', 'POST', settings, key),
   status: (id: string) => request<ExportJob>(`/exports/${id}`),
   download: (id: string) => request<Blob>(`/exports/${id}/download`, 'GET', undefined, undefined, true),

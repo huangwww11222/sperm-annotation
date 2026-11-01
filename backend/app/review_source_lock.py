@@ -37,3 +37,14 @@ def completion_read():
         yield
     finally:
         _lock.release()
+
+
+@contextmanager
+def source_read(timeout=10):
+    """Wait briefly for a concurrent save instead of failing a read immediately."""
+    if not _lock.acquire(timeout=timeout):
+        raise ReviewError("SOURCE_BUSY", "标注正在保存，请稍后重试")
+    try:
+        yield
+    finally:
+        _lock.release()

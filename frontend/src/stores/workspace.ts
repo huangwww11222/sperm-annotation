@@ -11,7 +11,7 @@ import { httpAnnotationApi } from '../api/httpAnnotationApi'
 import { trackApi, type DuplicateVideo, type TrackUploadResponse, type TrackStatusResponse, type ObjectDeletionSummary, type NormalMotionSample, type TrackingWarningSummary, type TrackingFeedbackEvent, type TrackingFeedbackResponse, type TrackingFeedbackInput, type TrackingRestartInput } from '../api/trackApi'
 import { WorkspaceWrites, type WorkspaceDraft } from '../annotation/workspaceWrites'
 import { useAuth } from './auth'
-import { reviewWorkflowApi } from '../api/reviewWorkflowApi'
+import { annotationReviewApi } from '../api/annotationReviewApi'
 import type { TrackingFrameObject, TrackingFrameResult } from '../types/annotation'
 
 const createWorkspace = () => {
@@ -443,6 +443,38 @@ const createWorkspace = () => {
     annotationsByMedia.value = { ...annotationsByMedia.value, [mediaId]: [...existing, object] }
     selectedObjectId.value = object.id
     statusMessage.value = `已添加：${name}${media.type === 'video' ? `（第 ${currentFrame.value + 1} 帧）` : ''}`
+  }
+
+  const adoptReviewTrack = async (boxes: {frameIndex:number;bbox:{x:number;y:number;width:number;height:number}}[],objectId:number) => {
+    if(editingBlocked.value)throw new Error('当前画面正在处理其他操作，暂不能采用轨迹')
+    const mediaId=currentMediaId.value,media=mediaAssets.value.find(item=>item.id===mediaId)
+    if(!media||media.type!=='video'||!Number.isInteger(objectId)||objectId<=0||!boxes.length)throw new Error('采用轨迹的参数无效')
+    const frames=new Set<number>()
+    for(const item of boxes){
+      const b=item.bbox
+      if(!Number.isInteger(item.frameIndex)||item.frameIndex<0||item.frameIndex>(media.frameCount??Number.MAX_SAFE_INTEGER)-1
+        ||frames.has(item.frameIndex)||![b?.x,b?.y,b?.width,b?.height].every(Number.isFinite)||b.width<=0||b.height<=0
+        ||b.x<0||b.y<0||b.x+b.width>100.000001||b.y+b.height>100.000001)
+        throw new Error('SAM3 轨迹中存在无效帧或框，未补任何标注')
+      frames.add(item.frameIndex)
+    }
+    const existing=annotationsByMedia.value[mediaId]??[]
+    if(existing.some(obj=>obj.objectId===objectId&&frames.has(obj.frameIndex??0)))throw new Error(`对象 #${objectId} 在目标帧已有标注，未补任何框`)
+    const name=numberedObjectName(objectNameInput.value.trim()||'rare sperm',objectId)
+    const stamp=Date.now()
+    const added:AnnotationObject[]=boxes.map((item,index)=>({
+      id:`manual-adopt-${stamp}-${index}`,
+      objectId,name,source:'manual',origin:'review_adopted',bbox:{...item.bbox},
+      frameIndex:item.frameIndex,timestampMs:Math.round(frameToTime(item.frameIndex)*1000),
+    }))
+    annotationsByMedia.value={...annotationsByMedia.value,[mediaId]:[...existing,...added]}
+    selectedObjectId.value=added[added.length-1].id
+    statusMessage.value=`已采用 SAM3 轨迹：对象 #${objectId}，补齐 ${added.length} 帧`
+    try{await persistWorkspaceState(mediaId,true)}
+    catch(error){
+      console.error('[annotation.review_track_adopt_save_failed]',{mediaId,objectId,frames:[...frames],error})
+      throw error
+    }
   }
 
   const revokeExactFrameUrl = () => {
@@ -931,13 +963,8 @@ const createWorkspace = () => {
         console.info('[annotation.restart_committed]', { mediaId: intent.serverMediaId, startFrame: intent.body.startFrame, pausedFrame: intent.body.expectedPausedFrame, revision: result.revision, removedRows: result.removedRows })
       }
       if (!isCurrent()) return false
-      // A replayed restart receipt confirms the past file operation. It does
-      // not grant permission to seed a source that has since been submitted.
-      if (submissionBusy.value) throw new Error('当前有送审操作尚未结束，请先完成或关闭送审操作，再继续原起点追踪')
-      const submission = await reviewWorkflowApi.submissionStatus(intent.serverMediaId)
-      if (!isCurrent()) return false
-      if (!Array.isArray(submission.items)) throw new Error('送审状态响应无法读取，已停止续追；请重试查询原起点')
-      if (submission.items.length) throw Object.assign(new Error('该视频已送审，不能继续重追或改写起始框；请先在允许撤回时撤回送审'), {status:409,code:'TRACKING_SOURCE_SUBMITTED'})
+      // Re-tracking changes the annotation; a review pass simply becomes stale.
+      if (submissionBusy.value) throw new Error('当前有导出操作尚未结束，请先完成或关闭导出，再继续原起点追踪')
       const start = intent.body.startFrame
       // Human edits anywhere in the video survive replacing an AI branch.
       annotationsByMedia.value = { ...annotationsByMedia.value, [intent.mediaId]: (annotationsByMedia.value[intent.mediaId] || []).filter(object => object.source === 'manual' || (object.frameIndex ?? 0) <= start) }
@@ -1142,7 +1169,7 @@ const createWorkspace = () => {
     if (!media || isAiBusy.value || deletingMediaId.value || workspaceRestoring.value || objectDeletionBusy.value || trackingFeedbackBusy.value || pendingDeletion.value || pendingFeedback.value) return
     mediaDeleteError.value = ''
     const message = media.serverMediaId
-      ? `将从共享素材库删除「${media.name}」的原视频、工作区和追踪文件，其他使用者也将无法访问。此操作不能撤销；已送审的视频不能删除。是否继续？`
+      ? `将从共享素材库删除「${media.name}」的原视频、工作区和追踪文件，其他使用者也将无法访问。此操作不能撤销；已有历史审查记录的视频不能删除。是否继续？`
       : `将删除「${media.name}」在本机工作区中的素材和标注，不能撤销。电脑原文件和已保存到服务器的标注记录会保留。是否继续？`
     if (!window.confirm(message)) return
     deletingMediaId.value = mediaId
@@ -1345,7 +1372,7 @@ const createWorkspace = () => {
     try{
       sessionStorage.setItem(importJournalKey(),JSON.stringify(intent))
       dispatched=true
-      const result=await reviewWorkflowApi.resetAnnotations(intent.mediaId,intent.workspaceRevision,intent.key)
+      const result=await annotationReviewApi.resetAnnotations(intent.mediaId,intent.workspaceRevision,intent.key)
       if(!result.ok||result.mediaId!==intent.mediaId)throw new Error('服务器未确认覆盖')
       clearResetCache(intent.mediaId,result.revision)
       sessionStorage.removeItem(importJournalKey())
@@ -2110,7 +2137,7 @@ const createWorkspace = () => {
     const ensureRestartCurrent = () => {
       if (restartIntent && (restartSerial !== restartEpoch || restartIntent.actorId !== useAuth().user.value?.id || mediaId !== currentMediaId.value)) throw new DOMException('账号或素材已切换，已停止本页续追', 'AbortError')
       if (preparingRestartSeed && (currentFrame.value !== startFrame || exactFrameLoading.value || !!frameError.value)) throw new Error('重追起始帧已变化或尚未读取完成，未继续写入起始框；请重试从原起点追踪')
-      if (preparingRestartSeed && submissionBusy.value) throw new Error('当前有送审操作尚未结束，已停止准备起始框；请完成送审操作后再继续原起点追踪')
+      if (preparingRestartSeed && submissionBusy.value) throw new Error('当前有导出操作尚未结束，已停止准备起始框；请完成导出后再继续原起点追踪')
     }
     let phase='保存工作区'
     let seed: Record<string, unknown>[]
@@ -2309,7 +2336,7 @@ const createWorkspace = () => {
         await seekVideo(frameToTime(lastProcessedFrame))
         if (finalStatus.reachedVideoEnd || lastProcessedFrame >= maxFrameIndex.value) {
           statusMessage.value = `完成：已追踪到视频末尾第 ${lastProcessedFrame + 1} 帧。`
-          if(finalStatus.jointTracking?.state==='checked') statusMessage.value='自动标注已完成，可微调或送审。'
+          if(finalStatus.jointTracking?.state==='checked') statusMessage.value='自动标注已完成，可微调后去审查。'
           else if(finalStatus.endpointVerification) statusMessage.value += finalStatus.endpointVerification.state==='checked'?'首尾核验完成，疑点请到审查页处理。':'反向核验失败或证据不足，请到审查页检查。'
           showToast('已追踪到视频末尾')
         } else {
@@ -2727,7 +2754,7 @@ const createWorkspace = () => {
     trackingError,trackingProgress,trackingRetryLabel,trackingRetryBusy,retryTracking,workspaceRecoveryRequired,saveRecoveryLabel,retryWorkspaceSave,reloadWorkspaceFromServer,
     getObjectDeletionSummary, removeObjectAcrossVideo, undoVideoObjectDeletion, retryObjectDeletion, canUndoVideoDeletion, lastVideoObjectDeletion, objectDeletionBusy, objectDeletionError, objectDeletionPendingAction, confirmTrackingAnomaly, retryTrackingAnomalyFeedback, trackingFeedbackBusy, trackingFeedbackError, trackingFeedbackPending, trackingFeedbackPendingAction, trackingCalibrationSummary, resetTrackingCalibration, trackingWarningSummary,
     deleteMedia, deletingMediaId, mediaDeleteError, persistWorkspaceState, retryExactFrame, saveState, saveError, playbackRate, pausePlayback, displayObjects, editingBlocked, workspaceRestoring, frameError, loadExactFrame, nudgeSelected, cancelAnnotationGesture, canUndo, canRedo,
-    edgeDiscovery, headBoxBusy, headBoxError, cancelHeadBox, api, mediaAssets, selectedMediaId, submissionLocks, submissionBusy, mediaImportBusy, importError, duplicateImport, reimportSaving, cancelDuplicateImport, confirmDuplicateImport, restoreImportIntent, activeTool, objectNameInput, selectedObjectId, currentFrame, currentTime, videoDuration, videoFps, frameInput, isPlaying, isAiBusy, trackingFrameCount, statusMessage, toastMessage, showToast, zoom, zoomIn, zoomOut, zoomReset, savedResults, loadedRemoteResultKeys, effectResults, selectedEffectId, effectTime, effectPlaying, effectVideoRef, imageRef, videoRef, exactFrameImageRef, exactFrameUrl, exactFrameLoading, videoPlaybackFallback, annotationHitRef, fileInputRef, videoInputRef, effectFolderInputRef, annotationsByMedia, trackingFramesByMedia, anomalyObjectIds, anomalyFrames, pausedAnomalies, anomalyPanelVisible, trackingPausedFrame, closeAnomalyPanel, selectedMedia, isVideo, maxFrameIndex, currentMediaId, currentObjects, selectedObject, selectedEffect, formatTime, timeToFrame, frameToTime, getStagePoint, addObject, resetVideoViewToFirstFrame, ensureVideoFirstFrame, selectTool, onStageClick, tempBbox, onBboxDown, onBboxMove, onBboxUp, onObjectDropdownChange, selectObject, removeObject, renameObject, undo, redo, copyPreviousFrame, brightness, contrast, mediaFilterStyle, resetMediaFilter, annotatedFrameCount, clearSelection, openFilePicker, handleFiles, onImageLoaded, onVideoLoaded, onVideoTimeUpdate, onVideoError, loadTrackingResult, seekVideo, seekToInputFrame, seekByFrame, togglePlayback, onVideoEnded, onTimelineClick, runAiSegment, runAiTrack, getMediaPixelSize, buildSam3AnnotationsJson, generateAnnotationsJson, loadSavedResults, openEffectFolderPicker, handleEffectFolder, loadEffects, onEffectTimeUpdate, toggleEffectPlayback, selectEffect, effectOverlayObjects, resetAnnotationViewForMedia, loadServerMedia
+    edgeDiscovery, headBoxBusy, headBoxError, cancelHeadBox, createHeadBox, api, mediaAssets, selectedMediaId, submissionLocks, submissionBusy, mediaImportBusy, importError, duplicateImport, reimportSaving, cancelDuplicateImport, confirmDuplicateImport, restoreImportIntent, activeTool, objectNameInput, selectedObjectId, currentFrame, currentTime, videoDuration, videoFps, frameInput, isPlaying, isAiBusy, trackingFrameCount, statusMessage, toastMessage, showToast, zoom, zoomIn, zoomOut, zoomReset, savedResults, loadedRemoteResultKeys, effectResults, selectedEffectId, effectTime, effectPlaying, effectVideoRef, imageRef, videoRef, exactFrameImageRef, exactFrameUrl, exactFrameLoading, videoPlaybackFallback, annotationHitRef, fileInputRef, videoInputRef, effectFolderInputRef, annotationsByMedia, trackingFramesByMedia, anomalyObjectIds, anomalyFrames, pausedAnomalies, anomalyPanelVisible, trackingPausedFrame, closeAnomalyPanel, selectedMedia, isVideo, maxFrameIndex, currentMediaId, currentObjects, selectedObject, selectedEffect, formatTime, timeToFrame, frameToTime, getStagePoint, addObject, adoptReviewTrack, resetVideoViewToFirstFrame, ensureVideoFirstFrame, selectTool, onStageClick, tempBbox, onBboxDown, onBboxMove, onBboxUp, onObjectDropdownChange, selectObject, removeObject, renameObject, undo, redo, copyPreviousFrame, brightness, contrast, mediaFilterStyle, resetMediaFilter, annotatedFrameCount, clearSelection, openFilePicker, handleFiles, onImageLoaded, onVideoLoaded, onVideoTimeUpdate, onVideoError, loadTrackingResult, seekVideo, seekToInputFrame, seekByFrame, togglePlayback, onVideoEnded, onTimelineClick, runAiSegment, runAiTrack, getMediaPixelSize, buildSam3AnnotationsJson, generateAnnotationsJson, loadSavedResults, openEffectFolderPicker, handleEffectFolder, loadEffects, onEffectTimeUpdate, toggleEffectPlayback, selectEffect, effectOverlayObjects, resetAnnotationViewForMedia, loadServerMedia
   }
 }
 

@@ -107,15 +107,20 @@ export async function trackingPauseLayoutChecks(page, { poll, ready, out, before
       if(!placedAtCorner)await button('放大画面').click()
     }
     check(placedAtCorner,'a real selected rectangle can be placed near the lower-right image edge')
-    // The new canvas-first shell floats zoom controls at the lower right.
-    // A target near them must remain reachable by the same Space-pan gesture;
-    // moving the view must not edit the box or require leaving focus mode.
+    // Zoom used to float at the lower right; it now sits in the bottom bar.
+    // A target near that corner must remain reachable by the same Space-pan
+    // gesture; moving the view must not edit the box or require leaving focus mode.
     const cornerView=await geometry(),zoomBox=await page.locator('.shell-zoom').boundingBox()
     check(zoomBox&&zoomBox.x>=0&&zoomBox.y>=0&&zoomBox.x+zoomBox.width<=1366&&zoomBox.y+zoomBox.height<=768,'floating zoom controls remain visible beside the editable viewport')
     const panX=cornerView.canvas.x+cornerView.canvas.width*.5,panY=cornerView.canvas.y+cornerView.canvas.height*.5
     await page.evaluate(()=>document.activeElement instanceof HTMLElement&&document.activeElement.blur())
     await page.keyboard.down('Space');await page.mouse.move(panX,panY);await page.mouse.down();await page.mouse.move(panX-150,panY-90,{steps:6});await page.mouse.up();await page.keyboard.up('Space')
-    check(await page.locator('.annotation-overlay g.selected .box-handle').evaluateAll(handles=>handles.length===4&&handles.every(handle=>{const r=handle.getBoundingClientRect(),hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);return hit?.matches('[data-testid="annotation-hit"]')})),'Space-pan reveals all four lower-right target handles on the real editing surface rather than floating controls')
+    // Controls no longer float over the image. At this zoom the box can be taller
+    // than the image area, so require the lower handles near the old zoom corner
+    // to be visible, and every handle inside the image area to be editable.
+    const handleHits=await page.locator('.annotation-overlay g.selected .box-handle').evaluateAll(handles=>{const view=document.querySelector('.canvas-scroll').getBoundingClientRect();return handles.map(handle=>{const r=handle.getBoundingClientRect(),cx=r.x+r.width/2,cy=r.y+r.height/2,hit=document.elementFromPoint(cx,cy);return {y:cy,inView:cx>=view.left&&cx<=view.right&&cy>=view.top&&cy<=view.bottom,ok:!!hit?.matches('[data-testid="annotation-hit"]')}})})
+    const lowest=Math.max(...handleHits.map(h=>h.y)),lower=handleHits.filter(h=>h.y>=lowest-1)
+    check(handleHits.length===4&&lower.length===2&&lower.every(h=>h.inView&&h.ok)&&handleHits.filter(h=>h.inView).every(h=>h.ok),'Space-pan reveals the lower-right target handles on the real editing surface rather than floating controls '+JSON.stringify(handleHits))
     check(JSON.stringify((await getWorkspace()).manualAnnotations)===sourceBeforeCorner,'moving the viewport around a paused target does not change saved annotation coordinates')
     await screenshot('pause-layout-right-bottom-handles')
     await setDetails(false);await chip.click()
@@ -174,7 +179,10 @@ export async function trackingPauseLayoutChecks(page, { poll, ready, out, before
       if(focus&&height<=480){
         await setDetails(true)
         const popover=page.locator('.annot-enhance')
-        check(await popover.evaluate(element=>element.clientHeight>30&&element.scrollHeight>element.clientHeight&&getComputedStyle(element).overflowY==='auto'),label+': the short narrow enhancement popover has its own scrolling area')
+        // The popover is a row above the image: it either shows everything or scrolls
+        // inside itself, and never grows past its cap at the image's expense.
+        const pop=await popover.evaluate(element=>({client:element.clientHeight,scroll:element.scrollHeight,height:element.getBoundingClientRect().height,overflow:getComputedStyle(element).overflowY,display:getComputedStyle(element).display}))
+        check(pop.client>30&&pop.height<=161&&(pop.scroll<=pop.client+1||pop.overflow==='auto'),label+': the short narrow enhancement popover stays bounded and scrolls internally when needed '+JSON.stringify(pop))
         await popover.locator('input[type=checkbox]').scrollIntoViewIfNeeded()
         check(await popover.evaluate(element=>element.scrollTop>0)&&await reachable(popover.locator('input[type=checkbox]')),label+': scrolling the popover reveals its last enhancement control')
         await setDetails(false)

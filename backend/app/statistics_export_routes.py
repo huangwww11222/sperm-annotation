@@ -10,7 +10,7 @@ from starlette.background import BackgroundTask
 
 from .statistics_export_jobs import manager
 from .review_workflow import ReviewError
-from .review_workflow_routes import LoggedRoute, Model, User
+from .api_common import LoggedRoute, Model, User
 
 router = APIRouter(prefix="/api/statistics", tags=["statistics"], route_class=LoggedRoute)
 log = logging.getLogger("review.statistics")

@@ -1,12 +1,26 @@
 # 当前接口与数据契约
 
-## 2026-10-29 当前入口
+## 2026-11-01 当前入口
 
-新增 POST /api/datasets/annotations/{media_id}/snapshot：认证 + X-Review-Contract:2 + Idempotency-Key，正文 expectedSourceRevision、confirmComplete、explicitEmptyFrameRanges（原帧从0开始）。返回 finalVersionId（annexp_ 前缀，兼容训练队列选择字段，并非已验收F）。后续现有 exports/preview、exports、status/download 接口复用；快照仅本人可选择，来源变化使旧导出失效。旧 complete 接口保留历史兼容，新标注UI不调用。
+标注 → 审查 → 导出。审查与旧 A/B/C/F 无关；旧 `/api/review/*`、`/api/confirmation/*`、`/api/final-versions/*` 已删除（说明见 [archive](archive/旧审查与对比确认流程_2026-11-01前.md)），对应数据表只读保留供统计/审计导出。实现：[annotation_review_routes.py](../backend/app/annotation_review_routes.py)、[annotationReviewApi.ts](../frontend/src/api/annotationReviewApi.ts)。均需登录；审查接口无需幂等头，重复调用天然幂等。
+
+| 方法与路径 | 作用 |
+| --- | --- |
+| `GET /api/annotation-review/media/{id}` | `status: none/open/passed/stale`、`currentRevision`（逐帧内容摘要）、`unknownFrames`、当前或最近一轮 `review{reviewId,round,state,lastActorId,lastActivityAt,items[{id,kind,startFrame,endFrame,frame,message,objectId?,objectIds?,category?,source?,anchor?,region?,index?,countInFrame?,observations?,adoptObjectId?,detectorAgrees?,lastFrame?,lastBox?,bbox?,check}],checked,total,escalated,passedBy,passedAt,changes}`、`lastPassed`。`lastActorId` 取最近检查人，无检查时为开始人；`lastActivityAt` 同理。从未保存工作区时返回 `none` 与 `notReady` 说明，不报错。Tracking 运行中也可读取 |
+| `POST /api/annotation-review/media/{id}/start` | 已有进行中的轮次则原样返回；已通过且内容未变返回 409 `REVIEW_ALREADY_PASSED`；Tracking 运行中 409 `SOURCE_BUSY` |
+| `PUT /api/annotation-review/media/{id}/items/{itemId}` | `{reviewId, result:'ok'|'fixed'|'empty'|'not_target'}`，`empty` 仅用于 `unknown` 项，`not_target` 仅用于 `missing/static` 项；可改判。`not_target` 在同一事务写 `annotation_review_exclusions`，改为其他结果时同事务撤销。非当前轮 409 `REVIEW_NOT_CURRENT`，已结束 409 `REVIEW_CLOSED`。随机抽检 ≥2 帧 `fixed` 时追加 `min(30,max(10,ceil(帧数×0.05)))` 帧（`escalation:true`） |
+| `POST /api/annotation-review/media/{id}/pass` | `{reviewId}`；有未检查项 409 `REVIEW_INCOMPLETE`，仍有未确认的未知帧 409 `UNKNOWN_FRAMES`；成功固定 `passed_revision` 和修改记录 |
+| `GET /api/annotation-review/summary` | `{items:{mediaId: status}}`，列表用，不读追踪文件 |
+| `POST /api/annotation-review/media/{id}/reset-annotations` | 原 `/api/review/media/{id}/reset-annotations` 迁移至此，正文与幂等语义不变；不再因历史送审拒绝 |
+| `GET /api/datasets/annotations/{id}/preview` | 导出弹窗预览（取代 `completion-preview`）：`sourceRevision`、有框/空/未知帧，审查确认无目标的帧计为空 |
+| `POST /api/datasets/annotations/{id}/snapshot` | 同前；另要求最近一次审查通过且内容未变，否则 409 `REVIEW_REQUIRED` |
 
 本页是 API 地图与不变量，不复制全部类型定义。精确请求验证以已注册路由的 Pydantic 模型为准；开发时可读本地 FastAPI `/openapi.json`。旧原型中的示例接口不是活动接口。
 
-## 集中审查协议
+## 追踪与审查证据协议
+
+- 审查状态与开始审查可复用进程内解析缓存：键为 `(mediaId, 工作区revision/追踪文件标记, EVIDENCE_POLICY)`，最多 8 个，按最近使用淘汰；通过审查与导出门槛不读缓存，始终重新加载当前内容。
+- `annotation_review.frame_findings` 保留可操作的反向独有轨迹（`endpoint_identity_uncertain` 且 objectId 为空、有 tailObjectId 和有效 bbox）与正反向分歧（`endpoint_disagreement` 的有效 reverseBox），但仅当当前内容没有框覆盖；`joint_uncertain/subject_identity/backward_disagreement/带 objectId 的身份不明`及人工框所在帧的对象疑点仍不生成项，原始 JSONL 与几何保持不变。`doubt` 项类别为 `missing/association/position/static/check`；新增 `source: reverse/disagreement/detector/track_ended`、`objectIds`、单一短 `labels/message`、`observations[{frameIndex,objectIds,candidates}]`；对象类每项最多3个对象；missing/static 项每帧只有一个候选，新增 `anchor:像素xyxy`、`region:九宫格方位`、`index:从1开始的序号`、`countInFrame:同起始帧项数`。反向轨迹连续整段为一项（允许缺 2 帧、至少 2 个观测），不受 5 帧上限；检测器路径要求至少 2 个采样点。`adoptObjectId` 是采用反向轨迹建议的规范对象编号；`detectorAgrees` 表示检测候选与反向轨迹一致。`track_ended` 带 `lastFrame/lastBox`。客户端必须按当前帧的 observation 显示，定位元数据不参与标注内容摘要。`candidates` 兼容字段仅含定位帧候选。候选对应规则独立于首尾追踪容差；同时覆盖多个现有框时列 association，人工框对象疑点仍豁免。进行中旧清单在 GET/start/pass 时按 evidence_policy（actionable-review-v4）升级，非疑点ID保留，新增/语义变化项不自动勾选；历史轮次及原检查记录保留，失败返回错误。
 
 - `POST /api/track` 新增 `combineResults:boolean`（默认 false 兼容旧请求）。新页面的首尾追踪固定 true，并携带人工 terminalAnnotations、reviewMode=true、startFrame=0。缺少端点时422；该字段进入幂等正文，不在重试时补写或切换。
 - true 时正向、人工尾帧反向及头部检测器共同生成实际输出；任务成功需同时有 `endpointVerification` 与 `jointTracking.state=checked`。jointTracking 只含状态、policy/version、checkedFrames、changedObjects、recoveredObjects、reviewCount等摘要，不增加画面上的采用理由。前端收到旧后端的仅核验结果必须报错，不能冒充综合完成。
@@ -21,11 +35,6 @@
 - 综合输出可附 `reviewEvidence.boundaryExit={policy:'boundary-exit-v1',exitedObjectIds,findings}`：已确认边界退出的AI身份停止出框，原相关诊断归档于 findings，不继续作为当前活动风险；不写工作区删除或正常确认。历史读取、JSONL下载、训练来源共用该只读投影，缺少有效原图尺寸不推测边界。身份重关联策略记录为 associationPolicy=first-anchor-v2，无新增客户端写入权限或数据库迁移。
 
 - `POST /api/track` 新增 `reviewMode`（默认 false 兼容旧客户端，新页面发送 true）。true 时质量疑点不暂停，按原单段上限自动续跑；状态新增 `checking`。模型/持久化错误仍 failed。
-- `POST /api/review/media/{id}/complete` 新增 `concentratedReview`。新页面在建立幂等请求时固定 true；旧持久请求不注入新字段，以保持旧回执哈希。新任务冻结 Tracking 疑点及 sourceRevision；不自动迁移已有三阶段任务。
-- `GET /api/review/sessions/{id}/evidence` 返回 groups（对象/原因/范围/原始样本）、实际 checkedFrames/failedFrames、backwardChecked/backwardFailed、sourceHash。reviewed 按涉及帧的有效提交计算，浏览没有写入。
-- 新 session 字段 `workflow=concentrated|legacy`、`finalVersionId`。集中审查的 freeze 同事务接受 B 为 F；仍要求完整逐帧显式提交。
-- `POST /api/review/sessions/{id}/reopen-review`：`expectedSessionRevision, frameIndex`，原审查员可重新开启已完成的新任务；版本/幂等保护，当前最终指针清空，旧包失效。后续须重新提交该帧并完成视频。
-- 新任务的 C 写入接口返回 `REVIEW_ACCEPTANCE_ONLY`，不能通过历史接口绕过审查。
 
 ## 通用协议
 
@@ -123,73 +132,15 @@
 
 跨文件发布通过持久日志与 SQL `review_write_receipts` 协调，收据重放早于业务版本/暂停校验，但轮次重置后不重放旧轮次操作；同账号原键原正文恢复已完成的重建，不再截断之后新模型的结果。相同 key 用不同意图返回 409。合法收据只证明过去已完成的分支操作；客户端恢复后另查询当前送审状态，已送审时停止 seed/模型启动，查询失败保留原起点待重试，不当作未送审。发布失败和重启按提交证据恢复两份文件，读取不能混用中间状态；临时故障保留原请求、暂停和数据，冲突需明确重读。当前暂停由真实追踪任务持久化，普通工作区 PUT 可以补展示信息和删除/撤销对象，但不能清空或伪造已确认暂停；显式反馈或重建才解除。运行时暂停更新不改变人工工作区 revision。
 
-## A 完成与 B
-
-实现：[review_workflow_routes.py](../backend/app/review_workflow_routes.py)、[reviewWorkflowApi.ts](../frontend/src/api/reviewWorkflowApi.ts)。前缀 `/api/review`。
-
-| 方法与相对路径 | 请求/作用 |
-| --- | --- |
-| `GET /media/{mediaId}/completion-preview` | 来源 revision、有框/空/未知帧及未知范围 |
-| `POST /media/{mediaId}/complete` | `expectedSourceRevision`、`confirmComplete`、`explicitEmptyFrameRanges:[{start,end}]`（0 起，含端点） |
-| `GET /sessions`、`/sessions/{sid}` | 任务列表、详情 |
-| `POST /sessions/{sid}/claim` | 原子领取，可自审 |
-| `GET /sessions/{sid}/objects` | 全视频对象目录，`items:[{objectId,classKey,origin}]`；origin 为 baseline/review |
-| `POST /sessions/{sid}/objects` | `expectedSessionRevision`、可选 `classKey`；保留新对象身份，返回 `{session,object}`，原键重放不再分配 |
-| `POST /sessions/{sid}/return-annotation` | `expectedSessionRevision,reason`；当前审查员将进行中任务退回人工标注，旧任务只读、历史保留 |
-| `GET /media/{mediaId}/submission-status` | `items` 为活动送审任务及 `canWithdraw`，排除已撤回/退回人工任务；`history` 提供退回人工任务及原因 |
-| `POST /sessions/{sid}/withdraw` | `expectedSessionRevision`；仅送审者且审查尚未领取/编辑，保留 A、任务置 `withdrawn` |
-| `POST /media/{mediaId}/reset-annotations` | `expectedRevision`、`confirmDiscard:true`；覆盖重新标注，已送审活动任务或 AI 运行时拒绝，返回工作区新 revision / generationId |
-| `GET /sessions/{sid}/frames/{fi}` | A、当前有效框、草稿、上次成功提交、帧版本/权限 |
-| `PUT /sessions/{sid}/frames/{fi}/draft` | `expectedFrameRevision`、`patch` |
-| `POST /sessions/{sid}/frames/{fi}/submit` | `expectedFrameRevision`、`patch` |
-| `POST /sessions/{sid}/frames/{fi}/discard` | `expectedFrameRevision`，恢复上次有效提交或 A |
-| `POST /sessions/{sid}/freeze` | `expectedSessionRevision`，固定 B、changes、C 任务 |
-| `PUT /cursors` | `sessionId`、`frameIndex`、`expectedCursorRevision` |
-
-`patch` 是当前帧相对 A 的完整净差量，坐标为原图像素：`{objectId,bbox}` 默认为 update；`{op:"add",objectId,classKey,bbox}` 补当前帧；`{op:"delete",objectId}` 删除本帧。add 只能关联本任务全视频目录中的合法身份，重复身份、非法类别/坐标拒绝。新增 ID 先由 objects 接口分配，不能客户端猜号。唯一视频类别默认继承；多类别必须明确选择已有类别，全空 A 默认项目类别 rare sperm。已有对象类别不可改，不能因补标把 rare sperm 拆成另一类 sperm。A 不改写；净差量消失则无需 C 决定。
-
-Session 关键字段：`id, baselineId, revision, state, reviewerId, media, progress, resume, permissions, readOnlyReason, completedReviewVersionId,submittedBy,withdrawalBlockedReason,returnAnnotation`。`permissions.canReturnAnnotation` 表示当前审查员是否可退回人工；`returnAnnotation` 含 reason/actorId/createdAt。`progress` 含 `submittedFrames/unsubmittedFrames/draftFrames/modifiedFrames/modifiedBoxes/percent`；`resume` 含最后浏览、首个未提交、草稿索引及游标版本。Frame 关键字段：`frameRevision/state/hasDraft/baselineObjects/effectiveObjects/patch/lastSubmission/permissions`。不要用 `lastSubmission != null` 推断当前已提交。
-
-`resume.submittedFrameIndexes` 是由当前帧状态 `submitted` 投影出的只读 0 起索引数组，供审查帧条绘制已提交状态；它不是客户端提交进度的写入口。已提交帧重新编辑为草稿或被退回重审后，应从该数组移除，仍保留其历史 submission；放弃草稿恢复有效提交或重新提交成功后再出现。`resume.draftFrameIndexes` 表示当前草稿，退回标记来自退回记录，不能仅凭历史提交引用、当前浏览帧或帧条颜色判定视频已完成。
-
-上传相同内容返回 409 `DUPLICATE_VIDEO`，正文 `{message,code,duplicate:{mediaId,videoName,canOverwrite,reason,workspaceRevision,media}}`；`media` 是现存源视频元信息，不会保存第二份上传。覆盖通过上表 reset 接口完成，使用原键原正文重试；目录与未撤回 A 的关联在服务端再次校验。已覆盖工作区 GET 带 generationId；旧无版本保存返回 428。该视频之后的人工记录、seed、rewind 和 Tracking 写请求携带当前 generationId，缺失或旧值返回 409，在修改文件/DB或清未来分支之前拒绝。尚未覆盖的旧工作区保持兼容。
-
-Session 另带 `returnRequests:[{frameIndex,reason,confirmationId}]`，仅未解决的本帧重审请求。撤回后再次送审创建新 A/任务，不复用 `withdrawn` 或 `returned_to_annotation`；领取与撤回使用同一 SQL 事务竞争。
-
-旧上传任意 frames 冻结 A 的路由不用于新流程；历史不完整来源只读，不能在前端填充假帧修复。
-
-## C 与完整最终版本
-
-实现：[confirmation_workflow_routes.py](../backend/app/confirmation_workflow_routes.py)、[confirmationApi.ts](../frontend/src/api/confirmationApi.ts)。前缀 `/api/confirmation`。
-
-| 方法与相对路径 | 请求/作用 |
-| --- | --- |
-| `GET /sessions`、`/sessions/{sid}` | 任务、进度、权限、恢复/撤销信息 |
-| `GET /sessions/{sid}/changes` | 净变化及当前决定 |
-| `GET /sessions/{sid}/frames/{fi}` | 固定完整 A/B 帧对象 |
-| `POST /sessions/{sid}/claim` | 原子领取，可自确认 |
-| `PUT /sessions/{sid}/changes/{changeId}/decision` | `choice:'A'|'B'`、`expectedDecisionRevision` |
-| `POST /sessions/{sid}/undo` | `actionId`、`expectedSessionRevision` |
-| `POST /sessions/{sid}/finalize`、`/reopen` | `expectedSessionRevision` |
-| `POST /sessions/{sid}/return` | `expectedSessionRevision`、`changeId`、`reason`（1–1000 字）；当前确认人将该项所在整帧退回原 B 重审 |
-| `PUT /sessions/{sid}/cursor` | `changeId`、`expectedCursorRevision` |
-
-`Change` 含 `changeId/frameIndex/objectId/annotationId/beforeBbox/afterBbox/changeKind/metrics/decisionRevision/decision`。`changeKind` 为 update/add/delete；beforeBbox 或 afterBbox 可为 JSON null，表示该版本不存在该框，不等于读取失败。增删项的几何指标为 null。C 不上传任意新 bbox 或类别，只选择 A/B 的框或明确不存在状态。`progress` 含 `totalChanges/decided/pending/keptA/adoptedB/percent`，零修改百分比不替代显式完成。
-
-C 权限另带 `canReturn`；返回状态为 `returned`，`returnedReview:{frameIndex,reason,reviewSessionId,nextConfirmationId,reviewState,returnedToAnnotation,annotationReturnReason}|null` 指向原 B 及重审后新 C。旧 C 不再可编辑或完成。B 仅取消被退回帧的有效提交，保留旧 submission 与起始 B 几何；草稿/恢复不能代替重新显式提交。再次 freeze 固定新 B/C，其他帧存在性、类别、几何均未变且已有决定的项以带来源关联的新事件继承，退回帧不继承决定；新 C 保留原确认人。
-
-新版 C 写请求携带 `X-Confirmation-Response: delta`。响应新增 `itemsScope:'changed'`：决定/撤销仅返回受影响项，游标/领取/完成/重新确认/退回返回空 `items`；完整 `session`、选中项、下个待选项仍返回。前端按 changeId 合并而不是替换全列表，检测到其他窗口的业务版本跳变时重新 GET session/changes。无 header 的旧客户端仍返回全量列表。幂等回执保存首次响应，重试返回同一响应形态；新版能重放升级前的全量回执。响应模式不改变原请求业务 hash，不删除历史决定或旧回执。会话统计与下个待选项通过 SQL 计算，不为浏览位置反复解码全视频几何。
-
-`GET /api/final-versions/{id}` 和 `/{id}/download` 提供完整 JSON。每帧存在，包括空 `objects:[]`；对象保留稳定身份、类别、最终框、A/B 框及 `choice/resolution/changeId/decisionEventId`。未改对象 `choice:null`、`resolution:'unchanged'`，来源 A。完整帧表不能用仅有对象的表代替，否则会丢空帧。被确认删除/拒绝补标的对象不进入最终帧 objects，但独立决定记录及统计/训练审计仍保留其事件与两侧状态。
-
 ## 训练导出
 
 实现：[training_export_routes.py](../backend/app/training_export_routes.py)、[trainingExportApi.ts](../frontend/src/api/trainingExportApi.ts)。
 
 | 方法与路径 | 作用 |
 | --- | --- |
-| `POST /api/datasets/exports/preview` | `finalVersionIds`，只读校验/统计 |
-| `POST /api/datasets/exports` | `finalVersionIds`、`format:'yolo'|'coco'|'both'`、`splitRatio`（默认 0.8） |
+| `POST /api/datasets/exports/preview` | `finalVersionIds`，可选划分字段同下；只读校验/统计，另返回 `splitMode`、`splitFrames{train,val,test}`、`videos[{finalVersionId,frameCount,objectCount,split}]` |
+| `POST /api/datasets/exports` | `finalVersionIds`、`format:'yolo'|'coco'|'both'`、`splitRatio`（训练比例，默认 0.8）、`splitMode:'frame'|'video'`（省略时为旧的按帧划分）、`testRatio`（仅 video，默认 0，`splitRatio+testRatio<1`）、`videoSplits{finalVersionId:'train'|'val'|'test'}`（仅 video，须为所选视频）、`includeSourceVideos`（默认 false）。直接标注快照的视频另在 ZIP 写 `review/decisions.jsonl`；`manifest.reviewDecisions={file,count}` 在无判断时 count=0 且不生成文件 |
+| `GET /api/datasets/annotations/snapshots` | 本人每个视频最新的标注导出快照：`finalVersionId,mediaId,name,frameCount,createdAt,valid,reason`；标注变化或视频不可用时 `valid:false` |
 | `GET /api/datasets/exports/{id}` | 本人任务阶段、帧数、错误和下载资格 |
 | `GET /api/datasets/exports/{id}/download` | 校验当前资格后返回真实 ZIP |
 | `POST /api/export/dataset` | 旧入口拒绝，410 `FINAL_CONFIRMATION_REQUIRED` |

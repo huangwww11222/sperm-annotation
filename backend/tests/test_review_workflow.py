@@ -15,7 +15,6 @@ from app.review_repository import (
     upsert_media_revision,
     create_review_session,
 )
-from app.review_workflow_routes import router
 
 
 @pytest.fixture
@@ -272,59 +271,6 @@ def test_metrics_are_pixel_iou_and_center_displacement():
     assert w.box_metrics([0, 0, 10, 10], [20, 20, 30, 30])["iou"] == 0
 
 
-def test_api_contract_auth_validation_and_error_id(task):
-    app = FastAPI()
-    app.include_router(router)
-    client = TestClient(app)
-    url = f"/api/review/sessions/{task}/frames/0/draft"
-    r = client.get("/api/review/sessions")
-    assert r.status_code == 401 and r.json()["requestId"] == r.headers["X-Request-ID"]
-    client.headers.update({"Authorization": "Bearer " + sign_jwt({"uid": 2})})
-    body = {"patch": moved(), "expectedFrameRevision": 0}
-    assert client.put(url, json=body).status_code == 428
-    client.headers.update({"X-Review-Contract": "2", "Idempotency-Key": "strict"})
-    for bad in [
-        {**body, "addObjects": []},
-        {**body, "patch": [{"objectId": 1, "bbox": [1, 2, 3]}]},
-    ]:
-        assert client.put(url, json=bad).status_code == 422
-    r = client.put(
-        url,
-        content='{"expectedFrameRevision":0,"patch":[{"objectId":1,"bbox":[NaN,0,10,10]}]}',
-        headers={"Content-Type": "application/json"},
-    )
-    assert r.status_code == 422
-    r = client.put(url, json=body)
-    assert r.status_code == 200 and r.json()["frame"]["hasDraft"]
-    assert client.put(url, json=body).json() == r.json()
-
-
-def test_existing_confirmation_api_reads_only_latest_net_changes(task):
-    edit(task, "submit", moved(11))
-    edit(task, "submit", moved(13))
-    edit(task, "submit", fi=1)
-    edit(task, "submit", fi=2)
-    final = done(task)
-    from app.review_routes import confirm_router, final_router
-    from app.confirmation_workflow import migrate as migrate_confirmation
-    with db.connect() as c:
-        migrate_confirmation(c)
-
-    app = FastAPI()
-    app.include_router(confirm_router)
-    app.include_router(final_router)
-    client = TestClient(app)
-    client.headers.update({"Authorization": "Bearer " + sign_jwt({"uid": 3})})
-    assert client.get("/api/final-versions/").status_code == 200
-    r = client.get(
-        f"/api/confirmation/sessions/{final['confirmationSessionId']}/changes"
-    )
-    assert r.status_code == 200
-    changes = r.json()["items"]
-    assert len(changes) == 1 and changes[0]["afterBbox"] == moved(13)[0]["bbox"]
-    assert changes[0]["beforeBbox"] == [10, 20, 30, 40]
-
-
 def test_session_ensure_is_atomic_replay_and_validates_baseline(task):
     bid = w.get_session(task, 2)["baselineId"]
     a = w.ensure_session(bid, 2, "ensure")
@@ -341,50 +287,3 @@ def test_existing_self_assignment_can_edit_without_configuration(task):
     assert w.get_session(task, 1)["permissions"]["canEdit"]
     assert edit(task, "draft", moved(), uid=1)["frame"]["hasDraft"]
 
-
-def test_author_can_claim_and_complete_own_review_via_api(task, monkeypatch):
-    # A stale deployment flag must not reinstate the removed restriction.
-    monkeypatch.setenv("REVIEW_ALLOW_SELF", "false")
-    with db.connect() as c:
-        c.execute("UPDATE review_sessions SET reviewer_id=NULL WHERE id=?", (task,))
-    app = FastAPI()
-    app.include_router(router)
-    client = TestClient(app)
-    client.headers.update(
-        {"Authorization": "Bearer " + sign_jwt({"uid": 1}), "X-Review-Contract": "2"}
-    )
-    root = f"/api/review/sessions/{task}"
-    assert client.get(root).json()["permissions"]["canClaim"]
-    result = client.post(root + "/claim", headers={"Idempotency-Key": "self-claim"})
-    assert result.status_code == 200
-    assert result.json()["session"]["permissions"]["canEdit"]
-    draft = client.put(
-        root + "/frames/0/draft",
-        json={"expectedFrameRevision": 0, "patch": moved()},
-        headers={"Idempotency-Key": "self-draft"},
-    )
-    assert draft.status_code == 200 and draft.json()["frame"]["hasDraft"]
-    for fi in range(3):
-        f = client.get(root + f"/frames/{fi}").json()
-        result = client.post(
-            root + f"/frames/{fi}/submit",
-            json={"expectedFrameRevision": f["frameRevision"], "patch": f["patch"]},
-            headers={"Idempotency-Key": f"self-submit-{fi}"},
-        )
-        assert result.status_code == 200
-    session = result.json()["session"]
-    assert session["permissions"]["canComplete"]
-    result = client.post(
-        root + "/freeze",
-        json={"expectedSessionRevision": session["revision"]},
-        headers={"Idempotency-Key": "self-complete"},
-    )
-    assert result.status_code == 200
-    assert result.json()["session"]["state"] == "reviewed"
-    assert not result.json()["session"]["permissions"]["canEdit"]
-    assert client.get(root + "/frames/0").json()["baselineObjects"][0]["bbox"] == [
-        10,
-        20,
-        30,
-        40,
-    ]

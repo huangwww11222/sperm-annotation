@@ -1,5 +1,7 @@
 # 存储、快照与迁移边界
 
+`annotation_reviews` 兼容追加可空的 `evidence_policy`、`checklist_history_json`。未结束旧轮次升级审查筛选/分组策略时，在同一SQLite事务内归档旧items/检查快照并替换疑点清单；原 `annotation_review_checks` 记录不删除。已通过历史轮次不重建，原Tracking诊断和几何文件不改写。新增列对旧数据兼容，不改变离线存储 contract；策略版本（当前 actionable-review-v3）包含筛选版本和独立候选对应容差指纹，避免每次读取反复重建。
+
 ## 2026-10-29 当前入口
 
 annotation_export_snapshots 独立保存直接导出快照：账号/请求键、正文哈希、来源版本、原视频哈希和元数据、完整帧框及快照哈希。快照不写 final_versions、不创建A/B/C/F。audit requiredFeatures=annotation_direct_export_v1，包含原快照及操作者；下游不支持时须拒绝，不能将其误作经过审查的数据。
@@ -53,7 +55,7 @@ storage/
 
 Tracking JSONL 同样先写临时文件再原子替换，发布失败保留旧分支。长时视频解码、模型推理和按需预览编码不占用来源锁，结果/预览发布才使用短锁；追踪运行期间工作区只允许浏览状态保存，框、人工基准、删除规则写入仍拒绝。预览生成在 `.frame_cache/overlay-*.mp4` 临时文件进行，成功且输入签名未变化才发布；它及 meta 文件是可重建缓存，不影响 A/B/F 或训练集原图。任务内存与前端待查询记录不代表推理跨重启恢复，启动幂等回执在当前进程内有效。
 
-覆盖重新标注仅允许没有未撤回送审任务的媒体。重置使用 SQL 写事务、工作区 revision 与幂等键，移动旧 workspace/seed/results/overlay 到恢复目录，写入空工作区并删除该 media_id 的活动人工查询记录；原视频、media.json、历史 A 保留。成功后清理临时旧文件，失败回滚；启动按 journal 和成功回执协调进程中断后的文件状态，不能当作普通缓存直接删除。新的 generationId 使前端丢弃旧框/撤销/校准缓存，并在重放待重试草稿前识别轮次变化；仅已确认的覆盖允许丢弃旧请求，普通冲突不能静默覆盖。旧版本或旧无版本客户端不能写回已舍弃状态。新增字段和表均为兼容增量迁移，存储运行契约保持 1。
+覆盖重新标注不再受历史送审任务限制（历史 A 不可变，不受影响）。重置使用 SQL 写事务、工作区 revision 与幂等键，移动旧 workspace/seed/results/overlay 到恢复目录，写入空工作区并删除该 media_id 的活动人工查询记录；原视频、media.json、历史 A 保留。成功后清理临时旧文件，失败回滚；启动按 journal 和成功回执协调进程中断后的文件状态，不能当作普通缓存直接删除。新的 generationId 使前端丢弃旧框/撤销/校准缓存，并在重放待重试草稿前识别轮次变化；仅已确认的覆盖允许丢弃旧请求，普通冲突不能静默覆盖。旧版本或旧无版本客户端不能写回已舍弃状态。新增字段和表均为兼容增量迁移，存储运行契约保持 1。
 
 工作区当前还保存 `revision`、稳定 ID 的 `deletedObjectIds/deletedFrameObjects`、服务端生成的 `normalMotionSamples` 和 `trackingFeedbackEvents`。内部 `_writeReceipts` 与状态同一次原子替换，GET 不暴露回执；响应丢失后原键重放不会重复递增版本或新增反馈。文件替换失败保留原状态和版本，日志记录 `annotation.workspace_save_failed`。这些状态受单进程来源锁保护，不属于 SQLite 跨资源事务。
 
@@ -105,6 +107,7 @@ seed 的临时写入或替换失败保留旧文件，临时文件清理后可重
 | 游标 | `review_bookmarks`、`confirmation_bookmarks`，按用户与任务隔离、版本独立 |
 | 幂等 | `review_write_receipts` 与业务变化同一事务；`training_exports` 有操作者+请求键唯一约束 |
 | 导出 | `training_exports` 存任务设置、进度、manifest、错误、完成状态 |
+| 审查（2026-11-01） | `annotation_reviews` 每视频每轮一行：轮次、状态 open/passed、开始人/时间、开始时逐帧内容（`start_frames_json`）、清单（`items_json`）、是否加严；通过时记录通过人/时间、内容摘要 `passed_revision`、通过时逐帧内容、列表用的工作区/追踪文件标记 `passed_stamp`、修改记录 `changes_json`。`annotation_review_checks` 每项一行：结果 ok/fixed/empty/not_target、检查人、时间。只追加轮次，不改写旧轮。`annotation_review_exclusions` 记录“不是精子”的排除位置：`id/media_id/review_id/item_id/source/frames_json/actor_id/created_at/revoked_at/revoked_by`；`frames_json` 为原图像素 `[{frameIndex,bbox:[x1,y1,x2,y2]}]`，只追加和撤销，不物理删除 |
 | 审计身份/证据 | `audit_source_identity` 保存部署身份；`training_export_audits` 按 export_id 唯一保存规范 JSON、采集时间和 SHA；触发器禁止更新/删除 |
 
 A/B/F 不随浏览、缩放、草稿、重新确认或退回重审而改写。F 的对象集合和类别继承 A，只选择几何来源。当前帧重审使用上述事件表；旧问题标记表不作为这一流程的状态来源。
@@ -142,6 +145,8 @@ A/B/F 不随浏览、缩放、草稿、重新确认或退回重审而改写。F 
 首尾双向追踪没有新增业务数据库或独立可变模型标签文件。尾帧人工框保留在 workspace_state.json 的 manualAnnotations 中，唯一对应后统一 objectId，另存 endpointOriginalObjectId / endpointAnchorHash 以保留原局部编号并防止重复转换。本次首尾请求快照由原追踪幂等正文固定。JSONL 行 reviewEvidence.endpointCheck 保存状态、策略/端点哈希、一对一身份对应及末帧 terminalAnnotations 原始快照；反向框仅在差异疑点中保存，不替换正向对象数组。送审时将原始尾帧快照复制到集中审查 evidence_json，后续重追不抹除历史。A 来源合并兼容尚未完成客户端编号统一的尾框，已转换框不再次应用映射；未确定对应不强制合并。
 
 首帧回归纠错保留原锚点哈希与 endpointOriginalObjectId，同一哈希下明确映射更新仍从原编号应用，不能把旧 canonical ID 当原编号。`reviewEvidence.boundaryExit` 记录已退出的AI身份及归档诊断；历史读取投影只改变返回结果，不覆写源JSONL或删除墓碑。原始人工框及审查历史保留，无数据库/离线存储契约变更。训练来源摘要包含当前投影策略，避免继续把旧错配版本当作当前来源。
+
+训练导出目录可包含 `review/decisions.jsonl`：这是直接标注快照视频最近一次通过审查中，审查员对 `missing/static` 候选的 `fixed` / `not_target` 判断，每个 observation 一行，带 `sourceSha256/frameIndex/bbox/category/source/result/reviewId/itemId`。它用于检测模型的困难样本追溯，不是 YOLO 标签；没有判断时不生成文件，manifest 的 `reviewDecisions.count` 为 0。合并脚本按视频及实际保留的最新导出版本筛选判断后追加，保留原JSONL字段和行格式；不会将多视频包的整份判断重复追加，也不混入被新版替代的视频旧判断。声明有判断但文件缺失、行数不符或来源不属于包内视频时明确拒绝合并。
 
 `concentrated_reviews` 保存 session/source_hash/不可变 evidence_json 和当前 final_version_id；`concentrated_reopens` 保存重开帧、原最终版本、操作者与时间。Tracking 行 `reviewEvidence` 包含 findings、检查状态、反向核验状态、expectedObjectIds；同一原子发布保护。送审固定证据不再依赖可变工作区。
 

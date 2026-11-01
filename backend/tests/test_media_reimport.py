@@ -43,7 +43,7 @@ def seed_workspace(client, mid):
 
 
 def reset(client, mid, revision=1, key='reset-request'):
-    return client.post('/api/review/media/'+mid+'/reset-annotations', json={'expectedRevision': revision, 'confirmDiscard': True}, headers={'Idempotency-Key': key})
+    return client.post('/api/annotation-review/media/'+mid+'/reset-annotations', json={'expectedRevision': revision, 'confirmDiscard': True}, headers={'Idempotency-Key': key})
 
 
 def test_identical_bytes_renamed_are_duplicate_and_cancel_does_not_create_media(imports):
@@ -94,35 +94,6 @@ def test_overwrite_clears_all_active_annotation_files_and_db_and_replays(imports
     assert client.put('/api/track/workspace/'+mid, json={'expectedRevision': 1}, headers={'Idempotency-Key': 'stale'}).status_code == 409
     assert client.put('/api/track/workspace/'+mid, json={}).status_code == 428
     assert reset(client, mid, revision=2).status_code == 409
-
-
-def test_sent_video_requires_withdrawal_then_can_reset(imports):
-    client, content = imports
-    mid = upload(client, content).json()['mediaId']; directory = seed_workspace(client, mid)
-    preview = client.get('/api/review/media/'+mid+'/completion-preview').json()
-    request = {'expectedSourceRevision': preview['sourceRevision'], 'confirmComplete': True, 'explicitEmptyFrameRanges': [{'start': 1, 'end': 2}]}
-    sent = client.post('/api/review/media/'+mid+'/complete', json=request, headers={'Idempotency-Key': 'send'}).json()['session']
-    duplicate = upload(client, content).json()['duplicate']
-    assert not duplicate['canOverwrite'] and '先撤回' in duplicate['reason']
-    assert reset(client, mid).status_code == 409
-    withdrawn = client.post('/api/review/sessions/'+sent['id']+'/withdraw', json={'expectedSessionRevision': sent['revision']}, headers={'Idempotency-Key': 'withdraw'})
-    assert withdrawn.status_code == 200
-    assert reset(client, mid).status_code == 200
-    with db.connect() as c:
-        assert c.execute('SELECT COUNT(*) FROM baseline_frames WHERE baseline_id=?', (sent['baselineId'],)).fetchone()[0] == 3
-
-
-def test_review_claimed_after_duplicate_prompt_blocks_reset(imports):
-    client, content = imports
-    mid = upload(client, content).json()['mediaId']; directory = seed_workspace(client, mid)
-    preview = client.get('/api/review/media/'+mid+'/completion-preview').json()
-    request = {'expectedSourceRevision': preview['sourceRevision'], 'confirmComplete': True, 'explicitEmptyFrameRanges': [{'start': 1, 'end': 2}]}
-    sent = client.post('/api/review/media/'+mid+'/complete', json=request, headers={'Idempotency-Key': 'send'}).json()['session']
-    review.write('claim', sent['id'], 2, 'begin-review', {})
-    response = upload(client, content).json()['duplicate']
-    assert not response['canOverwrite'] and '无法重复导入' in response['reason']
-    assert reset(client, mid).status_code == 409
-    assert annotation_state.read_state(directory)['manualAnnotations']
 
 
 def test_busy_or_changed_revision_does_not_remove_files(imports, monkeypatch):
@@ -187,3 +158,18 @@ def test_old_seed_manual_and_tracking_requests_cannot_restore_discarded_generati
     assert client.post('/api/annotation/annotations/manual', json={**manual, 'generationId': generation}).status_code == 201
     assert client.post('/api/track/annotations', json={**seed, 'generationId': generation}).status_code == 201
     assert (directory / 'annotations_frame_000000.json').is_file()
+
+
+def test_old_review_history_no_longer_locks_overwrite(imports):
+    """Retired A/B/C/F tasks stay as immutable history and do not block re-annotation."""
+    client, content = imports
+    mid = upload(client, content).json()['mediaId']; directory = seed_workspace(client, mid)
+    from app.review_repository import create_review_session, freeze_baseline, upsert_media_revision
+    media = upsert_media_revision(mid, 'd' * 64, 10, 64, 48, 30, 3)
+    baseline = freeze_baseline(media, mid, 1, [dict(frameIndex=i, coverage='empty', objects=[]) for i in range(3)])
+    sid = create_review_session(baseline['id'])['id']
+    review.write('claim', sid, 2, 'old-claim', {})
+    assert upload(client, content).json()['duplicate']['canOverwrite']
+    assert reset(client, mid).status_code == 200
+    with db.connect() as c:
+        assert c.execute('SELECT COUNT(*) FROM baseline_frames WHERE baseline_id=?', (baseline['id'],)).fetchone()[0] == 3

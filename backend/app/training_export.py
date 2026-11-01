@@ -40,6 +40,8 @@ def migrate(c):
     audit.migrate(c)
     from .annotation_export import migrate as annotation_migrate
     annotation_migrate(c)
+    from .annotation_review import migrate as review_migrate
+    review_migrate(c)
     c.commit()
 
 
@@ -222,11 +224,13 @@ def snapshots(c, ids):
     }
 
 
-def preview(ids):
+def preview(ids, body=None):
     with closing(connect()) as c:
         c.execute("BEGIN")
-        _, summary = snapshots(c, ids)
-        return summary
+        versions, summary = snapshots(c, ids)
+        if body is None:
+            return summary
+        return {**summary, **split_plan(versions, body)}
 
 
 def create(actor, key, body):
@@ -247,6 +251,10 @@ def create(actor, key, body):
         from .annotation_export import authorize
         authorize(c, body["finalVersionIds"], actor)
         versions, summary = snapshots(c, body["finalVersionIds"])
+        unknown = set(body.get("videoSplits") or {}) - set(body["finalVersionIds"])
+        if unknown:
+            raise ReviewError("INVALID_VIDEO_SPLIT", "手动划分包含未选择的视频", 422)
+        split_plan(versions, body)  # Reject impossible manual splits before queueing.
         eid = "train_" + uuid.uuid4().hex
         c.execute(
             "INSERT INTO training_exports(id,actor_id,request_key,request_hash,request_json,state,total_frames,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
@@ -329,6 +337,94 @@ def mark_failed(eid, code, message):
         )
 
 
+SPLITS = ("train", "val", "test")
+
+
+def split_settings(body):
+    """Requests stored before video-level splitting keep their original frame-order meaning."""
+    return {
+        "mode": body.get("splitMode", "frame"),
+        "train": body["splitRatio"],
+        "test": body.get("testRatio", 0.0),
+        "overrides": body.get("videoSplits") or {},
+    }
+
+
+def video_bucket(sha256):
+    """Stable 0..1 position from the source content, so a video keeps its split across exports."""
+    return int(sha256[:12], 16) / float(16**12)
+
+
+def split_videos(versions, settings):
+    """Assign every frame of a video to one split; neighbouring frames never leak across splits."""
+    train, test = settings["train"], settings["test"]
+    overrides = settings["overrides"]
+    chosen = []
+    for v in versions:
+        fixed = overrides.get(v["final"]["id"])
+        if fixed:
+            chosen.append(fixed)
+            continue
+        u = video_bucket(v["media"]["sha256"])
+        chosen.append("train" if u < train else "test" if u >= 1 - test else "val")
+    positive = [any(f["objects"] for f in v["frames"]) for v in versions]
+    movable = sorted(
+        (i for i, v in enumerate(versions) if v["final"]["id"] not in overrides),
+        key=lambda i: video_bucket(versions[i]["media"]["sha256"]),
+    )
+    if len(versions) > 1:
+        # Small batches can hash unevenly; keep the package trainable and measurable.
+        if not any(p and s == "train" for p, s in zip(positive, chosen)):
+            i = next((i for i in movable if positive[i]), None)
+            if i is None:
+                raise ReviewError(
+                    "SPLIT_WITHOUT_TRAINING_TARGETS",
+                    "训练集没有含目标的视频，请调整手动指定的划分",
+                    422,
+                )
+            chosen[i] = "train"
+        if sum(p and s == "train" for p, s in zip(positive, chosen)) > 1 and not any(
+            p and s == "val" for p, s in zip(positive, chosen)
+        ):
+            i = next(
+                (i for i in reversed(movable) if positive[i] and chosen[i] == "train"),
+                None,
+            )
+            if i is not None:
+                chosen[i] = "val"
+    return chosen
+
+
+def assign_splits(versions, body):
+    settings = split_settings(body)
+    if settings["mode"] == "frame":
+        return split_samples(versions, settings["train"]), None
+    chosen = split_videos(versions, settings)
+    return {
+        (vi, f["frameIndex"]): chosen[vi]
+        for vi, v in enumerate(versions)
+        for f in v["frames"]
+    }, chosen
+
+
+def split_plan(versions, body):
+    """Preview of the exact split the package will use."""
+    assignments, chosen = assign_splits(versions, body)
+    counts = {s: 0 for s in SPLITS}
+    for split in assignments.values():
+        counts[split] += 1
+    videos = [
+        {
+            "finalVersionId": v["final"]["id"],
+            "frameCount": len(v["frames"]),
+            "objectCount": sum(len(f["objects"]) for f in v["frames"]),
+            "split": chosen[vi] if chosen else None,
+        }
+        for vi, v in enumerate(versions)
+    ]
+    return {"splitMode": split_settings(body)["mode"], "splitFrames": counts, "videos": videos}
+
+
 def split_samples(versions, ratio):
     samples = [(vi, f) for vi, v in enumerate(versions) for f in v["frames"]]
     cut = max(1, min(len(samples) - 1, int(len(samples) * ratio)))
@@ -356,7 +452,8 @@ def build_package(eid, body, versions, summary, work, audit_snapshot, audit_sha)
     from .main import find_video, media_dir
 
     class_ids = {name: i for i, name in enumerate(summary["classNames"])}
-    assignments = split_samples(versions, body["splitRatio"])
+    assignments, chosen = assign_splits(versions, body)
+    include_videos = body.get("includeSourceVideos", False)
     manifest = {
         "schemaVersion": 2,
         "sourceSystemId": audit_snapshot["sourceSystemId"],
@@ -367,8 +464,11 @@ def build_package(eid, body, versions, summary, work, audit_snapshot, audit_sha)
         "finalVersionIds": body["finalVersionIds"],
         "classNames": summary["classNames"],
         "requestedTrainRatio": body["splitRatio"],
-        "splitStrategy": "frame-order; keep positives in train and, when possible, val",
-        "counts": {**summary, "train": 0, "val": 0},
+        "requestedTestRatio": split_settings(body)["test"],
+        "splitStrategy": "frame-order; keep positives in train and, when possible, val"
+        if chosen is None
+        else "video-level; whole videos by stable source hash or manual choice, keep positives in train and, when possible, val",
+        "counts": {**summary, "train": 0, "val": 0, "test": 0},
         "sources": [],
         "samples": [],
     }
@@ -382,9 +482,10 @@ def build_package(eid, body, versions, summary, work, audit_snapshot, audit_sha)
                 {"id": i + 1, "name": name} for name, i in class_ids.items()
             ],
         }
-        for split in ["train", "val"]
+        for split in SPLITS
     }
     done = ann_id = 0
+    review_decisions = []
     for vi, v in enumerate(versions):
         m = v["media"]
         video = find_video(media_dir(m["media_id"]))
@@ -396,6 +497,10 @@ def build_package(eid, body, versions, summary, work, audit_snapshot, audit_sha)
             raise ReviewError(
                 "SOURCE_VIDEO_CHANGED", "原始视频已变化，与审查时的视频不一致"
             )
+        if "directFrames" in v:
+            from .annotation_review import review_decisions as export_review_decisions
+            with closing(connect()) as c:
+                review_decisions.extend(export_review_decisions(c, m["media_id"], m["sha256"]))
         manifest["sources"].append(
             {
                 "finalVersionId": v["final"]["id"],
@@ -411,6 +516,8 @@ def build_package(eid, body, versions, summary, work, audit_snapshot, audit_sha)
                 "frameCount": m["frame_count"],
                 "snapshotHash": v["final"]["snapshot_hash"],
                 "annotationOnly": "directFrames" in v,
+                "split": chosen[vi] if chosen else None,
+                "videoFile": None,
             }
         )
         cap = cv2.VideoCapture(str(video))
@@ -529,6 +636,16 @@ def build_package(eid, body, versions, summary, work, audit_snapshot, audit_sha)
             raise ReviewError(
                 "SOURCE_VIDEO_CHANGED", "导出过程中原始视频发生变化，已停止导出"
             )
+        if include_videos:
+            rel = f"videos/v{vi:03d}__{video.name}"
+            (work / "videos").mkdir(exist_ok=True)
+            try:
+                shutil.copyfile(video, work / rel)
+            except OSError as exc:
+                raise ReviewError("VIDEO_COPY_FAILED", "原始视频复制失败", 503) from exc
+            if compute_file_sha256(work / rel) != m["sha256"]:
+                raise ReviewError("SOURCE_VIDEO_CHANGED", "复制的原始视频校验失败，已停止导出")
+            manifest["sources"][-1]["videoFile"] = rel
         # Preserve A/B/final decisions for provenance, separate from training label files.
         provenance = work / "provenance"
         provenance.mkdir(exist_ok=True)
@@ -541,6 +658,7 @@ def build_package(eid, body, versions, summary, work, audit_snapshot, audit_sha)
         config = {
             "train": "images/train",
             "val": "images/val",
+            **({"test": "images/test"} if manifest["counts"]["test"] else {}),
             "nc": len(class_ids),
             "names": {cid: name for name, cid in class_ids.items()},
         }
@@ -553,9 +671,16 @@ def build_package(eid, body, versions, summary, work, audit_snapshot, audit_sha)
         annotations = work / "annotations"
         annotations.mkdir(exist_ok=True)
         for split, data in coco.items():
+            if split == "test" and not data["images"]:
+                continue
             (annotations / f"instances_{split}.json").write_text(
                 packed(data), encoding="utf-8"
             )
+    if review_decisions:
+        review_file = work / "review/decisions.jsonl"
+        review_file.parent.mkdir(parents=True, exist_ok=True)
+        review_file.write_text("".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n" for row in review_decisions), encoding="utf-8")
+    manifest["reviewDecisions"] = {"file": "review/decisions.jsonl", "count": len(review_decisions)}
     (work / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -566,12 +691,17 @@ def build_package(eid, body, versions, summary, work, audit_snapshot, audit_sha)
 YOLO 标签为 class_id cx cy w h，坐标按实际图像尺寸归一化，类别编号从 0 开始。
 解压整个 ZIP 后，向 YOLO 传入本目录下 data.yaml 的绝对路径；无需访问导出服务器的目录。
 例如：`yolo detect train model=yolov8n.pt data=/绝对路径/数据集/data.yaml epochs=100`
-纯 COCO 导出使用 annotations/instances_train.json 和 instances_val.json，图片路径相对该 JSON 文件。
+纯 COCO 导出使用 annotations/instances_train.json、instances_val.json（有测试集时还有 instances_test.json），图片路径相对该 JSON 文件。
 
-训练/验证按确定的帧序划分；必要时交换一帧，保证训练集包含目标，且有至少两张正样本时验证集也包含目标。两部分没有重复图片。
-同一视频内的帧相关性较高；需要独立视频评估时，请在训练前按采集批次重新组织验证集。
+划分方式见 manifest.json 的 splitStrategy：
+- video-level：同一视频的所有帧只进入训练、验证、测试中的一个，验证/测试指标反映模型在没见过的视频上的效果。
+  每个视频按原文件内容固定落入同一集合，重复导出或分批导出时不会换组；manifest 的 sources[].split 记录每个视频的去向。
+  单个视频的包只含一个集合，用于之后与其他视频合并；可用 scripts/merge_training_exports.py 合并多个包。
+- frame-order：同一视频内按帧序切分，相邻帧几乎相同，验证指标会偏高，仅用于调试。
+勾选导出原视频时，videos/ 保存与审查时 SHA-256 一致的原文件，sources[].videoFile 指向对应文件。
 manifest.json 记录逐图片 sampleId、原始帧、视频、最终版本及 auditReference；文件名包含数据集身份。
 provenance/ 保留完整 A/B/最终框。完整人员与操作历史固定在服务端，通过运维审计导出命令获取。
+review/decisions.jsonl 记录审查员对漏标候选的判断（是精子 / 不是精子），可作为检测模型的困难样本，不是 YOLO 标签。
 """,
         encoding="utf-8",
     )
@@ -624,7 +754,13 @@ def run(eid):
         with zipfile.ZipFile(partial, "w", zipfile.ZIP_DEFLATED) as archive:
             for path in sorted(work.rglob("*")):
                 if path.is_file():
-                    archive.write(path, path.relative_to(work))
+                    # Videos are already compressed; storing them avoids a slow, useless deflate pass.
+                    stored = path.relative_to(work).parts[0] == "videos"
+                    archive.write(
+                        path,
+                        path.relative_to(work),
+                        zipfile.ZIP_STORED if stored else zipfile.ZIP_DEFLATED,
+                    )
         with closing(connect()) as c, c:
             c.execute("BEGIN IMMEDIATE")
             eligible(

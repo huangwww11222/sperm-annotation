@@ -3,13 +3,13 @@
 .annot-context{display:flex;align-items:center;gap:12px;min-width:0}
 .shell-annotate .annotation-view-body{flex:1;min-height:0}
 .shell-annotate .annotation-canvas{flex:1;min-height:0;display:flex;flex-direction:column;align-items:flex-start}
-.shell-annotate .canvas-scroll{padding:12px}
+/* The image gets its own area below the toolbar: no control floats over the picture. */
+.shell-annotate .canvas-scroll{position:relative;inset:auto;flex:1;width:100%;min-height:0;padding:12px}
 .shell-annotate .loupe{right:auto;top:auto;left:12px;bottom:12px}
 .shell-annotate .canvas-status{top:auto;bottom:14px}
-/* The image scroll surface stays absolute. These overlay controls follow each
-   other in normal flow, so a wrapped toolbar never sits under its own popover. */
-.shell-annotate .annotation-canvas>.shell-tools{position:relative;left:auto;top:auto;margin:12px 12px 0;width:fit-content;flex:none}
-.annot-enhance{position:relative;left:auto;top:auto;margin:6px 12px 12px;width:fit-content;max-width:calc(100% - 24px);min-height:0;max-height:160px;flex:0 1 auto;overflow:auto;overscroll-behavior:contain;z-index:34;border:1px solid var(--line);border-radius:8px;box-shadow:0 6px 20px #0004;background:var(--surface)}
+/* Toolbar and enhancement popover are rows above the image, in normal flow. */
+.shell-annotate .annotation-canvas>.shell-tools{order:-2;position:relative;left:auto;top:auto;margin:0;width:100%;flex:none;flex-wrap:wrap;border:0;border-bottom:1px solid var(--line);border-radius:0;box-shadow:none;padding:4px 8px}
+.annot-enhance{order:-1;position:relative;left:auto;top:auto;margin:6px 12px 12px;width:fit-content;max-width:calc(100% - 24px);min-height:48px;max-height:160px;flex:0 1 auto;overflow:auto;overscroll-behavior:contain;z-index:34;border:1px solid var(--line);border-radius:8px;box-shadow:0 6px 20px #0004;background:var(--surface)}
 .annot-coords{padding:0 8px;font-size:11px;color:#b9cad8;font-variant-numeric:tabular-nums;white-space:nowrap}
 .annot-time{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
 
@@ -53,3 +53,25 @@
 .head-proposal-status { position:absolute; top:64px; right:12px; max-width:min(360px,80%); padding:8px 12px; border-radius:8px; background:var(--surface); color:var(--text); border:1px solid var(--line); z-index:12; display:flex; align-items:center; gap:8px; font-size:13px; }
 
 .annotation-page .edge-discovery-option { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; margin-block: 6px; }
+
+/* Review status in the header and media list; dashed box for a candidate head without a label. */
+.review-chip{font-size:12px;padding:2px 9px;border-radius:10px;background:var(--surface-subtle);color:var(--muted);white-space:nowrap}
+.review-chip.open{background:var(--accent-soft);color:var(--accent)}
+.review-chip.passed{background:var(--b-soft);color:var(--success)}
+.review-chip.stale{background:var(--warning-soft);color:var(--warning)}
+.asset-review{display:inline-block;margin-left:6px;font-weight:500;color:var(--muted)}
+.asset-review.passed{color:var(--success)}.asset-review.stale{color:var(--warning)}.asset-review.open{color:var(--accent)}
+.review-candidate-circle{position:absolute;min-width:28px;min-height:28px;transform:translate(-50%,-50%);border:2px solid #ffb547;border-radius:50%;box-shadow:0 0 0 1px #19242dbb;pointer-events:none;z-index:31;box-sizing:border-box;animation:review-pulse .8s ease-out 2}
+.review-candidate-circle.clickable{pointer-events:auto;cursor:zoom-in;z-index:32}
+.review-last-box{position:absolute;border:2px dashed #9aa7b2;pointer-events:none;z-index:30;box-sizing:border-box}
+.review-restore-view{white-space:nowrap}
+.review-candidate-circle span{position:absolute;right:-8px;top:-10px;min-width:18px;height:18px;padding:0 3px;border-radius:9px;background:#ffb547;color:#182634;box-shadow:0 0 0 1px #19242dbb;font:700 11px/18px system-ui;text-align:center}
+@keyframes review-pulse{0%{box-shadow:0 0 0 0 #ffb547aa}100%{box-shadow:0 0 0 14px #ffb54700}}
+@media(prefers-reduced-motion:reduce){.review-candidate-circle{animation:none}}
+/* Zoom sits in the bottom bar, outside the image. */
+.shell-zoom.in-bottom{position:static;flex:none;background:transparent;border:1px solid var(--line);color:var(--text)}
+.shell-zoom.in-bottom button:hover:not(:disabled){background:var(--surface-hover)}
+.shell-zoom.in-bottom .annot-coords{color:var(--muted)}
+/* Object actions: full-width, one per line, so the label says exactly what is deleted. */
+.annot-inspector .object-delete-actions{flex-direction:column}
+.annot-inspector .object-delete-actions>button{white-space:normal;font-size:12px;justify-content:center}

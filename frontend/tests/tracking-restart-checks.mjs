@@ -201,30 +201,6 @@ export async function trackingRestartChecks(page, fixture, origin, { redProbeOnl
   await item('retry').click();await finish()
   check(modelStarts.at(-1).body.startFrame===2&&modelStarts.at(-1).body.annotations.every(object=>object.frameIndex===2), 'retry restores the original frame and uses its frozen source identity')
 
-  await pausedFixture()
-  let statusFailure=true
-  const statusPath=`**/api/review/media/${fixture.mid}/submission-status`
-  await page.route(statusPath,route=>{if(statusFailure){statusFailure=false;return route.fulfill({status:503,json:{message:'送审状态读取故障注入',requestId:'restart-submission-read-failure'}})}return route.continue()})
-  const seedsBeforeStatus=seedWrites.length, startsBeforeStatus=modelStarts.length
-  await item('open').click();await item('confirm').click();await item('error').waitFor()
-  check(seedWrites.length===seedsBeforeStatus&&modelStarts.length===startsBeforeStatus&&await page.evaluate(()=>window.ws.trackingRestartPendingAction.value.phase==='start'), 'unreadable submission status preserves the committed branch intent and stops seed/model writes')
-  const restartsBeforeStatusRetry=restartAttempts.length
-  await item('retry').click();await finish()
-  check(restartAttempts.length===restartsBeforeStatusRetry&&modelStarts.length===startsBeforeStatus+1, 'submission-status recovery continues its original branch without rewinding again')
-  await page.unroute(statusPath)
-
-  await pausedFixture();lostReply=true
-  const startsBeforeSubmission=modelStarts.length, seedsBeforeSubmission=seedWrites.length
-  await item('open').click();await item('confirm').click();await item('error').waitFor()
-  const preview=await api(`/review/media/${fixture.mid}/completion-preview`)
-  const submitted=await api(`/review/media/${fixture.mid}/complete`,'POST',{expectedSourceRevision:preview.sourceRevision,confirmComplete:true,explicitEmptyFrameRanges:preview.unknownFrameRanges})
-  await page.reload();await attach();await idle();await item('error').waitFor()
-  await item('retry').click()
-  await page.waitForFunction(()=>window.ws.trackingRestartError.value.includes('已送审')&&!window.ws.trackingRestartBusy.value)
-  check(modelStarts.length===startsBeforeSubmission&&seedWrites.length===seedsBeforeSubmission&&await page.evaluate(()=>window.ws.editingBlocked.value), 'a lost restart receipt replay cannot seed or start a source submitted in another window')
-  check((await item('error').innerText()).includes('已送审'), 'submitted-source recovery stays read-only and explains the actual reason')
-  // Keep this fixture's active workflow clean for the subsequent fixed suites.
-  await api(`/review/sessions/${submitted.session.id}/withdraw`,'POST',{expectedSessionRevision:submitted.session.revision})
   await page.unroute('**/api/track/restart-branch/*')
   await page.unroute('**/api/track/annotations')
   await page.unroute('**/api/track/status/restart-model-*')

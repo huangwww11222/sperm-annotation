@@ -3,8 +3,6 @@ import { computed, onMounted, ref, watch } from 'vue'
 import AppLayout from './layouts/AppLayout.vue'
 import AnnotatePage from './pages/AnnotatePage.vue'
 import ResultsPage from './pages/ResultsPage.vue'
-import ReviewPage from './pages/ReviewPage.vue'
-import ConfirmationPage from './pages/ConfirmationPage.vue'
 import LoginPage from './pages/LoginPage.vue'
 import { useRouter } from './router'
 import { useAuth } from './stores/auth'
@@ -51,8 +49,7 @@ watch(isAuthenticated, syncRoute)
   <AppLayout v-else>
     <AnnotatePage v-if="currentPath === '/annotate'" />
     <ResultsPage v-else-if="currentPath === '/results'" />
-    <ReviewPage v-else-if="currentPath === '/review'" />
-    <ConfirmationPage v-else-if="currentPath === '/confirm'" />
+    <AnnotatePage v-else-if="currentPath === '/review'" mode="review" />
   </AppLayout>
 </template>
 

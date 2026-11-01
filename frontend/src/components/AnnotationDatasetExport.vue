@@ -1,14 +1,17 @@
 <script setup lang="ts">
-import { nextTick, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { addLeaveGuard } from '../router'
 import { useWorkspace } from '../stores/workspace'
 import { useAuth } from '../stores/auth'
 import { createRequestId } from '../utils/browserCompat'
-import { reviewWorkflowApi } from '../api/reviewWorkflowApi'
+import { annotationReviewApi, type CompletionPreview } from '../api/annotationReviewApi'
 import { trainingExportApi } from '../api/trainingExportApi'
-import type { CompletionPreview } from '../api/reviewWorkflowApi'
+import { useAnnotationReview } from '../stores/annotationReview'
 import TrainingDatasetExport from './TrainingDatasetExport.vue'
 const {selectedMedia,currentMediaId,persistWorkspaceState,isAiBusy,editingBlocked,submissionLocks}=useWorkspace()
+const review=useAnnotationReview()
+// Only reviewed content can become training data; the server enforces the same rule.
+const reviewPassed=computed(()=>review.status.value==='passed'&&review.state.value?.mediaId===selectedMedia.value?.serverMediaId)
 const dialog=ref<HTMLElement|null>(null)
 let priorFocus:HTMLElement|null=null
 
@@ -29,7 +32,10 @@ onUnmounted(()=>{removeGuard();submissionLocks.value.delete(lock);window.removeE
 async function open(){
   if(pending.value){await freeze();return}
   visible.value=false;busy.value=true;error.value='';confirmed.value=false;emptyRanges.value='';preview.value=null
-  try{await persistWorkspaceState(currentMediaId.value,true);preview.value=await reviewWorkflowApi.completionPreview(selectedMedia.value!.serverMediaId!)
+  try{await persistWorkspaceState(currentMediaId.value,true)
+    await review.load(selectedMedia.value!.serverMediaId!)
+    if(!reviewPassed.value)throw new Error(review.status.value==='stale'?'审查通过后标注又有改动，请重新审查后再导出。':'该视频还没有审查通过，请先完成审查再导出。')
+    preview.value=await annotationReviewApi.exportPreview(selectedMedia.value!.serverMediaId!)
     let prior=null;try{prior=JSON.parse(sessionStorage.getItem(journal()+':snapshot')||'null')}catch{}
     if(prior?.revision===preview.value.sourceRevision){snapshot.value=prior.id;visible.value=false;await nextTick();await exporter.value?.open()}
     else if(preview.value.unknownFrames===0){confirmed.value=true;await freeze()}
@@ -53,7 +59,7 @@ async function freeze(){
 function keys(e:KeyboardEvent){if(e.key==='Escape'&&!busy.value&&!pending.value)visible.value=false;if(e.key==='Tab'){const nodes=Array.from((e.currentTarget as HTMLElement).querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled)'));if(nodes.length){e.preventDefault();const i=nodes.indexOf(document.activeElement as HTMLElement);nodes[(i+(e.shiftKey?-1:1)+nodes.length)%nodes.length]?.focus()}}}
 </script>
 <template>
-  <button class="btn-primary" :disabled="busy||isAiBusy||(!pending&&editingBlocked)||!selectedMedia?.serverMediaId||selectedMedia.type!=='video'" @click="open">{{ pending?'恢复数据集导出':'导出训练数据集' }}</button>
+  <button class="btn-primary" data-testid="annotation-export" :title="reviewPassed||pending?'':'审查通过后才能导出训练数据集'" :disabled="busy||isAiBusy||(!pending&&(editingBlocked||!reviewPassed))||!selectedMedia?.serverMediaId||selectedMedia.type!=='video'" @click="open">{{ pending?'恢复数据集导出':'导出训练数据集' }}</button>
   <TrainingDatasetExport v-if="snapshot" hide-trigger annotation-only ref="exporter" @open="exportOpen=$event" @busy="exportBusy=$event" :final-version-id="snapshot" :media-name="selectedMedia?.name||'视频'" />
   <Teleport to="body"><div v-if="visible" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6" @keydown="keys">
     <section ref="dialog" role="dialog" aria-modal="true" aria-label="导出需要处理" class="app-dialog w-[560px]">

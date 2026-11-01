@@ -9,7 +9,7 @@ const router = useRouter(), routePath = router.path
 const { user, logout } = useAuth()
 const { theme, toggleTheme } = useAppearance()
 // Workbench pages fill the window edge to edge; their context goes into the header.
-const workbenchRoute = computed(() => ['/annotate', '/review', '/confirm'].includes(routePath.value))
+const workbenchRoute = computed(() => ['/annotate', '/review'].includes(routePath.value))
 async function signOut() { if (await router.canLeave()) { await logout(); await router.replace('/login') } }
 </script>
 <template>
@@ -19,7 +19,6 @@ async function signOut() { if (await router.canLeave()) { await logout(); await 
       <nav class="workflow-nav" aria-label="数据制作流程">
         <button aria-label="人工标注" :class="{active:routePath==='/annotate'}" :aria-current="routePath==='/annotate'?'step':undefined" @click="router.push('/annotate')"><span>1</span>标注</button>
         <button aria-label="审查模式" :class="{active:routePath==='/review'}" :aria-current="routePath==='/review'?'step':undefined" @click="router.push('/review')"><span>2</span>审查</button>
-        <button v-if="routePath==='/confirm'" aria-label="对比确认" :class="{active:routePath==='/confirm'}" :aria-current="routePath==='/confirm'?'step':undefined" @click="router.push('/confirm')"><span>3</span>确认</button>
       </nav>
       <div id="app-header-context" class="app-header-context" />
       <div class="app-account">

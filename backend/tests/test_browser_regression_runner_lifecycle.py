@@ -92,10 +92,10 @@ def test_report_distinguishes_full_and_partial_success(tmp_path, monkeypatch, ar
     assert len(browser_commands) == len(report["selectedSuites"])
     if full:
         assert report["scope"] == "mandatory"
-        assert len(report["suites"]) == 10
+        assert len(report["suites"]) == len(module.SUITES)
     else:
         assert report["scope"] != "mandatory"
-        assert len(report["suites"]) < 10
+        assert len(report["suites"]) < len(module.SUITES)
     assert not (tmp_path / "work/browser-regression.lock").exists()
 
 
@@ -122,7 +122,7 @@ def test_failed_suite_preserves_required_coverage_and_releases_lock(tmp_path, mo
     report = json.loads(next((tmp_path / "work").glob("*/run.json")).read_text())
     assert report["status"] == "failed"
     assert report["fullRegressionPassed"] is False
-    assert len(report["requiredSuites"]) == 10
+    assert len(report["requiredSuites"]) == len(module.SUITES)
     assert report["suites"] == [{"name": "critical-workflows", "status": "failed"}]
     assert not (tmp_path / "work/browser-regression.lock").exists()
 
@@ -137,6 +137,6 @@ def test_cleanup_failure_never_records_full_pass_and_releases_lock(tmp_path, mon
     with pytest.raises(PermissionError, match="injected cleanup failure"):
         module.main()
     report = json.loads(next((tmp_path / "work").glob("*/run.json")).read_text())
-    assert len(report["suites"]) == 10
+    assert len(report["suites"]) == len(module.SUITES)
     assert report["fullRegressionPassed"] is False
     assert not (tmp_path / "work/browser-regression.lock").exists()

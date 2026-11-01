@@ -1,4 +1,4 @@
-import {legacySubmit} from './legacy-tracking-probe.mjs'
+import {passReview} from './legacy-tracking-probe.mjs'
 // Real UI / storage / workflow; model inference is explicitly simulated by host.
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -100,7 +100,8 @@ if(process.env.CRITICAL_AI_MODE==='simulated'){
     const repairedRows=(await repairedRaw.text()).trim().split('\n').map(JSON.parse)
     check(repairedRows.at(-1).objects.length===1&&repairedRows.at(-1).objects[0].object_id===1,'JSONL download uses the same one-object identity')
     await page.screenshot({path:'output/playwright/endpoint-duplicate-repaired.png'})
-    const p=await api('/review/media/'+mid+'/completion-preview')
+    await passReview(page,token,mid)
+    const p=await api('/datasets/annotations/'+mid+'/preview')
     const frozen=await page.request.post(origin+'/api/datasets/annotations/'+mid+'/snapshot',{headers:{Authorization:'Bearer '+token,'X-Review-Contract':'2','Idempotency-Key':crypto.randomUUID()},data:{expectedSourceRevision:p.sourceRevision,confirmComplete:true,explicitEmptyFrameRanges:[]}})
     assert(frozen.ok(),await frozen.text())
     const frozenId=(await frozen.json()).finalVersionId
@@ -116,10 +117,10 @@ if(process.env.CRITICAL_AI_MODE==='simulated'){
     await page.screenshot({path:'output/playwright/endpoint-identity-corrected.png'})
     await page.reload();await ready();await jump(3)
     check(await page.locator('.annotation-box').count()===1,'corrected endpoint identity survives a second reload')
-    const legacy=await legacySubmit(page,token,mid)
-    await page.goto(origin+'/review');await page.evaluate(sid=>sessionStorage.setItem('review-open-session',sid),legacy.session.id);await page.reload()
-    await page.getByText(/自动标注已完成，请检查画面并处理疑点/).waitFor()
-    check(await page.getByText(/自动标注已完成，请检查画面并处理疑点/).isVisible(),'frozen review shows a concise completion state and still requires frame submission')
+    await page.goto(origin+'/review');await page.getByTestId('review-panel').waitFor()
+    await poll(async()=>(await page.getByTestId('review-status').count())>0)
+    const reviewStatus=(await api('/annotation-review/media/'+mid)).status
+    check((await page.getByTestId('review-status').innerText())==={passed:'审查通过',stale:'需重新审查'}[reviewStatus],'review page shows the same pass state as the server after identity repair')
     await page.screenshot({path:'output/playwright/endpoint-tracking-review.png'})
     check(errors.length===0,'no browser runtime errors')
   }finally{fs.writeFileSync('output/playwright/endpoint-tracking-results.json',JSON.stringify({checks,errors},null,2));await page.screenshot({path:'output/playwright/endpoint-tracking-last.png'}).catch(()=>{});await browser.close()}

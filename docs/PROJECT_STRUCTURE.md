@@ -1,8 +1,8 @@
 # 代码地图与运行入口
 
-## 2026-10-29 当前入口
+## 2026-11-01 当前入口
 
-当前直接导出：components/AnnotationDatasetExport.vue → trainingExportApi.annotationSnapshot → backend/app/annotation_export.py → training_export 队列及原视频打包；不创建审查或确认记录。
+标注 → 审查 → 导出。审查是 `pages/AnnotatePage.vue` 的 `mode="review"`（`App.vue` 在 `/review` 渲染），右侧换成 `components/AnnotationReviewPanel.vue`，状态共享于 `stores/annotationReview.ts` → `api/annotationReviewApi.ts` → `backend/app/annotation_review_routes.py` / `annotation_review.py`。导出：`components/AnnotationDatasetExport.vue`（审查通过才可用）→ `annotation_export.py`（`require_passed` 门槛）→ `training_export` 队列。
 
 Vue 3 + TypeScript + Vite；FastAPI + SQLite；SAM3 在后端按需加载。前端依赖见 [package.json](../frontend/package.json)，Python 依赖见 [requirements.txt](../backend/requirements.txt)，不在说明文档复制版本号。
 
@@ -15,22 +15,22 @@ Vue 3 + TypeScript + Vite；FastAPI + SQLite；SAM3 在后端按需加载。前�
 | Chrome 93 / HTTP 兼容 | `frontend/src/utils/browserCompat.ts`；`scripts/build_compat_update.py` / `install_compat_update.sh` 仅保留历史专项修复用途 |
 | 容器启动前检查 | `backend/app/deployment_check.py`、`backend/docker-entrypoint.sh` |
 | 模型随仓库交付 | `model-distribution/manifest.json` 与 `LICENSE-SAM.txt`、`scripts/prepare_model.py` / `build_model_bundle.py` |
+| 训练包按视频合并 | `scripts/merge_training_exports.py`：多个已下载 ZIP / 目录按整段视频重新划分 train/val/test，换算与服务端 `training_export.video_bucket` 一致 |
 | 仓库与容器验收 | `scripts/check_repository.py`、`scripts/docker_smoke.py`、`.github/workflows/` |
 | 固定浏览器回归与执行记录 | `scripts/run_browser_regression.py`；`frontend/tests/critical-workflows-browser.mjs` 从真实登录/上传走完整用户流程；测试专用模拟模型只在 `backend/tests/browser_server.py` |
 | 输入完整性、读取竞态与登录恢复 | `annotation/trackingResult.ts`、`stores/workspace.ts`、`stores/auth.ts`；`test_independent_integrity_audit.py`、`test_integrity_recovery.py` 及固定 `independent-integrity-browser.mjs` |
 | 路由/认证/布局/主题 | `frontend/src/router/index.ts`、`stores/auth.ts`、`layouts/AppLayout.vue`、`stores/appearance.ts`、`style.css` |
-| 三页观看快捷键/平移/专注 | `workbench/viewTransform.ts`、`useViewportNavigation.ts`、`useWorkbenchFocus.ts`；C完整帧容器 `confirmation/ConfirmationViewport.vue`，观看不写业务 |
-| 三页共享工作台 | `components/WorkbenchShell.vue`、`workbench/shell.css`；站点顶栏上下文、视频抽屉、画布与可收起检查面板；A/B 共用 `components/WorkbenchFrameStrip.vue`，布局约束见 WORKFLOW |
+| 观看快捷键/平移/专注 | `workbench/viewTransform.ts`、`useViewportNavigation.ts`、`useWorkbenchFocus.ts`；观看不写业务 |
+| 共享工作台 | `components/WorkbenchShell.vue`、`workbench/shell.css`；站点顶栏上下文、视频抽屉、画布与可收起检查面板；帧条 `components/WorkbenchFrameStrip.vue`（审查模式显示待查/已查帧），布局约束见 WORKFLOW |
 | 人工标注 UI / 状态 | `pages/AnnotatePage.vue`、`stores/workspace.ts`、`annotation/annotation.css` / `annotation-shell.css`；缩放小地图 `components/AnnotationMinimap.vue` |
 | 框绘制/坐标/缓存 | `components/AnnotationOverlay.vue`、`annotation/geometry.ts`、`annotation/frameCache.ts` |
-| 送审/撤回/退回人工、审查对象目录 | `components/SendToReview.vue`、`api/reviewWorkflowApi.ts`、`backend/app/annotation_completion.py`、`review_workflow.py` |
+| 审查 | `pages/AnnotatePage.vue`（`mode="review"`）、`components/AnnotationReviewPanel.vue`、`stores/annotationReview.ts`、`api/annotationReviewApi.ts`；后端 `annotation_review.py`（清单、加严抽检、通过与修改记录、导出门槛）与 `annotation_review_routes.py`；共享请求与日志 `api_common.py` |
 | 重复视频与覆盖重新标注 | `stores/workspace.ts`、`backend/app/media_reimport.py`、`main.py`；文件恢复日志与轮次保护见 STORAGE_LAYOUT |
-| 集中审查证据/最终接受 | `backend/app/review_evidence.py`、`concentrated_review.py`；新 Tracking → 审查疑点 → 最终 F，历史 C 仍可恢复 |
+| 追踪疑点证据 | `backend/app/review_evidence.py` / `endpoint_tracking.py` 写入Tracking行；当前 `annotation_review.frame_findings/reverse_items/detector_items` 提取并分组，旧 `concentrated_review` 仅保留历史数据层 |
 | 人工首尾与独立反追 | `backend/app/endpoint_tracking.py`：端点校验、反向有界窗口、多帧身份匹配与只读证据；`main.py` 编排、`annotation_completion.py` 有效尾框合并 |
 | 三路综合标注 | `backend/app/joint_tracking.py`：已有身份内关联、连续路径选择、统一几何与不确定片段；`head_click.detect_regions` 批量ROI推理；新首尾请求 combineResults=true |
-| B 审查 | `pages/ReviewPage.vue`、`review/geometry.ts`、`review/review.css`、`backend/app/review_workflow.py` 与 `_routes.py` |
-| C 对比确认/本帧重审 | `pages/ConfirmationPage.vue`、`confirmation/ConfirmationImage.vue`、`confirmation/geometry.ts`、`api/confirmationApi.ts`、`backend/app/confirmation_workflow.py` 与 `_routes.py`；其他帧决定继承在 `review_workflow.py` |
-| 视频进度与帧条 | B/C 在共享外壳顶栏上下文展示真实进度和显式完成入口；B 帧条读取 `resume.submittedFrameIndexes` / `draftFrameIndexes` 及退回记录，A 帧条展示人工/AI/无框及追踪提示；浏览不改变完成状态 |
+| 历史 A/B/C/F 数据（只读） | `review_workflow.py`、`review_repository.py`、`confirmation_workflow.py`、`concentrated_review.py`、`review_schema.py` 仅保留表结构迁移与数据层，供统计/审计导出读取；页面与路由已删除，说明见 `docs/archive/旧审查与对比确认流程_2026-11-01前.md` |
+| 帧条 | 标注模式展示人工/AI/无框及追踪提示；审查模式展示清单待查/已查帧；浏览不改变审查状态 |
 | 用户使用说明 | `components/UserGuide.vue`；`help/user-guide.md` 为页面阅读和下载的唯一内容源，`AppLayout.vue` 提供入口 |
 | 训练集导出 | `components/TrainingDatasetExport.vue`、`api/trainingExportApi.ts`、`backend/app/training_export.py` 与 `_routes.py` |
 | 自动质量审计与只读提取 | `backend/app/quality_audit.py` / `audit_export.py`、根 `export-audit.sh`；统计仓库单独检出到 `标注统计/`，不纳入主仓库或镜像 |
@@ -42,15 +42,15 @@ Vue 3 + TypeScript + Vite；FastAPI + SQLite；SAM3 在后端按需加载。前�
 | 按需带框视频预览 | `backend/app/tracking_preview.py`；长时编码在来源锁外，输入签名校验后发布 |
 | 点选头部生成框 | `backend/app/head_click.py` 与 `main.py` 的 head-box 接口；前端 `stores/workspace.ts`、`pages/AnnotatePage.vue` |
 | 可选边缘入画新增 | `backend/app/edge_entry.py`、`head_click.detect_edges`、`tracker.track_video`；现有 AI Tracking 开关与请求正文 |
-| 精确帧性能与缓存 | `backend/app/video_frames.py` 复用/限量解码器、原子 JPEG 与源签名；`frontend/src/api/sourceFrameApi.ts` 为 B/C 提供限量 Blob 缓存 |
-| 数据库和增量迁移 | `db.py`、`review_schema.py`、三个 workflow/export 模块中的 `migrate()` |
+| 精确帧性能与缓存 | `backend/app/video_frames.py` 复用/限量解码器、原子 JPEG 与源签名；`frontend/src/api/sourceFrameApi.ts` 限量 Blob 缓存 |
+| 数据库和增量迁移 | `db.py`、`review_schema.py`、各 workflow/export/review 模块中的 `migrate()`（`annotation_review.migrate` 随历史 schema 一起执行） |
 | 日志/来源锁 | `review_logging.py`、`review_source_lock.py` |
 
 表内未带根路径的前端项均相对 `frontend/src/`，后端项相对 `backend/app/`。具体路由与结构见 [API.md](API.md)。
 
 ### 兼容代码不等于当前流程
 
-`review_repository.py`、`review_routes.py` 保留底层/历史能力，活动写入由新 workflow 路由控制。`mockAnnotationApi.ts`、旧 annotation 接口注释、EffectsPage 等兼容代码不能作为“当前登录是 Mock”或“Tracking 只从第 0 帧开始”的依据。当前登录使用真实后端 JWT；实际请求以活动页面调用和 `main.py` 注册的路由为准。
+`review_repository.py` 等保留历史数据层；活动审查只走 `annotation_review_routes.py`，路由注册在 `review_routes.py`。`mockAnnotationApi.ts`、旧 annotation 接口注释、EffectsPage 等兼容代码不能作为“当前登录是 Mock”或“Tracking 只从第 0 帧开始”的依据。当前登录使用真实后端 JWT；实际请求以活动页面调用和 `main.py` 注册的路由为准。
 
 ## 本地运行
 

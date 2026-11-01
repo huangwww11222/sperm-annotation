@@ -88,7 +88,7 @@ def test_original_frame_number_agrees_between_result_reader_and_review_source(im
          "objects": [{"object_id": 7, "bbox": [1, 2, 10, 12]}]}])
     assert save(client, mid, []).status_code == 200
     result = client.get("/api/track/result/"+mid).json()
-    preview = client.get("/api/review/media/"+mid+"/completion-preview").json()
+    preview = client.get("/api/datasets/annotations/"+mid+"/preview").json()
     evidence("original-frame", result_frames=[f["frameIndex"] for f in result["frames"]],
              unknown_ranges=preview["unknownFrameRanges"])
     assert [f["frameIndex"] for f in result["frames"]] == [2], "source_frame_index is the original frame identity"
@@ -116,14 +116,14 @@ def test_invalid_workspace_write_is_rejected_without_poisoning_durable_state(imp
     fresh = TestClient(main.app)
     fresh.headers.update(client.headers)
     persisted = fresh.get("/api/track/workspace/"+mid).json()
-    preview = fresh.get("/api/review/media/"+mid+"/completion-preview")
+    preview = fresh.get("/api/datasets/annotations/"+mid+"/preview")
     preserved = (root/"workspace_state.json").read_bytes() == before
     # Verify a healthy repair of test data without changing the invalid-write
     # expectation or concealing the already-recorded persistence failure.
     recovery = save(client, mid, [manual()], persisted["revision"], "valid-input-after-fault")
     recovered = fresh.get("/api/track/workspace/"+mid).json()
     assert recovery.status_code == 200 and recovered["manualAnnotations"] == [manual()]
-    assert fresh.get("/api/review/media/"+mid+"/completion-preview").status_code == 200
+    assert fresh.get("/api/datasets/annotations/"+mid+"/preview").status_code == 200
     evidence("invalid-workspace", input=objects, status=response.status_code,
              persisted_objects=persisted.get("manualAnnotations"), revision=persisted["revision"],
              bytes_unchanged=preserved, completion_status=preview.status_code, completion_body=preview.json(),

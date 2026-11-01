@@ -112,6 +112,8 @@ def migrate(conn):
        WHERE f.state='submitted' """)
     from .concentrated_review import migrate as migrate_concentrated
     migrate_concentrated(conn)
+    from .annotation_review import migrate as migrate_annotation_review
+    migrate_annotation_review(conn)
     conn.commit()
 
 

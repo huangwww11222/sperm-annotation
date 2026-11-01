@@ -19,14 +19,11 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 SUITES = [
     ('critical-workflows', []),
-    ('workflow-transitions', ['confirmation_browser_fixture', 'workflow_transitions_browser_fixture', 'review_presence_browser_fixture']),
+    ('workflow-transitions', ['confirmation_browser_fixture', 'workflow_transitions_browser_fixture']),
     ('annotation-ux', ['confirmation_browser_fixture', 'annotation_ux_fixture']),
     ('tracking-recovery', ['confirmation_browser_fixture', 'tracking_recovery_fixture']),
-    ('review-failure', ['confirmation_browser_fixture', 'review_browser_fixture']),
-    ('confirmation-failure', ['confirmation_browser_fixture']),
-    ('confirmation', ['confirmation_browser_fixture']),
-    ('training-export', ['confirmation_browser_fixture']),
-    ('workbench-consistency', ['confirmation_browser_fixture', 'annotation_ux_fixture', 'review_browser_fixture']),
+    ('training-export', ['confirmation_browser_fixture', 'annotation_ux_fixture', 'history_statistics_fixture']),
+    ('workbench-consistency', ['confirmation_browser_fixture', 'annotation_ux_fixture']),
     ('independent-integrity', ['independent_browser_fixture']),
 ]
 

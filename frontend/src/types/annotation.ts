@@ -46,6 +46,8 @@ export interface AnnotationObject {
   objectId?: number
   name: string
   source: ObjectSource
+  /** Review-only provenance; never changes geometry or the stable objectId. */
+  origin?: 'review_adopted'
   confidence?: number
   point?: { x: number; y: number }
   bbox?: { x: number; y: number; width: number; height: number }

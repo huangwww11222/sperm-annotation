@@ -21,7 +21,26 @@ def integer(value, label):
     return value
 
 
-def source(directory, uid, info):
+def parse_rows(raw, info):
+    """Tracking rows as published, with endpoint aliases projected; review evidence kept."""
+    if not raw.strip():
+        return []
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        data = [json.loads(line) for line in raw.splitlines() if line.strip()]
+    rows = (
+        data
+        if isinstance(data, list)
+        else data.get("frames", data.get("results", [data]))
+    )
+    from .endpoint_tracking import project_endpoints
+    return project_endpoints([normalize_tracking_row(r) for r in rows],width=info['width'],height=info['height'])
+
+
+def source(directory, uid, info, require_author=True, with_rows=False):
+    """Effective frames of the saved workspace. The legacy submission path requires the
+    last saver; reviewed export is gated by the annotation review instead."""
     from .tracking_restart import recover_directory
     recover_directory(directory)
     from .annotation_state import recover_pause_publication
@@ -39,9 +58,9 @@ def source(directory, uid, info):
         raw = tracker.read_text(encoding="utf-8") if tracker.exists() else ""
     except (OSError, ValueError) as e:
         raise w.ReviewError(
-            "SOURCE_UNAVAILABLE", "请先在标注页保存当前视频工作区，再送审", 422
+            "SOURCE_UNAVAILABLE", "这个视频还没有保存的标注，请先在标注页标注", 422
         ) from e
-    if workspace.get("updatedBy") != uid:
+    if require_author and workspace.get("updatedBy") != uid:
         raise w.ReviewError(
             "NOT_ANNOTATION_AUTHOR", "只有当前已保存工作区的标注员可以送审", 403
         )
@@ -56,20 +75,7 @@ def source(directory, uid, info):
         "media": info,
     }
     try:
-        if not raw.strip():
-            rows = []
-        else:
-            try:
-                data = json.loads(raw)
-            except json.JSONDecodeError:
-                data = [json.loads(line) for line in raw.splitlines() if line.strip()]
-            rows = (
-                data
-                if isinstance(data, list)
-                else data.get("frames", data.get("results", [data]))
-            )
-        from .endpoint_tracking import project_endpoints
-        rows = project_endpoints([normalize_tracking_row(r) for r in rows],width=info['width'],height=info['height'])
+        rows = parse_rows(raw, info)
         policies=sorted({(r.get('reviewEvidence') or {}).get('endpointCheck',{}).get('associationPolicy') for r in rows} - {None})
         if policies:manifest['endpointProjectionPolicy']=policies
         frames = {}
@@ -144,7 +150,7 @@ def source(directory, uid, info):
             if fi >= info["frameCount"]:
                 raise ValueError("单帧删除帧号越界")
             frames.setdefault(fi, {})
-        return w.digest(manifest), frames
+        return (w.digest(manifest), frames, rows) if with_rows else (w.digest(manifest), frames)
     except (ValueError, TypeError, KeyError, AttributeError) as e:
         raise w.ReviewError("INVALID_SOURCE", f"标注来源格式无效：{e}", 422) from e
 

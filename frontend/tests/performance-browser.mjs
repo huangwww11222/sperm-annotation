@@ -3,21 +3,18 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 const {chromium}=await import(process.env.PLAYWRIGHT_MODULE||'playwright')
 // The task list is a drawer that stays closed while a task is open.
-const openTask=async(target,selector)=>{const card=target.locator(selector),toggle=target.getByTestId('toggle-workbench-library');for(let i=0;i<40;i++){if(await card.isVisible()){try{await card.click({timeout:1500});return}catch{}}else if(await toggle.isVisible())await toggle.click();await target.waitForTimeout(250)}await card.click()}
 // The media list is a drawer that stays closed while a video is open.
 const openAsset=async(target,locator)=>{const toggle=target.getByTestId('toggle-workbench-library');for(let i=0;i<40;i++){if(await locator.isVisible()){try{await locator.click({timeout:1500});return}catch{}}else if(await toggle.isVisible())await toggle.click();await target.waitForTimeout(250)}await locator.click()}
 const fixture=JSON.parse(fs.readFileSync('work/real-4k-browser-fixture.json'))
 const origin=process.env.CONFIRMATION_ORIGIN||'http://127.0.0.1:5387'
 const browser=await chromium.launch({channel:'chrome',headless:true}),page=await browser.newPage({viewport:{width:1366,height:768}})
-const errors=[],checks=[],reads=[],responses=[]
+const errors=[],checks=[],reads=[]
 const check=(ok,msg)=>{assert(ok,msg);checks.push(msg);console.log('PASS',checks.length,msg)}
 page.on('pageerror',e=>errors.push(String(e)))
 page.on('dialog',d=>d.accept())
 page.on('request',r=>{if(r.url().includes('/api/track/frame/'))reads.push(r.url())})
-page.on('response',async r=>{if(r.url().includes('/api/confirmation/')&&r.request().method()!=='GET'){try{responses.push(await r.json())}catch{}}})
 const button=name=>page.getByRole('button',{name,exact:true})
 const idle=()=>page.waitForFunction(()=>window.ws&&!window.ws.workspaceRestoring.value&&!window.ws.exactFrameLoading.value)
-const cIdle=()=>page.locator('.confirmation-page[data-busy="false"]').waitFor()
 const api=async(path,method='GET',body)=>{const r=await page.request.fetch(origin+'/api'+path,{method,headers:{Authorization:'Bearer '+fixture.token,'Idempotency-Key':crypto.randomUUID(),'X-Review-Contract':'2','X-Confirmation-Response':'delta'},data:body});assert(r.ok(),await r.text());return r.json()}
 const attach=()=>page.evaluate(async()=>{window.ws=(await import(performance.getEntriesByType('resource').find(r=>r.name.includes('/src/stores/workspace.ts')).name)).useWorkspace()})
 fs.mkdirSync('output/playwright',{recursive:true})
@@ -65,31 +62,6 @@ try{
   check(await page.evaluate(()=>window.ws.editingBlocked.value&&window.ws.saveError.value.includes('追踪结果读取失败')),'failed initial AI-result read locks editing instead of treating unknown frames as empty')
   failRead=false;await button('重新读取工作区').click();await idle()
   check(await page.evaluate(()=>!window.ws.editingBlocked.value&&window.ws.currentObjects.value.length===3),'explicit reload restores server AI results after compact local caching')
-  await page.goto(origin+'/confirm');await cIdle()
-  await openTask(page,`[data-session-id="${fixture.confirmation}"]`);await cIdle()
-  if(await button('留在上次位置').count())await button('留在上次位置').click()
-  const mid=fixture.assets.reduce((a,b)=>a.frameCount<b.frameCount?a:b).mid
-  const imageReads=()=>reads.filter(u=>u.includes('/track/frame/'+mid+'/')).length
-  const initialReads=imageReads()
-  await button('下一修改项 →').click();await cIdle();await button('← 上一修改项').click();await cIdle()
-  check(imageReads()===initialReads,'C switches same-frame objects without repeated 4K JPEG downloads')
-  const items=(await api('/confirmation/sessions/'+fixture.confirmation+'/changes')).items
-  await page.getByTestId('choose-a').click();await cIdle()
-  check(responses.some(r=>r.itemsScope==='changed'&&r.items.length===1),'a C decision returns only the changed item with updated session progress')
-  check(imageReads()===initialReads,'automatic next object on the same frame keeps its decoded image')
-  await api(`/confirmation/sessions/${fixture.confirmation}/changes/${items[2].changeId}/decision`,'PUT',{choice:'A',expectedDecisionRevision:0})
-  const badConfirmationImage=`**/api/track/frame/${mid}/1`
-  await page.route(badConfirmationImage,route=>route.fulfill({status:200,contentType:'image/jpeg',body:'broken JPEG'}))
-  await page.getByTestId('choose-b').click();await cIdle()
-  check((await api('/confirmation/sessions/'+fixture.confirmation)).progress.decided===3,'concurrent decisions keep all saved server choices')
-  check(await page.locator('[data-testid=video-progress]').textContent().then(t=>t.includes('3 / 6')),'version-gap recovery refreshes the full client list and progress')
-  check(await button('重试加载').isVisible()&&await page.getByTestId('choose-a').isDisabled(),'C image decode failure blocks new choices while keeping committed decisions')
-  await page.unroute(badConfirmationImage);await button('重试加载').click();await cIdle()
-  check(await page.locator('.c-context [data-variant=full]').count()===1&&await page.getByTestId('choose-a').isEnabled(),'C invalidates broken blobs before retrying the original target frame')
-  const beforeUndo=imageReads();await page.getByRole('button',{name:/撤销上一次选择/}).click();await cIdle()
-  check(imageReads()===beforeUndo,'undo back to an earlier frame reuses the bounded JPEG cache')
-  check((await api('/confirmation/sessions/'+fixture.confirmation)).progress.decided===2,'delta undo preserves unrelated and concurrent decisions')
-  check(responses.filter(r=>r.itemsScope==='changed').some(r=>r.items.length===0),'cursor receipts contain no full video change list')
   check(errors.length===0,'no uncaught browser errors across real-video and dense-annotation flows')
   await page.screenshot({path:'output/playwright/real-4k-performance.png'})
   fs.writeFileSync('output/playwright/performance-results.json',JSON.stringify({checks,telemetry,errors},null,2))

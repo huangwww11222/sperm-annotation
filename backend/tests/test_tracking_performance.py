@@ -120,7 +120,7 @@ def test_lost_tracking_start_response_replays_same_job_without_duplicate_inferen
     status=client.get('/api/track/status/'+first.json()['taskId']).json()
     assert 'requestHash' not in status and 'requestKey' not in status
     main.TASKS[first.json()['taskId']]['status']='success'
-    reset=client.post('/api/review/media/control-video/reset-annotations',json={'expectedRevision':0,'confirmDiscard':True},headers={'X-Review-Contract':'2','Idempotency-Key':'reset-after-task'})
+    reset=client.post('/api/annotation-review/media/control-video/reset-annotations',json={'expectedRevision':0,'confirmDiscard':True},headers={'X-Review-Contract':'2','Idempotency-Key':'reset-after-task'})
     assert reset.status_code==200
     assert client.post('/api/track',json=body,headers=headers).status_code==409
 

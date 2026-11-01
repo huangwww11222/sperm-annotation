@@ -144,7 +144,7 @@ def test_source_rejects_duplicate_identity_and_invalid_json(source):
     with pytest.raises(w.ReviewError, match="重复"):
         a.preview(source, 1, INFO)
     f.write_text("not json")
-    with pytest.raises(w.ReviewError, match="先在标注页保存"):
+    with pytest.raises(w.ReviewError, match="先在标注页"):
         a.preview(source, 1, INFO)
 
 

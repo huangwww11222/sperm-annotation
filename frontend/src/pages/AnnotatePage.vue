@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { canvasZoomKey } from '../workbench/viewTransform'
 import AnnotationDatasetExport from '../components/AnnotationDatasetExport.vue'
-import SendToReview from '../components/SendToReview.vue'
+import AnnotationReviewPanel from '../components/AnnotationReviewPanel.vue'
 import AnnotationMinimap from '../components/AnnotationMinimap.vue'
 import WorkbenchShell from '../components/WorkbenchShell.vue'
 import WorkbenchFrameStrip from '../components/WorkbenchFrameStrip.vue'
@@ -13,16 +13,19 @@ import UserGuide from '../components/UserGuide.vue'
 import userGuide from '../help/user-guide.md?raw'
 import { revealBoxScroll } from '../annotation/geometry'
 import { useWorkspace } from '../stores/workspace'
-import { addLeaveGuard } from '../router'
+import { addLeaveGuard, useRouter } from '../router'
+import { useAnnotationReview, reviewStatusLabel } from '../stores/annotationReview'
+import type { ReviewItem } from '../api/annotationReviewApi'
+import { reviewPresentation, reviewTarget, reviewTargetZoom } from '../annotation/reviewPresentation'
 import '../annotation/annotation.css'
 import '../annotation/annotation-shell.css'
 const {
-  headBoxBusy, headBoxError, cancelHeadBox, mediaAssets, selectedMediaId, submissionBusy, mediaImportBusy, importError, duplicateImport, reimportSaving, cancelDuplicateImport, confirmDuplicateImport, restoreImportIntent, activeTool, selectedObjectId, currentFrame, currentTime, frameInput, isPlaying,
+  headBoxBusy, headBoxError, cancelHeadBox, createHeadBox, mediaAssets, selectedMediaId, submissionBusy, mediaImportBusy, importError, duplicateImport, reimportSaving, cancelDuplicateImport, confirmDuplicateImport, restoreImportIntent, activeTool, selectedObjectId, currentFrame, currentTime, frameInput, isPlaying,
   isAiBusy, statusMessage, toastMessage, imageRef, videoRef, exactFrameImageRef, exactFrameUrl, exactFrameLoading, videoPlaybackFallback, annotationHitRef, fileInputRef, videoInputRef,
   annotationsByMedia, selectedMedia, isVideo, maxFrameIndex, currentMediaId, currentObjects, selectedObject, displayObjects, editingBlocked, workspaceRestoring,
   anomalyFrames, pausedAnomalies, trackingPausedFrame, formatTime, selectTool, onStageClick, tempBbox, onBboxDown, onBboxMove, onBboxUp,
   selectObject, removeObject, undo, redo, canUndo, canRedo, copyPreviousFrame, brightness, contrast, mediaFilterStyle, resetMediaFilter, annotatedFrameCount,
-  clearSelection, openFilePicker, handleFiles, onImageLoaded, onVideoLoaded, onVideoTimeUpdate, onVideoError, seekToInputFrame, togglePlayback, onVideoEnded,
+  clearSelection, openFilePicker, handleFiles, adoptReviewTrack, onImageLoaded, onVideoLoaded, onVideoTimeUpdate, onVideoError, seekToInputFrame, togglePlayback, onVideoEnded,
   runEndpointTrack, seekVideo, frameToTime, resetAnnotationViewForMedia, seekByFrame, zoom, zoomIn, zoomOut, zoomReset,
   deleteMedia, deletingMediaId, mediaDeleteError, nudgeSelected, cancelAnnotationGesture, frameError, retryExactFrame, saveState, saveError, persistWorkspaceState, playbackRate, pausePlayback,
   getObjectDeletionSummary, removeObjectAcrossVideo, undoVideoObjectDeletion, canUndoVideoDeletion, lastVideoObjectDeletion,
@@ -32,6 +35,168 @@ const {
   trackingError,trackingProgress,trackingRetryLabel,trackingRetryBusy,retryTracking,workspaceRecoveryRequired,saveRecoveryLabel,retryWorkspaceSave,reloadWorkspaceFromServer,
   restartTrackingFromEarlierFrame, retryTrackingRestart, cancelTrackingRestartRequest, trackingRestartBusy, trackingRestartError, trackingRestartPendingAction, trackingRestartStorageWarning,
 } = useWorkspace()
+// The review step uses this same workbench: same boxes, same tools, same saves.
+// Review mode swaps tracking controls for the review checklist.
+const props = withDefaults(defineProps<{ mode?: 'annotate' | 'review' }>(), { mode: 'annotate' })
+const reviewing = computed(() => props.mode === 'review')
+const router = useRouter()
+const review = useAnnotationReview()
+const reviewPanel = ref<InstanceType<typeof AnnotationReviewPanel> | null>(null)
+const reviewMediaId = computed(() => selectedMedia.value?.type === 'video' ? selectedMedia.value?.serverMediaId ?? null : null)
+const reviewFocus = ref<ReviewItem | null>(null)
+const reviewActionError = ref('')
+const savedReviewView = ref<{zoom:number;left:number;top:number}|null>(null)
+const userZoomedInReview = ref(false)
+let reviewLocateSerial = 0
+function cancelReviewLocate() { reviewLocateSerial++ }
+const reviewZoomKey = () => review.state.value?.review?.reviewId ? `review-user-zoom:${reviewMediaId.value}:${review.state.value.review.reviewId}` : null
+watch([() => reviewMediaId.value, () => review.state.value?.review?.reviewId, () => reviewing.value], () => {
+  cancelReviewLocate()
+  savedReviewView.value = null
+  try { userZoomedInReview.value = !!reviewing.value && !!reviewZoomKey() && sessionStorage.getItem(reviewZoomKey()!) === '1' }
+  catch { userZoomedInReview.value = false }
+}, {flush:'sync',immediate:true})
+watch(userZoomedInReview, value => {
+  if (value && reviewing.value && reviewZoomKey()) try { sessionStorage.setItem(reviewZoomKey()!,'1') } catch {}
+}, {flush:'sync'})
+const reviewFrames = computed(() => {
+  const todo = new Set<number>(), done = new Set<number>()
+  for (const item of review.items.value) for (let f = item.startFrame; f <= item.endFrame; f++) (item.check ? done : todo).add(f)
+  return { todo, done }
+})
+const flushWorkspace = () => persistWorkspaceState(currentMediaId.value, true)
+async function restoreReviewView() {
+  const saved=savedReviewView.value,scroller=scrollContainerRef.value
+  if(!saved)return
+  savedReviewView.value=null
+  zoom.value=saved.zoom
+  await nextTick()
+  scroller?.scrollTo(saved.left,saved.top)
+}
+async function zoomToReviewTarget(_mark?:unknown) {
+  const item=reviewFocus.value,media=selectedMedia.value,stage=stageRef.value,scroller=scrollContainerRef.value
+  if(!reviewing.value||activeTool.value!=='select'||!item||!media||!stage||!scroller)return
+  const box=reviewTarget(item,currentFrame.value,currentObjects.value,media.width??0,media.height??0)
+  if(!box)return
+  const pixels=stageSize.value.h*box.height/100
+  if(!Number.isFinite(pixels)||pixels<=0)return
+  if(!savedReviewView.value)savedReviewView.value={zoom:zoom.value,left:scroller.scrollLeft,top:scroller.scrollTop}
+  const target=Math.max(zoom.value,Math.min(10,zoom.value*120/pixels))
+  zoom.value=target
+  await nextTick()
+  const el=stageRef.value,scroll=scrollContainerRef.value
+  if(!el||!scroll)return
+  const r=el.getBoundingClientRect(),vp=scroll.getBoundingClientRect()
+  const centerX=r.left+box.x*r.width/100+box.width*r.width/200
+  const centerY=r.top+box.y*r.height/100+box.height*r.height/200
+  scroll.scrollTo(
+    Math.max(0,Math.min(scroll.scrollWidth-scroll.clientWidth,scroll.scrollLeft+centerX-vp.left-vp.width/2)),
+    Math.max(0,Math.min(scroll.scrollHeight-scroll.clientHeight,scroll.scrollTop+centerY-vp.top-vp.height/2)),
+  )
+}
+async function locateReviewItem(item: ReviewItem) {
+  if (!reviewing.value || isAiBusy.value || pointerActive || pan) return
+  savedReviewView.value=null
+  reviewActionError.value=''
+  const serial = ++reviewLocateSerial, mediaId = currentMediaId.value
+  reviewFocus.value = item
+  await seekFrame(item.frame)
+  await nextTick()
+  const valid = () => serial === reviewLocateSerial && reviewing.value && mediaId === currentMediaId.value
+    && currentFrame.value === item.frame && !frameError.value && !exactFrameLoading.value && !workspaceRestoring.value && !pointerActive && !pan
+  if (!valid()) {
+    if (serial === reviewLocateSerial && frameError.value) console.warn('[annotation_review.locate_unavailable]', {mediaId,itemId:item.id,frame:item.frame})
+    return
+  }
+  const media = selectedMedia.value, width = media?.width ?? 0, height = media?.height ?? 0
+  const presentation = reviewPresentation(item,currentFrame.value,currentObjects.value,width,height)
+  const object = currentObjects.value.find(o => o.objectId === presentation.objectIds[0])
+  if (object) { selectTool('select'); selectObject(object.id) } else clearSelection()
+  const box = reviewTarget(item,currentFrame.value,currentObjects.value,width,height)
+  if (!box) return // Whole-frame checks keep the existing view.
+  zoom.value = reviewTargetZoom(zoom.value,stageSize.value.h,box.height,userZoomedInReview.value)
+  await nextTick()
+  if (!valid() || (object && selectedObjectId.value !== object.id)) return
+  const stage = stageRef.value, scroller = scrollContainerRef.value
+  if (!stage || !scroller) return
+  const r = stage.getBoundingClientRect(), vp = scroller.getBoundingClientRect()
+  const position = revealBoxScroll({x:r.left+box.x*r.width/100,y:r.top+box.y*r.height/100,width:box.width*r.width/100,height:box.height*r.height/100},
+    {x:vp.left,y:vp.top,width:scroller.clientWidth,height:scroller.clientHeight},
+    {left:scroller.scrollLeft,top:scroller.scrollTop,maxLeft:scroller.scrollWidth-scroller.clientWidth,maxTop:scroller.scrollHeight-scroller.clientHeight},28)
+  scroller.scrollTo(position.left,position.top)
+  console.info('[annotation_review.located]', {mediaId,itemId:item.id,frame:item.frame,index:item.index,zoom:zoom.value})
+}
+async function addHeadAtReviewTarget(item: ReviewItem) {
+  reviewActionError.value=''
+  const media=selectedMedia.value,width=media?.width??0,height=media?.height??0
+  const observation=item.observations?.find(o=>o.frameIndex===item.frame)
+  const box=observation?.candidates[0]??item.anchor??item.candidates?.[0]
+  if(!media||width<=0||height<=0||!box?.length){reviewActionError.value='这一项没有可定位的候选框，请手动画框后点“已手动补”';return}
+  if(currentFrame.value!==item.frame){
+    await seekFrame(item.frame)
+    await nextTick()
+    if(currentFrame.value!==item.frame||frameError.value){
+      reviewActionError.value=`第 ${item.frame+1} 帧尚未成功读取，未记录检查结果；请重试定位`
+      return
+    }
+  }
+  const point={x:100*((box[0]+box[2])/2)/width,y:100*((box[1]+box[3])/2)/height}
+  const before=currentObjects.value.length
+  await createHeadBox(point)
+  while(headBoxBusy.value)await new Promise(resolve=>setTimeout(resolve,60))
+  if(headBoxError.value){
+    reviewActionError.value=`${headBoxError.value}。请手动画框后点“已手动补”`
+    return
+  }
+  if(currentObjects.value.length!==before+1){
+    reviewActionError.value='这里已经有框，未新增标注，也未记录检查结果'
+    return
+  }
+  try{await flushWorkspace()}
+  catch(error){reviewActionError.value=`标注保存失败，未记录检查结果：${(error as Error)?.message||'请重试'}`;return}
+  if (!reviewMediaId.value || !await review.check(reviewMediaId.value,item,'fixed')) return
+  if (review.nextItem.value) locateReviewItem(review.nextItem.value)
+}
+async function adoptReviewTrackItem(item: ReviewItem) {
+  reviewActionError.value=''
+  const media=selectedMedia.value,width=media?.width??0,height=media?.height??0
+  if (!item.adoptObjectId || !item.observations?.length || width<=0 || height<=0) {
+    review.error.value='这条轨迹没有可采用的框，请改用手动补框'; return
+  }
+  const boxes=item.observations.map(observation=>{
+    const box=observation.candidates[0]
+    return {frameIndex:observation.frameIndex,bbox:{
+      x:100*box[0]/width,y:100*box[1]/height,width:100*(box[2]-box[0])/width,height:100*(box[3]-box[1])/height,
+    }}
+  })
+  try {
+    await adoptReviewTrack(boxes,item.adoptObjectId)
+  } catch(error) {
+    review.error.value=`采用轨迹失败，未记录审查结果：${(error as Error)?.message||'请重试'}`
+    return
+  }
+  if (!reviewMediaId.value || !await review.check(reviewMediaId.value,item,'fixed')) return
+  if (review.nextItem.value) locateReviewItem(review.nextItem.value)
+}
+const reviewMarks = computed(() => reviewPresentation(reviewing.value ? reviewFocus.value : null, currentFrame.value, currentObjects.value, selectedMedia.value?.width ?? 0, selectedMedia.value?.height ?? 0,stageSize.value.w))
+const reviewLastBox = computed(() => {
+  const item=reviewFocus.value,media=selectedMedia.value
+  if(!reviewing.value||!item||item.source!=='track_ended'||currentFrame.value!==item.frame||!item.lastBox||!media?.width||!media.height)return null
+  const [x1,y1,x2,y2]=item.lastBox
+  return {left:`${100*x1/media.width}%`,top:`${100*y1/media.height}%`,width:`${100*(x2-x1)/media.width}%`,height:`${100*(y2-y1)/media.height}%`}
+})
+watch(review.items, items => { if (reviewFocus.value) reviewFocus.value = items.find(i => i.id === reviewFocus.value?.id) ?? null })
+watch(reviewMediaId, id => { reviewFocus.value = null; void review.load(id) }, { immediate: true })
+// The minimap covers part of the image, so it is shown only on request.
+const minimapOn = ref((() => { try { return localStorage.getItem('annotation-minimap') === '1' } catch { return false } })())
+watch(minimapOn, value => { try { localStorage.setItem('annotation-minimap', value ? '1' : '0') } catch {} })
+// Saved edits can invalidate a pass; refresh the status shortly after saves settle.
+let reviewRefresh: ReturnType<typeof setTimeout> | null = null
+watch(saveState, value => {
+  if (value !== 'saved' || !reviewMediaId.value) return
+  if (reviewRefresh) clearTimeout(reviewRefresh)
+  reviewRefresh = setTimeout(() => { void review.load(reviewMediaId.value) }, 1500)
+})
 const importDialog=ref<HTMLElement|null>(null)
 watch(duplicateImport,async value=>{if(value){await nextTick();importDialog.value?.querySelector<HTMLElement>('button:not(:disabled)')?.focus()}})
 function importDialogKeys(e:KeyboardEvent){if(e.key==='Escape'){e.preventDefault();cancelDuplicateImport()}if(e.key==='Tab'){const nodes=Array.from(importDialog.value?.querySelectorAll<HTMLElement>('button:not(:disabled)')||[]);if(nodes.length){e.preventDefault();const i=nodes.indexOf(document.activeElement as HTMLElement);nodes[(i+(e.shiftKey?-1:1)+nodes.length)%nodes.length]?.focus()}}}
@@ -54,7 +219,9 @@ const frameStats = computed(() => {
 })
 const anomalyFrameSet = computed(() => new Set(anomalyFrames.value.map(item => item.frame_index)))
 const frameKind = (frame: number) => { const s = frameStats.value.get(frame); return s?.manual ? 'manual' : s?.ai ? 'ai' : 'empty' }
-const frameFlags = (frame: number) => [anomalyFrameSet.value.has(frame) ? 'anomaly' : '', trackingPausedFrame.value === frame ? 'paused' : ''].filter(Boolean)
+const frameFlags = (frame: number) => reviewing.value
+  ? [reviewFrames.value.todo.has(frame) ? 'review-todo' : reviewFrames.value.done.has(frame) ? 'review-done' : '']
+  : [anomalyFrameSet.value.has(frame) ? 'anomaly' : '', trackingPausedFrame.value === frame ? 'paused' : ''].filter(Boolean)
 const frameTitle = (frame: number) => { const s = frameStats.value.get(frame); const parts = [s?.manual ? `人工 ${s.manual}` : '', s?.ai ? `AI ${s.ai}` : ''].filter(Boolean); return `第 ${frame + 1} 帧 · ${parts.join(' · ') || '无框'}${trackingPausedFrame.value === frame ? ' · 追踪暂停' : anomalyFrameSet.value.has(frame) ? ' · 追踪提示' : ''}` }
 const frameManualCount = computed(() => currentObjects.value.filter(object => object.source === 'manual').length)
 const endpointCount = (frame:number) => (annotationsByMedia.value[currentMediaId.value]||[]).filter(o=>o.source==='manual' && (o.frameIndex??0)===frame && o.bbox).length
@@ -87,7 +254,7 @@ const saveLabel = computed(() => workspaceRecoveryRequired.value ? '需重新读
 const jumpFrameInput = ref<HTMLInputElement|null>(null)
 const shortcutSection = userGuide.split(/^## 快捷键速查\s*$/m)[1] || ''
 const shortcutHelpNote = shortcutSection.trim().split(/\n\s*\n/)[0] || ''
-const annotationShortcuts = (shortcutSection.match(/人工标注\s*\n\s*(\| 快捷键[\s\S]*?)(?=\n\s*审查模式)/)?.[1] || '')
+const annotationShortcuts = (shortcutSection.match(/人工标注\s*\n\s*(\| 快捷键[\s\S]*?)(?=\n\s*审查\s*\n)/)?.[1] || '')
   .trim().split('\n').slice(2).filter(row => row.startsWith('|')).map(row => row.split('|').slice(1,-1).map(cell => cell.trim()))
 const selectedObjectCoverage = computed(() => {
   const id = selectedObject.value?.objectId
@@ -105,7 +272,7 @@ const feedbackTarget = computed(() => {
     || unresolvedAnomalies.value[0] || null
 })
 const hasPausedTracking = computed(() => trackingPausedFrame.value != null && pausedAnomalies.value.length > 0)
-const showPauseFeedback = computed(() => hasPausedTracking.value || !!(trackingFeedbackError.value && trackingFeedbackPendingAction.value?.decision !== 'reset'))
+const showPauseFeedback = computed(() => !reviewing.value && (hasPausedTracking.value || !!(trackingFeedbackError.value && trackingFeedbackPendingAction.value?.decision !== 'reset')))
 const pauseControlHost = ref<HTMLElement | null>(null), inspectorDetailsHost = ref<HTMLElement | null>(null), focusDetailsHost = ref<HTMLElement | null>(null)
 const pauseDetailsOpen = ref(false)
 const pauseDetailsTarget = computed(() => focused.value ? focusDetailsHost.value : inspectorDetailsHost.value)
@@ -381,6 +548,7 @@ function restorePage() {
   if (header) header.inert = priorHeaderInert
 }
 async function toggleFocus() {
+  cancelReviewLocate()
   cancelPointer(); spaceHeld.value = false
   const scroller = scrollContainerRef.value
   const pausedView = showPauseFeedback.value ? snapshotPauseView() : null
@@ -420,9 +588,11 @@ function fit() {
   const w = Math.max(1, Math.min(size.value.w-40, (size.value.h-40)*ratio))
   base.value = {w,h:w/ratio}
 }
-function fitView() { if(pointerActive||pan)return;cancelPendingPauseView(); cancelAnnotationGesture(); zoomReset(); fit(); scrollContainerRef.value?.scrollTo(0,0) }
+function fitView() { if(pointerActive||pan)return;if(reviewing.value)userZoomedInReview.value=true;cancelReviewLocate();cancelPendingPauseView(); cancelAnnotationGesture(); zoomReset(); fit(); scrollContainerRef.value?.scrollTo(0,0) }
 async function zoomAt(steps:number, point?:{x:number;y:number}) {
   if(pointerActive||pan)return
+  if(reviewing.value)userZoomedInReview.value=true
+  cancelReviewLocate()
   cancelPendingPauseView()
   const el = stageRef.value, scroller = scrollContainerRef.value
   if (!el || !scroller) return
@@ -487,7 +657,17 @@ function keys(e:KeyboardEvent){
   if(e.isComposing||e.keyCode===229||document.querySelector('[data-completion-dialog]'))return
   if(help.value){if(e.key==='Escape'){help.value=false;e.preventDefault()}if(e.key==='Tab'){const nodes=Array.from(helpDialog.value?.querySelectorAll<HTMLElement>('button,input,[tabindex="0"]')||[]);if(nodes.length){e.preventDefault();const i=nodes.indexOf(document.activeElement as HTMLElement);nodes[(i+(e.shiftKey?-1:1)+nodes.length)%nodes.length]?.focus()}}return}
   if((e.target as HTMLElement)?.closest('input,textarea,select,[contenteditable="true"]'))return
-  if(e.key==='Escape'){e.preventDefault();if(pointerActive||pan){cancelPointer();return}if(focused.value){void toggleFocus();return}cancelPointer();hiddenBoxes.value=false;clearSelection();return}
+  if(reviewing.value&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.repeat){
+    const reviewKey=e.key.toLowerCase()
+    if(['1','2','3'].includes(reviewKey)){
+      e.preventDefault()
+      ;(reviewKey==='1'?reviewPanel.value?.primary():reviewKey==='2'?reviewPanel.value?.secondary():reviewPanel.value?.tertiary())
+      return
+    }
+    if(reviewKey==='n'){e.preventDefault();reviewPanel.value?.next();return}
+    if(reviewKey==='z'){e.preventDefault();void (savedReviewView.value?restoreReviewView():zoomToReviewTarget());return}
+  }
+  if(e.key==='Escape'){e.preventDefault();if(pointerActive||pan){cancelPointer();return}if(savedReviewView.value){void restoreReviewView();return}if(focused.value){void toggleFocus();return}cancelPointer();hiddenBoxes.value=false;clearSelection();return}
   if(e.key.toLowerCase()==='f'&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.repeat){e.preventDefault();void toggleFocus();return}
   if(mediaBusy.value||workspaceRestoring.value)return
   if(e.key===' '){if((e.target as HTMLElement)?.closest('button,summary'))return;e.preventDefault();spaceHeld.value=true;return}
@@ -539,13 +719,15 @@ onMounted(()=>{
   observer=new ResizeObserver(()=>{const scroller=scrollContainerRef.value;if(scroller)size.value={w:scroller.clientWidth,h:scroller.clientHeight};if(zoom.value===1 && !pauseResizeLocked)fit()})
   if(scrollContainerRef.value)observer.observe(scrollContainerRef.value)
   window.addEventListener('keydown',keys);window.addEventListener('keyup',keyup);window.addEventListener('blur',blur);window.addEventListener('beforeunload',beforeUnload)
+  window.addEventListener('pointerdown',cancelReviewLocate,true);window.addEventListener('keydown',cancelReviewLocate,true);window.addEventListener('wheel',cancelReviewLocate,true)
   removeGuard=addLeaveGuard(async()=>{if(mediaBusy.value)return false;cancelHeadBox();cancelPointer();pausePlayback();try{await persistWorkspaceState(currentMediaId.value,true);return true}catch{return false}})
   if(selectedMedia.value)void resetAnnotationViewForMedia(selectedMediaId.value)
+  void review.loadSummary()
 })
-onUnmounted(()=>{cancelHeadBox();cancelTrackingRestartRequest();closeRestartDialog();if(deleteDialog.value?.open){deleteDialog.value.close();document.body.style.overflow=deletionPriorOverflow}if(focused.value)restorePage();observer?.disconnect();cancelPointer();pausePlayback();removeGuard?.();window.removeEventListener('keydown',keys);window.removeEventListener('keyup',keyup);window.removeEventListener('blur',blur);window.removeEventListener('beforeunload',beforeUnload)})
+onUnmounted(()=>{cancelReviewLocate();window.removeEventListener('pointerdown',cancelReviewLocate,true);window.removeEventListener('keydown',cancelReviewLocate,true);window.removeEventListener('wheel',cancelReviewLocate,true);if(reviewRefresh)clearTimeout(reviewRefresh);cancelHeadBox();cancelTrackingRestartRequest();closeRestartDialog();if(deleteDialog.value?.open){deleteDialog.value.close();document.body.style.overflow=deletionPriorOverflow}if(focused.value)restorePage();observer?.disconnect();cancelPointer();pausePlayback();removeGuard?.();window.removeEventListener('keydown',keys);window.removeEventListener('keyup',keyup);window.removeEventListener('blur',blur);window.removeEventListener('beforeunload',beforeUnload)})
 </script>
 <template>
-  <section class="annotation-page" :class="{'tracking-paused':hasPausedTracking}" data-testid="annotation-page">
+  <section class="annotation-page" :class="{'tracking-paused':hasPausedTracking,'review-mode':reviewing}" data-testid="annotation-page">
     <input ref="fileInputRef" type="file" accept="image/*" multiple hidden @change="handleFiles(($event.target as HTMLInputElement).files,'image')" />
     <input ref="videoInputRef" type="file" accept="video/*" multiple hidden @change="handleFiles(($event.target as HTMLInputElement).files,'video')" />
     <Teleport to="body"><div v-if="duplicateImport" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6" data-reimport-dialog @keydown.esc.prevent="cancelDuplicateImport">
@@ -558,21 +740,24 @@ onUnmounted(()=>{cancelHeadBox();cancelTrackingRestartRequest();closeRestartDial
         <div class="mt-5 flex justify-end gap-3"><button class="btn-secondary" :disabled="reimportSaving||duplicateImport.pending" @click="cancelDuplicateImport">取消导入</button><button v-if="duplicateImport.canOverwrite" class="btn-primary" :disabled="reimportSaving" @click="confirmDuplicateImport">{{ reimportSaving?'正在覆盖…':duplicateImport.pending?'重试覆盖':'覆盖并重新标注' }}</button></div>
       </section>
     </div></Teleport>
-    <WorkbenchShell name="annotate" :focused="focused" drawer-label="素材库" :drawer-count="mediaAssets.length" :drawer-forced="!selectedMedia" v-model:drawer-open="libraryOpen" :inspector-forced="showPauseFeedback" :inspector-badge="currentObjects.length">
+    <WorkbenchShell name="annotate" :focused="focused" :focus-keeps-inspector="reviewing" drawer-label="素材库" :drawer-count="mediaAssets.length" :drawer-forced="!selectedMedia" v-model:drawer-open="libraryOpen" :inspector-forced="showPauseFeedback" :inspector-badge="currentObjects.length">
       <template #context><span class="annot-context" data-testid="annotation-stage-status" aria-label="标注工作区状态">
-        <strong :title="selectedMedia?.name">{{ selectedMedia?.name || '选择素材开始标注' }}</strong>
+        <strong :title="selectedMedia?.name">{{ selectedMedia?.name || (reviewing?'选择视频开始审查':'选择素材开始标注') }}</strong>
         <span v-if="isVideo" class="shell-meta">第 {{ currentFrame+1 }} / {{ maxFrameIndex+1 }} 帧 · {{ annotatedFrameCount }} 帧有框</span>
         <span class="save-indicator" :class="saveState" role="status"><i />{{ saveLabel }}</span>
         <button class="icon-button" title="快捷键 (?)" aria-label="快捷键" @click="help=true"><AppIcon name="help" :size="16" /></button>
-        <SendToReview history-only /><AnnotationDatasetExport />
-        <template v-if="focused && isVideo"><button class="quiet-button" :disabled="editingBlocked||isAiBusy" @click="seekVideo(0)">首帧</button><button class="quiet-button" :disabled="editingBlocked||isAiBusy" @click="seekVideo(frameToTime(maxFrameIndex))">尾帧</button><button class="quiet-button" :disabled="editingBlocked||isAiBusy||hasPausedTracking||maxFrameIndex<1||!endpointCount(0)" @click="requestEndpointTracking">首尾双向追踪</button></template>
-        <template v-if="focused"><UserGuide page="/annotate" /></template>
+        <span v-if="reviewMediaId && review.status.value" class="review-chip" :class="review.status.value" data-testid="header-review-status">{{ reviewStatusLabel[review.status.value] }}</span>
+        <button v-if="!reviewing && reviewMediaId && review.status.value!=='passed'" class="btn-secondary" data-testid="go-review" @click="router.push('/review')">去审查</button>
+        <button v-if="reviewing" class="quiet-button" @click="router.push('/annotate')">回到标注</button>
+        <AnnotationDatasetExport />
+        <template v-if="focused && isVideo && !reviewing"><button class="quiet-button" :disabled="editingBlocked||isAiBusy" @click="seekVideo(0)">首帧</button><button class="quiet-button" :disabled="editingBlocked||isAiBusy" @click="seekVideo(frameToTime(maxFrameIndex))">尾帧</button><button class="quiet-button" :disabled="editingBlocked||isAiBusy||hasPausedTracking||maxFrameIndex<1||!endpointCount(0)" @click="requestEndpointTracking">首尾双向追踪</button></template>
+        <template v-if="focused"><UserGuide :page="reviewing?'/review':'/annotate'" /></template>
       </span></template>
       <template #drawer><div class="asset-panel annot-assets">
-      <div class="asset-actions"><button class="btn-primary" :disabled="mediaBusy" @click="openFilePicker('video')"><AppIcon name="upload" :size="15" />导入视频</button><button class="btn-secondary" :disabled="mediaBusy" @click="openFilePicker('image')">图片</button></div>
+      <div v-if="!reviewing" class="asset-actions"><button class="btn-primary" :disabled="mediaBusy" @click="openFilePicker('video')"><AppIcon name="upload" :size="15" />导入视频</button><button class="btn-secondary" :disabled="mediaBusy" @click="openFilePicker('image')">图片</button></div>
       <div class="asset-search"><input v-model="search" class="input" placeholder="查找素材…" aria-label="查找素材" /></div>
       <div class="asset-list"><div v-for="media in visibleMedia" :key="media.id" class="asset-card" :class="{selected:selectedMediaId===media.id}" role="button" :tabindex="mediaBusy?-1:0" :aria-disabled="mediaBusy" @click="!mediaBusy&&(selectedMediaId=media.id,libraryOpen=false)" @keydown.enter="!mediaBusy&&(selectedMediaId=media.id)" @keydown.space.prevent.stop="!mediaBusy&&(selectedMediaId=media.id)">
-        <span class="asset-type">{{ media.type==='video'?'VID':'IMG' }}</span><div><strong :title="media.name">{{ media.name }}</strong><small>{{ media.type==='video'?`${media.frameCount || '—'} 帧 · ${media.fps?.toFixed(1) || 30} fps`:`${media.width || '—'} × ${media.height || '—'}` }}</small></div><button class="asset-delete icon-button" :disabled="mediaBusy||workspaceRestoring" :title="media.serverMediaId?'删除素材（从服务器删除，不能撤销）':'删除素材（清除本机工作区内容，保留电脑原文件）'" :aria-label="`删除素材 ${media.name}`" @click.stop="deleteMedia(media.id)" @keydown.enter.stop @keydown.space.stop><AppIcon name="trash" :size="14" /></button>
+        <span class="asset-type">{{ media.type==='video'?'VID':'IMG' }}</span><div><strong :title="media.name">{{ media.name }}</strong><small>{{ media.type==='video'?`${media.frameCount || '—'} 帧 · ${media.fps?.toFixed(1) || 30} fps`:`${media.width || '—'} × ${media.height || '—'}` }}<b v-if="media.serverMediaId && review.summary.value[media.serverMediaId]" class="asset-review" :class="review.summary.value[media.serverMediaId]">{{ reviewStatusLabel[review.summary.value[media.serverMediaId]!] }}</b></small></div><button class="asset-delete icon-button" :disabled="mediaBusy||workspaceRestoring" :title="media.serverMediaId?'删除素材（从服务器删除，不能撤销）':'删除素材（清除本机工作区内容，保留电脑原文件）'" :aria-label="`删除素材 ${media.name}`" @click.stop="deleteMedia(media.id)" @keydown.enter.stop @keydown.space.stop><AppIcon name="trash" :size="14" /></button>
       </div><p v-if="!visibleMedia.length" class="sidebar-empty">{{ search?'没有匹配素材':'导入视频或图片开始标注' }}</p></div>
       </div></template>
       <template #alerts>
@@ -595,7 +780,9 @@ onUnmounted(()=>{cancelHeadBox();cancelTrackingRestartRequest();closeRestartDial
               </template><img v-else :key="selectedMedia.id" ref="imageRef" :src="selectedMedia.url" :alt="selectedMedia.name" class="stage-media" :style="{filter}" @load="onImageLoaded" /></template>
               <div v-else class="canvas-empty"><AppIcon name="upload" :size="36" /><h3>把注意力留给画面</h3><p>导入一段视频，开始精细标注。</p><button class="btn-primary" @click="openFilePicker('video')">导入视频</button></div>
               <div ref="annotationHitRef" data-testid="annotation-hit" class="annotation-hit" :class="{panning:spaceHeld||pan,selecting:activeTool==='select',locked:editingBlocked}" @click="stageClick" @pointerdown="pointerDown" @pointermove="pointerMove" @pointerup="pointerUp" @pointercancel="cancelPointer" @lostpointercapture="cancelPointer" @pointerleave="mousePixel=null" />
-              <AnnotationOverlay :objects="displayObjects" :selected="selectedObjectId" :width="stageSize.w" :height="stageSize.h" :draft="tempBbox" :labels="labels" :hidden="hiddenBoxes || (!!frameError && !exactFrameUrl)" />
+              <div v-if="reviewLastBox" v-show="!hiddenBoxes && !frameError && !exactFrameLoading" class="review-last-box" :style="reviewLastBox" aria-hidden="true" />
+              <div v-for="mark in reviewMarks.circles" v-show="!hiddenBoxes && !frameError && !exactFrameLoading" :key="mark.key" class="review-candidate-circle" :class="{clickable:activeTool==='select'}" :style="{left:mark.left,top:mark.top,width:`${mark.size}px`,height:`${mark.size}px`}" :data-review-index="mark.label" role="button" :tabindex="activeTool==='select'?0:-1" :aria-label="`放大查看候选 ${mark.label}`" :aria-hidden="activeTool!=='select'" @pointerdown.stop @click.stop="zoomToReviewTarget(mark)" @keydown.enter.prevent.stop="zoomToReviewTarget(mark)"><span>{{ mark.label }}</span></div>
+              <AnnotationOverlay :objects="displayObjects" :selected="selectedObjectId" :width="stageSize.w" :height="stageSize.h" :draft="tempBbox" :labels="labels" :hidden="hiddenBoxes || (!!frameError && !exactFrameUrl)" :review-ids="reviewMarks.objectIds" :review-active="!!(reviewMarks.objectIds.length || reviewMarks.circles.length)" />
             </div>
           </div>
           <div class="shell-tools" aria-label="标注工具">
@@ -610,6 +797,8 @@ onUnmounted(()=>{cancelHeadBox();cancelTrackingRestartRequest();closeRestartDial
             <button class="shell-tool" :class="{active:hiddenBoxes}" :aria-pressed="hiddenBoxes" title="隐藏框 (H)" aria-label="显示或隐藏标注" @click="hiddenBoxes=!hiddenBoxes"><AppIcon name="eye" :size="17" /></button>
             <button class="shell-tool" :class="{active:labels}" :aria-pressed="labels" title="显示对象编号" aria-label="显示对象编号" @click="labels=!labels"><AppIcon name="hash" :size="16" /></button>
             <button class="shell-tool" :class="{active:enhancing}" :aria-expanded="enhancing" title="画面增强" aria-label="画面增强" @click="enhancing=!enhancing"><AppIcon name="sun" :size="17" /></button>
+            <button class="shell-tool" :class="{active:minimapOn}" :aria-pressed="minimapOn" title="放大后显示小地图（会遮住画面右上角）" aria-label="小地图" @click="minimapOn=!minimapOn"><span>小地图</span></button>
+            <button v-if="savedReviewView" class="shell-tool review-restore-view" data-testid="review-restore-view" title="返回原视图 (Esc)" aria-label="返回原视图" @click="restoreReviewView"><span>返回原视图</span></button>
             <button ref="focusButton" class="shell-tool" :class="{active:focused}" :aria-pressed="focused" :title="focused?'退出专注 (F / Esc)':'专注模式 (F)'" :aria-label="focused?'退出专注':'专注'" @click="toggleFocus"><AppIcon name="fit" :size="16" /></button>
           </div>
           <div v-if="headBoxBusy || headBoxError" class="head-proposal-status" :role="headBoxError?'alert':'status'">
@@ -617,11 +806,11 @@ onUnmounted(()=>{cancelHeadBox();cancelTrackingRestartRequest();closeRestartDial
             <button class="quiet-button" @click="headBoxBusy?cancelHeadBox():headBoxError=''">{{ headBoxBusy?'取消':'关闭' }}</button>
           </div>
           <div v-if="enhancing" class="annot-enhance enhancement-bar"><button v-for="p in ['原图','暗场','低对比']" :key="p" class="quiet-button" @click="enhancement(p)">{{ p }}</button><label>亮度 <input v-model.number="brightness" aria-label="亮度" type="range" min="50" max="200" /></label><label>对比 <input v-model.number="contrast" aria-label="对比度" type="range" min="50" max="220" /></label><label><input v-model="inverted" type="checkbox" />反相</label><span>只影响显示</span></div>
-          <AnnotationMinimap v-if="selectedMedia" :source="minimapSource" :scroller="scrollContainerRef" :stage="stageRef" :media-width="selectedMedia.width||4" :media-height="selectedMedia.height||3" :redraw-key="`${currentMediaId}:${currentFrame}:${exactFrameUrl}:${stageSize.w}`" />
+          <AnnotationMinimap v-if="selectedMedia && minimapOn" :source="minimapSource" :scroller="scrollContainerRef" :stage="stageRef" :media-width="selectedMedia.width||4" :media-height="selectedMedia.height||3" :redraw-key="`${currentMediaId}:${currentFrame}:${exactFrameUrl}:${stageSize.w}`" />
           <div v-if="exactFrameLoading||workspaceRestoring||isAiBusy" class="canvas-status">{{ isAiBusy?'AI 正在追踪 · 标注暂时锁定':workspaceRestoring?'正在恢复工作区…':'正在读取帧…' }}</div>
           <div v-if="frameError" class="canvas-error" role="alert">{{ frameError }}<button class="btn-secondary" @click="retryExactFrame">重试读取</button></div>
           <div v-if="magnifier" class="loupe"><canvas ref="loupe" width="200" height="150" :style="{filter}" /><span>4× 原图局部 · {{ mousePixel?`${mousePixel.x}, ${mousePixel.y}`:'移动指针查看' }}</span></div>
-          <div class="shell-zoom" role="group" aria-label="画面缩放"><span v-if="mousePixel" class="annot-coords">{{ mousePixel.x }}, {{ mousePixel.y }} px</span><button aria-label="缩小画面" @click="zoomAt(-1)">−</button><button title="适应画面 (0)" aria-label="适应画面" @click="fitView">{{ Math.round(zoom*100) }}%</button><button aria-label="放大画面" @click="zoomAt(1)">＋</button></div>
+          <div v-if="!isVideo" class="shell-zoom" role="group" aria-label="画面缩放"><span v-if="mousePixel" class="annot-coords">{{ mousePixel.x }}, {{ mousePixel.y }} px</span><button aria-label="缩小画面" @click="zoomAt(-1)">−</button><button title="适应画面 (0)" aria-label="适应画面" @click="fitView">{{ Math.round(zoom*100) }}%</button><button aria-label="放大画面" @click="zoomAt(1)">＋</button></div>
         </div>
         <aside v-show="focused && showPauseFeedback && pauseDetailsOpen" ref="focusDetailsHost" class="pause-details-dock" aria-label="暂停检查依据" />
       </div>
@@ -639,13 +828,15 @@ onUnmounted(()=>{cancelHeadBox();cancelTrackingRestartRequest();closeRestartDial
         <label class="shell-jump"><input ref="jumpFrameInput" v-model.number="jumpFrame" aria-label="跳转帧号" title="跳转帧号 (G)" type="number" min="1" :max="maxFrameIndex+1" :disabled="isAiBusy" @change="jump" @keydown.enter="jump" /> / {{ maxFrameIndex+1 }}</label>
         <WorkbenchFrameStrip :frame-count="maxFrameIndex+1" :current="currentFrame" :disabled="isAiBusy" :priority="['manual','ai','empty']" :kind-of="frameKind" :flags-of="frameFlags" :title-of="frameTitle" @seek="seekFrame" />
         <span class="annot-time">{{ formatTime(currentTime) }}</span>
+        <div class="shell-zoom in-bottom" role="group" aria-label="画面缩放"><span v-if="mousePixel" class="annot-coords">{{ mousePixel.x }}, {{ mousePixel.y }} px</span><button aria-label="缩小画面" @click="zoomAt(-1)">−</button><button title="适应画面 (0)" aria-label="适应画面" @click="fitView">{{ Math.round(zoom*100) }}%</button><button aria-label="放大画面" @click="zoomAt(1)">＋</button></div>
       </template>
       <template #inspector><div class="annot-inspector" :class="{'pause-active':showPauseFeedback}" aria-label="检查面板">
+      <AnnotationReviewPanel v-if="reviewing" ref="reviewPanel" :media-id="reviewMediaId" :current-frame="currentFrame" :blocked="editingBlocked" :tracking-pending="hasPausedTracking" :flush="flushWorkspace" :preview-source="minimapSource" :preview-filter="filter" :preview-media-width="selectedMedia?.width||0" :preview-media-height="selectedMedia?.height||0" :action-error="reviewActionError" @locate="locateReviewItem" @adopt="adoptReviewTrackItem" @add-head="addHeadAtReviewTarget" />
       <section v-show="showPauseFeedback" class="pause-inspector-panel" aria-label="暂停核对">
         <div ref="pauseControlHost" class="pause-control-host" />
         <div v-show="pauseDetailsOpen" ref="inspectorDetailsHost" class="pause-inspector-details" />
       </section>
-      <section v-show="!showPauseFeedback || trackingCalibrationSummary.length || (trackingFeedbackError && trackingFeedbackPendingAction?.decision==='reset')" class="shell-card annot-ai">
+      <section v-show="!reviewing && (!showPauseFeedback || trackingCalibrationSummary.length || (trackingFeedbackError && trackingFeedbackPendingAction?.decision==='reset'))" class="shell-card annot-ai">
         <template v-if="!showPauseFeedback">
           <div class="shell-card-head"><AppIcon name="spark" :size="16"/><strong>AI 追踪</strong><span class="ai-state">{{ isAiBusy?'追踪中':hasPausedTracking?'待核对':'就绪' }}</span></div>
           <p class="shell-card-note">{{ trackingProgress || '框好首尾帧头部后，生成整段标注，自动识别边缘入画。' }}</p>
@@ -664,7 +855,7 @@ onUnmounted(()=>{cancelHeadBox();cancelTrackingRestartRequest();closeRestartDial
         <div class="object-selection" data-testid="selected-object-actions">
           <template v-if="selectedObject">
             <div class="selection-context"><strong>对象 {{ selectedObject.objectId }}</strong><span>{{ selectedObject.source==='manual'?'人工':'AI 追踪' }}{{ selectedObject.confidence?` · ${Math.round(selectedObject.confidence*100)}%`:'' }}<template v-if="isVideo"> · {{ selectedObjectCoverage }}/{{ maxFrameIndex+1 }} 帧</template><template v-if="selectedObject.bbox"> · {{ (selectedObject.bbox.width*(selectedMedia?.width||0)/100).toFixed(0) }}×{{ (selectedObject.bbox.height*(selectedMedia?.height||0)/100).toFixed(0) }} px</template></span></div>
-            <div class="object-delete-actions"><button class="btn-secondary" data-testid="delete-object-frame" title="只删当前帧 (Delete)" :disabled="editingBlocked||trackingFeedbackPending||!!objectDeletionPendingAction" @click="deleteSelectedFrame"><AppIcon name="trash" :size="13" />删除本帧</button><button class="btn-secondary delete-video-button" data-testid="delete-object-video" :disabled="editingBlocked||!isVideo||!selectedMedia?.serverMediaId||trackingFeedbackPending||!!objectDeletionPendingAction" @click="openVideoDeletion">删除全视频…</button></div>
+            <div class="object-delete-actions"><button class="btn-secondary" data-testid="delete-object-frame" title="只删当前帧 (Delete)" :disabled="editingBlocked||trackingFeedbackPending||!!objectDeletionPendingAction" @click="deleteSelectedFrame"><AppIcon name="trash" :size="13" />删除本帧的框</button><button class="btn-secondary delete-video-button" data-testid="delete-object-video" :disabled="editingBlocked||!isVideo||!selectedMedia?.serverMediaId||trackingFeedbackPending||!!objectDeletionPendingAction" title="删除这个对象在整段视频所有帧中的框，可撤销" @click="openVideoDeletion"><AppIcon name="trash" :size="13" />删除全视频中此对象</button></div>
           </template>
           <p v-else class="object-no-selection">{{ activeTool==='bbox'?'在画面上拖出头部框；按 V 切换到选择。':'点击画面中的框，或下方编号选中对象。' }}</p>
           <div v-if="frameDeletionVisible" class="object-deletion-feedback" role="status"><AppIcon name="check" :size="14"/><span>对象 {{ frameDeletion?.objectId }} 已删除本帧标注</span><button class="quiet-button" :disabled="editingBlocked||!canUndo||!!objectDeletionPendingAction||trackingFeedbackPending" @click="undoFrameDeletion"><AppIcon name="undo" :size="13" />撤销</button></div>
