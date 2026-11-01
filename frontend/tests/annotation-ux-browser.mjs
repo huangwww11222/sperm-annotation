@@ -174,7 +174,7 @@ try{
   await page.screenshot({path:'output/playwright/ux-portrait-compact.png'})
   await page.setViewportSize({width:1440,height:900});await uiButton('标注记录').click();await page.locator('.records-page').waitFor()
   check(await page.locator('.workflow-nav').getByRole('button',{name:'人工标注',exact:true}).count()===1&&!(await page.locator('.workflow-nav').innerText()).includes('标注记录'),'records are separate from the three workflow stages')
-  check((await page.locator('.records-page').innerText()).includes('无需经过此页即可送审'),'record page explains its lookup purpose')
+  check((await page.locator('.records-page').innerText()).includes('不影响标注与审查流程'),'record page explains its lookup purpose')
   await page.screenshot({path:'output/playwright/ux-records.png'})
   check(errors.length===0,'annotation, recovery, theme and navigation have no uncaught errors')
   console.log('SUCCESS',checks,'checks')

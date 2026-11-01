@@ -6,6 +6,7 @@ import AnnotationReviewPanel from '../components/AnnotationReviewPanel.vue'
 import AnnotationMinimap from '../components/AnnotationMinimap.vue'
 import WorkbenchShell from '../components/WorkbenchShell.vue'
 import WorkbenchFrameStrip from '../components/WorkbenchFrameStrip.vue'
+import TrackingProgress from '../components/TrackingProgress.vue'
 import AppIcon from '../components/AppIcon.vue'
 import AnnotationOverlay from '../components/AnnotationOverlay.vue'
 import AnnotationTrackingFeedback from '../components/AnnotationTrackingFeedback.vue'
@@ -33,7 +34,7 @@ const {
   objectDeletionBusy, objectDeletionError, objectDeletionPendingAction, retryObjectDeletion,
   confirmTrackingAnomaly, trackingFeedbackBusy, trackingFeedbackError, trackingFeedbackPending, trackingFeedbackPendingAction, retryTrackingAnomalyFeedback,
   trackingCalibrationSummary, resetTrackingCalibration, trackingWarningSummary,
-  trackingError,trackingProgress,trackingRetryLabel,trackingRetryBusy,retryTracking,isTrackingMedia,workspaceRecoveryRequired,saveRecoveryLabel,retryWorkspaceSave,reloadWorkspaceFromServer,
+  trackingError,trackingProgress,trackingProgressViewFor,currentTrackingProgress,currentTrackingFinished,trackingRetryLabel,trackingRetryBusy,retryTracking,isTrackingMedia,workspaceRecoveryRequired,saveRecoveryLabel,retryWorkspaceSave,reloadWorkspaceFromServer,
   restartTrackingFromEarlierFrame, retryTrackingRestart, cancelTrackingRestartRequest, trackingRestartBusy, trackingRestartError, trackingRestartPendingAction, trackingRestartStorageWarning,
 } = useWorkspace()
 // The review step uses this same workbench: same boxes, same tools, same saves.
@@ -274,6 +275,8 @@ const stageStyle = computed(() => ({
   marginBottom: pauseStageMargins.value ? `${pauseStageMargins.value.marginBottom}px` : undefined,
 }))
 const pauseStageMargins = ref<{marginLeft:number;marginRight:number;marginTop:number;marginBottom:number} | null>(null)
+// Another video tracking in the background: the closed media drawer shows a pulsing dot.
+const backgroundTracking = computed(() => mediaAssets.value.some(media => media.id !== selectedMediaId.value && isTrackingMedia(media.id)))
 const visibleMedia = computed(() => mediaAssets.value.filter(m => m.name.toLowerCase().includes(search.value.toLowerCase())))
 const filter = computed(() => `${mediaFilterStyle.value} ${inverted.value ? 'invert(1)' : ''}`)
 const saveLabel = computed(() => workspaceRecoveryRequired.value ? '需重新读取' : selectedMedia.value?.serverMediaId ? ({ idle:'自动保存', saving:'保存中…', saved:'已保存', error:'保存失败' }[saveState.value]) : '本机自动保存')
@@ -768,12 +771,14 @@ onUnmounted(()=>{cancelReviewLocate();window.removeEventListener('pointerdown',c
         <div class="mt-5 flex justify-end gap-3"><button class="btn-secondary" :disabled="reimportSaving||duplicateImport.pending" @click="cancelDuplicateImport">取消导入</button><button v-if="duplicateImport.canOverwrite" class="btn-primary" :disabled="reimportSaving" @click="confirmDuplicateImport">{{ reimportSaving?'正在覆盖…':duplicateImport.pending?'重试覆盖':'覆盖并重新标注' }}</button></div>
       </section>
     </div></Teleport>
-    <WorkbenchShell name="annotate" :focused="focused" :focus-keeps-inspector="reviewing" drawer-label="素材库" :drawer-count="mediaAssets.length" :drawer-forced="!selectedMedia" v-model:drawer-open="libraryOpen" :inspector-forced="showPauseFeedback" :inspector-badge="currentObjects.length">
-      <template #context><span class="annot-context" data-testid="annotation-stage-status" aria-label="标注工作区状态">
+    <WorkbenchShell name="annotate" :focused="focused" :focus-keeps-inspector="reviewing" drawer-label="素材库" :drawer-count="mediaAssets.length" :drawer-forced="!selectedMedia" :drawer-busy="backgroundTracking" v-model:drawer-open="libraryOpen" :inspector-forced="showPauseFeedback" :inspector-badge="currentObjects.length">
+      <template #context="{ inspectorVisible }"><span class="annot-context" :class="{'is-tracking':(!inspectorVisible||reviewing)&&(currentTrackingProgress||currentTrackingFinished)}" data-testid="annotation-stage-status" aria-label="标注工作区状态">
         <strong :title="selectedMedia?.name">{{ selectedMedia?.name || (reviewing?'选择视频开始审查':'选择素材开始标注') }}</strong>
         <span v-if="isVideo" class="shell-meta">第 {{ currentFrame+1 }} / {{ maxFrameIndex+1 }} 帧 · {{ annotatedFrameCount }} 帧有框</span>
         <span class="save-indicator" :class="saveState" role="status"><i />{{ saveLabel }}</span>
-        <button class="icon-button" title="快捷键 (?)" aria-label="快捷键" @click="help=true"><AppIcon name="help" :size="16" /></button>
+        <!-- The AI card already shows the full bar; the header carries it only when that card is off screen. -->
+        <TrackingProgress v-if="!inspectorVisible || reviewing" variant="compact" :view="currentTrackingProgress" :finished="currentTrackingFinished" />
+        <button class="icon-button" title="快捷键 (?)" aria-label="快捷键" @click="help=true"><AppIcon name="keyboard" :size="17" /></button>
         <span v-if="reviewMediaId && review.status.value" class="review-chip" :class="review.status.value" data-testid="header-review-status">{{ reviewStatusLabel[review.status.value] }}</span>
         <button v-if="!reviewing && reviewMediaId && review.status.value!=='passed'" class="btn-secondary" data-testid="go-review" @click="router.push('/review')">去审查</button>
         <button v-if="reviewing" class="quiet-button" @click="router.push('/annotate')">回到标注</button>
@@ -785,7 +790,7 @@ onUnmounted(()=>{cancelReviewLocate();window.removeEventListener('pointerdown',c
       <div v-if="!reviewing" class="asset-actions"><button class="btn-primary" :disabled="libraryBusy" @click="openFilePicker('video')"><AppIcon name="upload" :size="15" />导入视频</button><button class="btn-secondary" :disabled="libraryBusy" @click="openFilePicker('image')">图片</button><button class="btn-secondary" :disabled="libraryBusy" title="导入别人用本工具导出的训练数据集 ZIP（导出时需勾选“包含原视频”），导入后在审查页检查和修改" @click="packageInputRef?.click()">标注包</button></div>
       <div class="asset-search"><input v-model="search" class="input" placeholder="查找素材…" aria-label="查找素材" /></div>
       <div class="asset-list"><div v-for="media in visibleMedia" :key="media.id" class="asset-card" :class="{selected:selectedMediaId===media.id}" role="button" :tabindex="libraryBusy?-1:0" :aria-disabled="libraryBusy" @click="!libraryBusy&&(selectedMediaId=media.id,libraryOpen=false)" @keydown.enter="!libraryBusy&&(selectedMediaId=media.id)" @keydown.space.prevent.stop="!libraryBusy&&(selectedMediaId=media.id)">
-        <span class="asset-type">{{ media.type==='video'?'VID':'IMG' }}</span><div><strong :title="media.name">{{ media.name }}</strong><small>{{ media.type==='video'?`${media.frameCount || '—'} 帧 · ${media.fps?.toFixed(1) || 30} fps`:`${media.width || '—'} × ${media.height || '—'}` }}<b v-if="media.serverMediaId && review.summary.value[media.serverMediaId]" class="asset-review" :class="review.summary.value[media.serverMediaId]">{{ reviewStatusLabel[review.summary.value[media.serverMediaId]!] }}</b><b v-if="isTrackingMedia(media.id)" class="asset-review asset-tracking" data-testid="asset-tracking">追踪中</b></small></div><button class="asset-delete icon-button" :disabled="libraryBusy||workspaceRestoring||isTrackingMedia(media.id)" :title="media.serverMediaId?'删除素材（从服务器删除，不能撤销）':'删除素材（清除本机工作区内容，保留电脑原文件）'" :aria-label="`删除素材 ${media.name}`" @click.stop="deleteMedia(media.id)" @keydown.enter.stop @keydown.space.stop><AppIcon name="trash" :size="14" /></button>
+        <span class="asset-type">{{ media.type==='video'?'VID':'IMG' }}</span><div><strong :title="media.name">{{ media.name }}</strong><small>{{ media.type==='video'?`${media.frameCount || '—'} 帧 · ${media.fps?.toFixed(1) || 30} fps`:`${media.width || '—'} × ${media.height || '—'}` }}<b v-if="media.serverMediaId && review.summary.value[media.serverMediaId]" class="asset-review" :class="review.summary.value[media.serverMediaId]">{{ reviewStatusLabel[review.summary.value[media.serverMediaId]!] }}</b><b v-if="isTrackingMedia(media.id)" class="asset-review asset-tracking" data-testid="asset-tracking">追踪中</b></small><TrackingProgress v-if="isTrackingMedia(media.id)" variant="mini" :view="trackingProgressViewFor(media.id)" /></div><button class="asset-delete icon-button" :disabled="libraryBusy||workspaceRestoring||isTrackingMedia(media.id)" :title="media.serverMediaId?'删除素材（从服务器删除，不能撤销）':'删除素材（清除本机工作区内容，保留电脑原文件）'" :aria-label="`删除素材 ${media.name}`" @click.stop="deleteMedia(media.id)" @keydown.enter.stop @keydown.space.stop><AppIcon name="trash" :size="14" /></button>
       </div><p v-if="!visibleMedia.length" class="sidebar-empty">{{ search?'没有匹配素材':'导入视频或图片开始标注' }}</p></div>
       </div></template>
       <template #alerts>
@@ -855,7 +860,7 @@ onUnmounted(()=>{cancelReviewLocate();window.removeEventListener('pointerdown',c
         <button class="icon-button shell-play" :aria-label="isPlaying?'暂停':'播放'" :title="isPlaying?'暂停 (K)':'播放 (K)'" :disabled="isAiBusy||exactFrameLoading" @click="togglePlayback"><AppIcon :name="isPlaying?'pause':'play'" :size="15" /></button>
         <button class="icon-button" aria-label="下一帧" title="下一帧 (→)" :disabled="isAiBusy||currentFrame===maxFrameIndex" @click="seekByFrame(1)"><AppIcon name="next" :size="16" /></button>
         <label class="shell-jump"><input ref="jumpFrameInput" v-model.number="jumpFrame" aria-label="跳转帧号" title="跳转帧号 (G)" type="number" min="1" :max="maxFrameIndex+1" :disabled="isAiBusy" @change="jump" @keydown.enter="jump" /> / {{ maxFrameIndex+1 }}</label>
-        <WorkbenchFrameStrip :frame-count="maxFrameIndex+1" :current="currentFrame" :disabled="isAiBusy" :priority="['manual','ai','empty']" :kind-of="frameKind" :flags-of="frameFlags" :title-of="frameTitle" @seek="seekFrame" />
+        <WorkbenchFrameStrip :frame-count="maxFrameIndex+1" :current="currentFrame" :disabled="isAiBusy" :priority="['manual','ai','empty']" :kind-of="frameKind" :flags-of="frameFlags" :title-of="frameTitle" :scan="currentTrackingProgress" @seek="seekFrame" />
         <span class="annot-time">{{ formatTime(currentTime) }}</span>
         <div class="shell-zoom in-bottom" role="group" aria-label="画面缩放"><span v-if="mousePixel" class="annot-coords">{{ mousePixel.x }}, {{ mousePixel.y }} px</span><button aria-label="缩小画面" @click="zoomAt(-1)">−</button><button title="适应画面 (0)" aria-label="适应画面" @click="fitView">{{ Math.round(zoom*100) }}%</button><button aria-label="放大画面" @click="zoomAt(1)">＋</button></div>
       </template>
@@ -868,7 +873,9 @@ onUnmounted(()=>{cancelReviewLocate();window.removeEventListener('pointerdown',c
       <section v-show="!reviewing && (!showPauseFeedback || trackingCalibrationSummary.length || (trackingFeedbackError && trackingFeedbackPendingAction?.decision==='reset'))" class="shell-card annot-ai">
         <template v-if="!showPauseFeedback">
           <div class="shell-card-head"><AppIcon name="spark" :size="16"/><strong>AI 追踪</strong><span class="ai-state">{{ isAiBusy?'追踪中':hasPausedTracking?'待核对':'就绪' }}</span></div>
-          <p class="shell-card-note">{{ trackingProgress || '框好首尾帧头部后，生成整段标注，自动识别边缘入画。' }}</p>
+          <TrackingProgress v-if="currentTrackingProgress || currentTrackingFinished" class="annot-tracking-progress" :view="currentTrackingProgress" :finished="currentTrackingFinished" />
+          <p v-else class="shell-card-note">{{ trackingProgress || '框好首尾帧头部后，生成整段标注，自动识别边缘入画。' }}</p>
+          <p v-if="currentTrackingProgress && currentTrackingProgress.mode !== 'finishing'" class="shell-card-note annot-tracking-hint">追踪在服务器上进行，可以切换到其他视频继续标注。</p>
           <div v-if="isVideo" class="endpoint-tracking" aria-label="首尾帧标注">
             <div class="endpoint-navigation"><button class="btn-secondary" :disabled="editingBlocked||isAiBusy" @click="seekVideo(0)">首帧 · {{ endpointCount(0) }} 人工框</button><button class="btn-secondary" :disabled="editingBlocked||isAiBusy" @click="seekVideo(frameToTime(maxFrameIndex))">尾帧 · {{ endpointCount(maxFrameIndex) }} 人工框</button></div>
             <p class="shell-card-note">完整框出两端的头部；编号可不同。尾帧框须人工绘制或修正。</p>

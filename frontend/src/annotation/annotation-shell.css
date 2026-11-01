@@ -9,7 +9,7 @@
 .shell-annotate .canvas-status{top:auto;bottom:14px}
 /* Toolbar and enhancement popover are rows above the image, in normal flow. */
 .shell-annotate .annotation-canvas>.shell-tools{order:-2;position:relative;left:auto;top:auto;margin:0;width:100%;flex:none;flex-wrap:wrap;border:0;border-bottom:1px solid var(--line);border-radius:0;box-shadow:none;padding:4px 8px}
-.annot-enhance{order:-1;position:relative;left:auto;top:auto;margin:6px 12px 12px;width:fit-content;max-width:calc(100% - 24px);min-height:48px;max-height:160px;flex:0 1 auto;overflow:auto;overscroll-behavior:contain;z-index:34;border:1px solid var(--line);border-radius:8px;box-shadow:0 6px 20px #0004;background:var(--surface)}
+.annot-enhance{order:-1;position:relative;left:auto;top:auto;margin:6px 12px 12px;width:fit-content;max-width:calc(100% - 24px);min-height:48px;max-height:160px;flex:0 1 auto;overflow:auto;overscroll-behavior:contain;z-index:34;border:1px solid var(--line);border-radius:var(--radius-md);box-shadow:var(--shadow-lg);background:var(--surface);animation:rise-in var(--dur-base) var(--ease-out)}
 .annot-coords{padding:0 8px;font-size:11px;color:#b9cad8;font-variant-numeric:tabular-nums;white-space:nowrap}
 .annot-time{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
 
@@ -27,10 +27,10 @@
 .annot-objects .selection-context{flex-wrap:wrap;justify-content:flex-start}
 .annot-objects .object-no-selection{margin:0}
 .annot-chips{flex:1;min-height:0;overflow:auto;display:flex;flex-wrap:wrap;align-content:flex-start;gap:5px;padding-top:10px;overscroll-behavior:contain}
-.shell-annotate .annot-chip{flex:0 0 auto;display:inline-grid;place-items:center;min-width:36px;height:26px;padding:0 6px;gap:0;border-radius:5px;border:1px solid var(--line);border-left:3px solid var(--chip);background:var(--surface-subtle);color:var(--text);font-size:12px;font-variant-numeric:tabular-nums;text-align:center}
-.shell-annotate .annot-chip:hover:not(:disabled){background:var(--surface-hover)}
-.shell-annotate .annot-chip.selected{border-color:var(--selection);border-left-color:var(--selection);background:var(--warning-soft);font-weight:650}
-.annot-chips .sidebar-empty{width:100%;margin:6px 0;font-size:12px;color:var(--muted)}
+.shell-annotate .annot-chip{flex:0 0 auto;display:inline-grid;place-items:center;min-width:36px;height:26px;padding:0 7px;gap:0;border-radius:6px;border:1px solid var(--line);border-left:3px solid var(--chip);background:var(--surface-subtle);color:var(--text);font-size:12px;font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:center;animation:fade-in var(--dur-base) var(--ease-standard)}
+.shell-annotate .annot-chip:hover:not(:disabled){background:var(--surface-hover);border-color:var(--line-strong);border-left-color:var(--chip)}
+.shell-annotate .annot-chip.selected{border-color:var(--selection);border-left-color:var(--selection);background:var(--warning-soft);font-weight:650;box-shadow:0 0 0 2px var(--warning-soft)}
+.annot-chips .sidebar-empty{width:100%;margin:6px 0;padding:22px 10px;font-size:12px;color:var(--muted);border:1px dashed var(--line);border-radius:var(--radius-md)}
 .annot-assets{display:flex;flex-direction:column;min-height:0}
 .annot-assets .asset-actions{padding:6px 12px 8px}
 .annot-assets .asset-card{padding:9px}
@@ -50,12 +50,12 @@
 }
 
 /* Readable non-modal feedback; canvas coordinates and scroll stay unchanged. */
-.head-proposal-status { position:absolute; top:64px; right:12px; max-width:min(360px,80%); padding:8px 12px; border-radius:8px; background:var(--surface); color:var(--text); border:1px solid var(--line); z-index:12; display:flex; align-items:center; gap:8px; font-size:13px; }
+.head-proposal-status { position:absolute; top:64px; right:12px; max-width:min(360px,80%); padding:8px 12px; border-radius:8px; background:var(--surface); color:var(--text); border:1px solid var(--line); z-index:12; display:flex; align-items:center; gap:8px; font-size:13px; box-shadow:var(--shadow-md); animation:rise-in var(--dur-base) var(--ease-out); }
 
 .annotation-page .edge-discovery-option { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; margin-block: 6px; }
 
 /* Review status in the header and media list; dashed box for a candidate head without a label. */
-.review-chip{font-size:12px;padding:2px 9px;border-radius:10px;background:var(--surface-subtle);color:var(--muted);white-space:nowrap}
+.review-chip{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;padding:2px 10px 2px 8px;border-radius:10px;background:var(--surface-subtle);color:var(--muted);white-space:nowrap}.review-chip::before{content:'';width:6px;height:6px;border-radius:50%;background:currentColor;opacity:.8}
 .review-chip.open{background:var(--accent-soft);color:var(--accent)}
 .review-chip.passed{background:var(--b-soft);color:var(--success)}
 .review-chip.stale{background:var(--warning-soft);color:var(--warning)}
@@ -70,9 +70,15 @@
 @keyframes review-pulse{0%{box-shadow:0 0 0 0 #ffb547aa}100%{box-shadow:0 0 0 14px #ffb54700}}
 @media(prefers-reduced-motion:reduce){.review-candidate-circle{animation:none}}
 /* Zoom sits in the bottom bar, outside the image. */
-.shell-zoom.in-bottom{position:static;flex:none;background:transparent;border:1px solid var(--line);color:var(--text)}
+.shell-zoom.in-bottom{position:static;flex:none;background:var(--surface-subtle);border:1px solid var(--line);color:var(--text);box-shadow:none}
 .shell-zoom.in-bottom button:hover:not(:disabled){background:var(--surface-hover)}
 .shell-zoom.in-bottom .annot-coords{color:var(--muted)}
 /* Object actions: full-width, one per line, so the label says exactly what is deleted. */
 .annot-inspector .object-delete-actions{flex-direction:column}
 .annot-inspector .object-delete-actions>button{white-space:normal;font-size:12px;justify-content:center}
+/* Tracking progress inside the AI card replaces the idle description while a run is active. */
+.annot-ai .annot-tracking-progress{margin:10px 0 12px}
+.annot-ai .annot-tracking-hint{margin-top:-4px;font-size:11px}
+/* While the header carries tracking progress, the frame count (also in the bottom bar) gives way. */
+.annot-context.is-tracking .shell-meta{display:none}
+@media(max-width:1000px){.annot-context.is-tracking>strong{max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}

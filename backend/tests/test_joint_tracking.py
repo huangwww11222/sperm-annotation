@@ -112,7 +112,11 @@ def test_native_frame_or_detector_failure_preserves_input_and_releases_reader(mo
     with pytest.raises(RuntimeError):joint_tracking.synthesize_video('fake',rows,reverse,endpoint,{})
     assert rows==before
     monkeypatch.setattr(head_click,'detect_regions',lambda image,boxes:candidates[int(image[0,0,0])])
-    assert joint_tracking.synthesize_video('fake',rows,reverse,endpoint,{})['state']=='checked'
+    events=[]
+    assert joint_tracking.synthesize_video('fake',rows,reverse,endpoint,{},progress=lambda **p:events.append(p))['state']=='checked'
+    # Structured combine progress for the UI bar: every source frame once, in order.
+    assert [e['phaseCurrent'] for e in events]==[r['source_frame_index'] for r in rows]
+    assert all(e['phase']=='combine' and e['phaseTo']==rows[-1]['source_frame_index'] for e in events)
 
 
 def test_missing_observation_is_not_an_empty_success():

@@ -216,7 +216,7 @@ def synthesize_video(video,rows,reverse,endpoint,workspace,progress=None):
         for row in rows:
             fi=row['source_frame_index'];ok,image=reader.read()
             if not ok or image.shape[:2]!=(height,width):raise ValueError(f'原始第 {fi+1} 帧读取失败，综合标注未完成')
-            if progress:progress(stage='checking',message=f'正在生成标注：第 {fi+1} / {end+1} 帧')
+            if progress:progress(stage='checking',phase='combine',phaseFrom=0,phaseTo=end,phaseCurrent=fi,message=f'正在生成标注：第 {fi+1} / {end+1} 帧')
             boxes=[o['bbox'] for o in row['objects']]+list(reverse.get(fi,{}).values())
             observed[fi]=detect_regions(image,boxes) if fi not in (0,end) else []
         excluded={r['source_frame_index']:{oid for oid in scope if is_deleted(workspace,r['source_frame_index'],oid)} for r in rows}

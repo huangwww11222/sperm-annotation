@@ -232,7 +232,7 @@ defineExpose({ primary, secondary, tertiary, next })
 
 <style scoped>
 .review-panel { display: flex; flex-direction: column; gap: 10px; min-height: 0; flex: 1 1 0; overflow-y: auto; overscroll-behavior: contain; }
-.review-status { margin-left: auto; font-size: 12px; padding: 1px 8px; border-radius: 10px; background: var(--surface-subtle); color: var(--muted); }
+.review-status { margin-left: auto; font-size: 12px; font-weight: 600; padding: 1px 9px; border-radius: 10px; background: var(--surface-subtle); color: var(--muted); }
 .review-status.open { background: var(--accent-soft); color: var(--accent); }
 .review-status.passed { background: var(--b-soft); color: var(--success); }
 .review-status.stale { background: var(--warning-soft); color: var(--warning); }
@@ -241,10 +241,13 @@ defineExpose({ primary, secondary, tertiary, next })
 .review-changes { margin: 0; font-size: 12px; color: var(--text); }
 .review-wide { width: 100%; }
 .review-progress { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
-.review-progress progress { flex: 1; height: 6px; }
-.review-current { border: 1px solid var(--accent); border-radius: 8px; padding: 12px; background: var(--surface); display: flex; flex-direction: column; gap: 10px; }
+.review-progress progress { flex: 1; height: 6px; appearance: none; -webkit-appearance: none; border: 0; border-radius: 3px; background: var(--line); overflow: hidden; }
+.review-progress progress::-webkit-progress-bar { background: var(--line); border-radius: 3px; }
+.review-progress progress::-webkit-progress-value { background: linear-gradient(90deg, var(--accent), var(--success)); border-radius: 3px; transition: width var(--dur-slow) var(--ease-out); }
+.review-progress progress::-moz-progress-bar { background: var(--accent); border-radius: 3px; }
+.review-current { border: 1px solid var(--accent); border-radius: var(--radius-md); padding: 12px; background: var(--surface); display: flex; flex-direction: column; gap: 10px; box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow-sm); animation: rise-in var(--dur-base) var(--ease-out); }
 .review-current-head { display: flex; align-items: baseline; gap: 8px; }
-.review-kind { font-size: 12px; font-weight: 600; color: var(--accent); }
+.review-kind { font-size: 12px; font-weight: 650; letter-spacing: .02em; color: var(--accent); }
 .review-frame { font-size: 13px; font-weight: 600; color: var(--text); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
 .review-question { margin: 0; font-size: 13px; color: var(--text); line-height: 1.5; }
 .review-zoom { margin: 0; display: flex; flex-direction: column; align-items: center; gap: 4px; }
@@ -265,9 +268,9 @@ defineExpose({ primary, secondary, tertiary, next })
 .review-groups { display: flex; flex-direction: column; gap: 6px; flex: none; min-height: 0; }
 .review-group summary { display: flex; justify-content: space-between; align-items: center; cursor: pointer; font-size: 12px; font-weight: 600; color: var(--text); padding: 4px 2px; }
 .review-group summary small { font-weight: 400; color: var(--muted); font-variant-numeric: tabular-nums; }
-.review-row { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 30px; padding: 4px 6px; border: 0; border-radius: 5px; background: none; text-align: left; font-size: 12px; color: var(--text); cursor: pointer; }
+.review-row { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 30px; padding: 4px 6px; border: 0; border-radius: 6px; background: none; text-align: left; font-size: 12px; color: var(--text); cursor: pointer; }
 .review-row:hover { background: var(--surface-hover); }
-.review-row.current { background: var(--accent-soft); }
+.review-row.current { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
 .review-row.done { color: var(--muted); }
 .review-row-frame { flex: none; font-variant-numeric: tabular-nums; }
 .review-row-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }

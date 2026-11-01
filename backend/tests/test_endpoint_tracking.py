@@ -161,3 +161,12 @@ def test_frozen_review_retains_original_tail_snapshot(task):
         value[-1]['reviewEvidence']['endpointCheck']['terminalAnnotations'][0]['bbox']=[80,80,90,90]
         assert frozen['endpointVerification']['terminalAnnotations'][0]['bbox']==[2,0,12,10]
         assert evidence(c,dict(id=task))['endpointVerification']['terminalAnnotations'][0]['object_id']==91
+
+
+def test_backward_pass_reports_structured_frame_progress(window):
+    # The UI draws a real per-stage bar from these numbers instead of parsing message text.
+    from app.endpoint_tracking import verify_endpoints
+    events=[]
+    verify_endpoints('fake',Engine(),rows(),[dict(object_id=91,bbox=[5,0,15,10],source='manual')],window_size=3,progress=lambda **p:events.append(p))
+    assert events and all(e['phase']=='backward' and e['phaseFrom']==5 and e['phaseTo']==0 for e in events)
+    assert [e['phaseCurrent'] for e in events]==[5,3,1]  # walks from the tail towards the head frame

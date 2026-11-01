@@ -14,7 +14,7 @@ async function signOut() { if (await router.canLeave()) { await logout(); await 
 </script>
 <template>
   <div class="app-shell">
-    <header class="app-header">
+    <header class="app-header" :class="{'is-workbench':workbenchRoute}">
       <div class="app-brand" title="微流控标注工作台 · 稀有精子识别与提取"><span class="brand-mark"><AppIcon name="layers" :size="18" /></span><h1>标注工作台</h1></div>
       <nav class="workflow-nav" aria-label="数据制作流程">
         <button aria-label="人工标注" :class="{active:routePath==='/annotate'}" :aria-current="routePath==='/annotate'?'step':undefined" @click="router.push('/annotate')"><span>1</span>标注</button>
@@ -22,10 +22,12 @@ async function signOut() { if (await router.canLeave()) { await logout(); await 
       </nav>
       <div id="app-header-context" class="app-header-context" />
       <div class="app-account">
+        <span class="app-account-sep" aria-hidden="true" />
         <UserGuide :page="routePath" />
         <button class="icon-button records-nav" :class="{active:routePath==='/results'}" title="标注记录与统计导出" aria-label="标注记录" @click="router.push('/results')"><AppIcon name="list" :size="16" /></button>
         <button class="icon-button" :aria-label="theme === 'light' ? '切换深色主题' : '切换浅色主题'" :title="theme === 'light' ? '深色主题' : '浅色主题'" @click="toggleTheme"><AppIcon :name="theme==='light'?'moon':'sun'" /></button>
-        <span class="user-name" :title="user?.name">{{ user?.name }}</span><button class="quiet-button" @click="signOut">退出</button>
+        <span class="app-account-sep" aria-hidden="true" />
+        <span class="user-chip" :title="user?.name"><span class="user-avatar" aria-hidden="true">{{ user?.name?.slice(0, 1) }}</span><span class="user-name">{{ user?.name }}</span></span><button class="quiet-button" @click="signOut">退出</button>
       </div>
     </header>
     <main class="app-main" :class="{flush:workbenchRoute}"><slot /></main>

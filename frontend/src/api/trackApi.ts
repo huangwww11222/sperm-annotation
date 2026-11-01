@@ -84,6 +84,11 @@ export interface TrackStatusResponse {
   message?: string
   stage?: 'queued' | 'decoding' | 'preparing_model' | 'tracking' | 'checking' | 'saving_results' | 'paused' | 'completed'
   elapsedSeconds?: number
+  /** Structured stage position for the progress bar (endpoint backward pass / combine). */
+  phase?: 'backward' | 'combine'
+  phaseFrom?: number
+  phaseTo?: number
+  phaseCurrent?: number
   paused?: boolean
   pausedFrame?: number
   pausedObjects?: Array<{

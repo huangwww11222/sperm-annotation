@@ -95,7 +95,9 @@ def verify_endpoints(video,engine,rows,tail,window_size=16,progress=None,reverse
             reverse[end]={int(o['object_id']):list(o['bbox']) for o in tail}
             while current>first and prompts:
                 start=max(first,current-window_size+1)
-                if progress:progress(stage='checking',message=(f'正在处理视频：第 {start+1}–{current+1} 帧' if joint_mode else f'人工尾帧反向核验：第 {current+1} → {start+1} 帧'))
+                # phaseCurrent is the next frame still to process walking backwards from the tail.
+                if progress:progress(stage='checking',phase='backward',phaseFrom=end,phaseTo=first,phaseCurrent=current,
+                                     message=(f'正在处理视频：第 {start+1}–{current+1} 帧' if joint_mode else f'人工尾帧反向核验：第 {current+1} → {start+1} 帧'))
                 # Bounded image list is released immediately after processor input.
                 with SourceVideoWindow(video,start_frame=start,max_frames=current-start+1) as source:
                     images=list(source)

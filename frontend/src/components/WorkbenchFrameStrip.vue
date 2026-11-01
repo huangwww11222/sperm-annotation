@@ -12,6 +12,8 @@ const props = defineProps<{
   kindOf: (frame: number) => string
   flagsOf?: (frame: number) => string[]
   titleOf: (frame: number) => string
+  /** Live tracking position: frames the active stage covered and the frame it is on now. */
+  scan?: { covered: [number, number] | null; frame: number | null; direction: 1 | -1 } | null
 }>()
 const emit = defineEmits<{ seek: [frame: number] }>()
 
@@ -40,6 +42,11 @@ const cells = computed(() => {
   return out
 })
 const currentCell = computed(() => Math.floor(props.current / bucket.value))
+const pct = (frame: number) => `${Math.min(100, Math.max(0, frame / Math.max(1, props.frameCount) * 100))}%`
+const scanBand = computed(() => {
+  const range = props.scan?.covered
+  return range ? { left: pct(range[0]), width: `calc(${pct(range[1] + 1)} - ${pct(range[0])})` } : null
+})
 
 function pick(event: MouseEvent) {
   if (props.disabled || !props.frameCount) return
@@ -51,13 +58,16 @@ function pick(event: MouseEvent) {
 <template>
   <div ref="root" class="frame-strip" :class="{ disabled }" role="slider" tabindex="-1" aria-label="帧条：点击跳到对应帧" :aria-valuenow="current + 1" :aria-valuemin="1" :aria-valuemax="frameCount" data-testid="frame-strip" @click="pick">
     <i v-for="(cell, i) in cells" :key="cell.start" :class="[cell.kind, ...cell.flags, { current: i === currentCell }]" :title="cell.title" />
+    <span v-if="scanBand" class="frame-strip-scan" :class="{ backward: scan?.direction === -1 }" :style="scanBand" aria-hidden="true" />
+    <span v-if="scan?.frame != null" class="frame-strip-head" :class="{ backward: scan.direction === -1 }" :style="{ left: pct(scan.frame + .5) }" aria-hidden="true" />
   </div>
 </template>
 
 <style scoped>
-.frame-strip{flex:1;min-width:0;height:26px;display:flex;gap:2px;align-items:stretch;cursor:pointer;padding:2px 0;overflow:hidden}
+.frame-strip{position:relative;flex:1;min-width:0;height:26px;display:flex;gap:2px;align-items:stretch;cursor:pointer;padding:2px 0;overflow:hidden}
 .frame-strip.disabled{cursor:not-allowed;opacity:.6}
-.frame-strip i{flex:1;min-width:1px;border-radius:2px;background:var(--surface-subtle);border:1px solid var(--line);position:relative}
+.frame-strip i{flex:1;min-width:1px;border-radius:3px;background:var(--surface-subtle);border:1px solid var(--line);position:relative;transition:transform var(--dur-fast) var(--ease-out),filter var(--dur-fast),border-color var(--dur-fast)}
+.frame-strip:not(.disabled) i:hover{filter:brightness(.94) saturate(1.2);transform:scaleY(1.08)}
 .frame-strip i.ai,.frame-strip i.submitted{background:var(--b-soft);border-color:var(--b-line)}
 .frame-strip i.manual{background:var(--a-soft);border-color:var(--a-line)}
 .frame-strip i.draft{background:var(--warning-soft);border-color:var(--warning)}
@@ -67,5 +77,12 @@ function pick(event: MouseEvent) {
 .frame-strip i.review-todo::after,.frame-strip i.review-done::after{content:'';position:absolute;left:0;right:0;bottom:-1px;height:3px;border-radius:0 0 2px 2px}
 .frame-strip i.review-todo::after{background:var(--accent)}
 .frame-strip i.review-done::after{background:var(--success);opacity:.55}
-.frame-strip i.current{border:2px solid var(--text);transform:scaleY(1.12)}
+.frame-strip i.current{border:2px solid var(--text);transform:scaleY(1.16);box-shadow:0 2px 6px #0003;z-index:1}
+/* Tracking scan: a tinted band over frames already processed by the active stage and a glowing
+   head on the frame the model is reading. Both glide with the 0.7 s status poll; neither blocks clicks. */
+.frame-strip-scan{position:absolute;top:1px;bottom:1px;border-radius:4px;pointer-events:none;background:linear-gradient(90deg,transparent,var(--accent-ring));box-shadow:inset 0 0 0 1px var(--accent);opacity:.9;transition:left .7s linear,width .7s linear}
+.frame-strip-scan.backward{background:linear-gradient(270deg,transparent,var(--accent-ring))}
+.frame-strip-head{position:absolute;top:-1px;bottom:-1px;width:3px;margin-left:-1.5px;border-radius:2px;pointer-events:none;background:var(--accent);box-shadow:0 0 0 2px var(--surface),0 0 10px 2px var(--accent);transition:left .7s linear;animation:strip-head 1.2s ease-in-out infinite}
+@keyframes strip-head{50%{box-shadow:0 0 0 2px var(--surface),0 0 3px 1px var(--accent)}}
+@media(prefers-reduced-motion:reduce){.frame-strip-head{animation:none}}
 </style>

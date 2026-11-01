@@ -13,9 +13,10 @@ const props = withDefaults(defineProps<{
   drawerLabel: string
   drawerCount?: number
   drawerForced?: boolean
+  drawerBusy?: boolean
   inspectorForced?: boolean
   inspectorBadge?: string | number
-}>(), { focused: false, focusKeepsInspector: false, drawerCount: 0, drawerForced: false, inspectorForced: false, inspectorBadge: '' })
+}>(), { focused: false, focusKeepsInspector: false, drawerCount: 0, drawerForced: false, drawerBusy: false, inspectorForced: false, inspectorBadge: '' })
 
 const drawerOpen = defineModel<boolean>('drawerOpen', { default: false })
 const key = `workbench-${props.name}-inspector-collapsed`
@@ -32,9 +33,9 @@ defineExpose({ collapseInspector: () => { inspectorCollapsed.value = true } })
 
 <template>
   <div class="shell" :class="[`shell-${name}`, { 'is-focus': focused }]" data-testid="workbench-layout">
-    <Teleport v-if="headerReady && !focused" to="#app-header-context"><div class="shell-context"><slot name="context" /></div></Teleport>
+    <Teleport v-if="headerReady && !focused" to="#app-header-context"><div class="shell-context"><slot name="context" :inspector-visible="inspectorVisible" /></div></Teleport>
     <nav v-show="!focused" class="shell-rail" :aria-label="drawerLabel">
-      <button class="shell-rail-btn" :class="{ active: drawerVisible }" data-testid="toggle-workbench-library" :aria-expanded="drawerVisible" :title="drawerVisible ? `收起${drawerLabel} (M)` : `展开${drawerLabel} (M)`" :aria-label="drawerLabel" @click="drawerOpen = !drawerVisible"><AppIcon name="folder" :size="18" /><small v-if="drawerCount">{{ drawerCount }}</small></button>
+      <button class="shell-rail-btn" :class="{ active: drawerVisible, busy: drawerBusy && !drawerVisible }" data-testid="toggle-workbench-library" :aria-expanded="drawerVisible" :title="drawerVisible ? `收起${drawerLabel} (M)` : `展开${drawerLabel} (M)`" :aria-label="drawerLabel" @click="drawerOpen = !drawerVisible"><AppIcon name="folder" :size="18" /><small v-if="drawerCount">{{ drawerCount }}</small></button>
       <slot name="rail" />
     </nav>
     <aside v-show="drawerVisible" class="shell-drawer" :aria-label="drawerLabel" data-workbench-region="library">
@@ -42,7 +43,7 @@ defineExpose({ collapseInspector: () => { inspectorCollapsed.value = true } })
       <div class="shell-drawer-body"><slot name="drawer" /></div>
     </aside>
     <section class="shell-center" data-workbench-region="canvas">
-      <div v-if="focused" class="shell-focusbar"><div class="shell-context"><slot name="context" /></div></div>
+      <div v-if="focused" class="shell-focusbar"><div class="shell-context"><slot name="context" :inspector-visible="inspectorVisible" /></div></div>
       <div class="shell-canvas"><div class="shell-alerts"><slot name="alerts" /></div><slot name="canvas" /></div>
       <div v-if="$slots.bottom" class="shell-bottom"><slot name="bottom" /></div>
     </section>

@@ -4,6 +4,7 @@ import { FrameCache } from '../annotation/frameCache'
 import { reconcileTerminalIdentities } from '../annotation/trackingResult'
 import { pauseDiagnostics, pauseTypeFromEvidence, type OverlapPairNotice } from '../annotation/pauseDiagnostics'
 import { savedTrackingCalibration } from '../annotation/trackingCalibration'
+import { describeTrackingProgress, type TrackingProgressInput, type TrackingProgressView } from '../annotation/trackingProgress'
 import { hitHandle, moveBox, resizeBox, type Box } from '../annotation/geometry'
 import type { AnnotationObject, AnnotationTool, EffectResult, MediaAsset, SavedAnnotationFile } from '../types/annotation'
 // 登录、人工标注、视频目录、SAM3 Tracking 均走真实后端
@@ -99,6 +100,16 @@ const createWorkspace = () => {
   const trackingError = computed(()=>trackingErrors.value[currentMediaId.value])
   const trackingRetryBusy = computed(()=>trackingMedia.has(currentMediaId.value))
   const trackingProgress = computed(()=>trackingProgressByMedia.value[currentMediaId.value] ?? '')
+  // Structured status behind the stepped progress bar (AI card, header, frame strip, media list).
+  const trackingStatusByMedia = ref<Record<string,TrackingProgressInput>>({})
+  // Videos whose run just completed: the bar briefly shows its finished state before leaving.
+  const trackingFinishedByMedia = ref<Record<string,true>>({})
+  const trackingProgressViewFor = (mediaId: string): TrackingProgressView | null => {
+    const input = trackingStatusByMedia.value[mediaId]
+    return input ? describeTrackingProgress(input) : null
+  }
+  const currentTrackingProgress = computed(()=>trackingProgressViewFor(currentMediaId.value))
+  const currentTrackingFinished = computed(()=>!!trackingFinishedByMedia.value[currentMediaId.value])
   const isTrackingMedia = (mediaId: string) => trackingMedia.has(mediaId) || trackingJobs.has(mediaId)
   const saveQueues = new Map<string, Promise<unknown>>()
   const workspaceViews = new Map<string, Record<string, unknown>>()
@@ -2199,6 +2210,14 @@ const createWorkspace = () => {
     pausedAnomalies.value = []
     anomalyPanelVisible.value = false
     trackingMedia.add(mediaId)
+    const progressEnd = maxFrameIndex.value
+    const progressInput = (patch: Partial<TrackingProgressInput> = {}): TrackingProgressInput => {
+      const endpoint = (job?.input.terminalAnnotations ?? terminalSnapshot) !== undefined
+      return {...trackingStatusByMedia.value[mediaId], startFrame, endFrame: progressEnd, endpoint, combine: endpoint && (job ? !!job.input.combineResults : true), ...patch}
+    }
+    delete trackingFinishedByMedia.value[mediaId]
+    trackingStatusByMedia.value[mediaId] = progressInput()
+    let trackingSucceeded = false
 
     try {
       let task: {taskId:string;maxFrames?:number;trackFrames?:number}
@@ -2318,6 +2337,7 @@ const createWorkspace = () => {
         phase='查询追踪任务'
         const status = await trackApi.getStatus(task.taskId)
         ensureRestartCurrent()
+        trackingStatusByMedia.value[mediaId] = progressInput({status:status.status,stage:status.stage,phase:status.phase,phaseFrom:status.phaseFrom,phaseTo:status.phaseTo,phaseCurrent:status.phaseCurrent,lastProcessedFrame:status.lastProcessedFrame,elapsedSeconds:status.elapsedSeconds})
         trackingProgressByMedia.value[mediaId]=status.stage==='decoding'?'正在读取本轮原始帧':status.stage==='preparing_model'?'正在准备模型和输入':status.stage==='checking'?(status.message||'正在核验疑点片段'):status.stage==='saving_results'?'正在保存追踪结果':status.lastProcessedFrame!=null?`正在追踪第 ${status.lastProcessedFrame+1} 帧`:status.status==='queued'?'排队中：其他视频的追踪完成后自动开始，可先标注其他视频':'正在追踪'
 
         if (mediaId === currentMediaId.value) trackingWarningSummary.value = status.warningSummary ?? []
@@ -2374,6 +2394,7 @@ const createWorkspace = () => {
         throw new Error('后端未完成综合标注，请更新并重启后端后重试；不能视为自动标注完成')
       }
       phase='读取追踪结果'
+      trackingStatusByMedia.value[mediaId] = progressInput({loadingResult:true})
       await loadTrackingResult(mediaId, true, true, true)
       ensureRestartCurrent()
 
@@ -2393,6 +2414,7 @@ const createWorkspace = () => {
         }
       }
       trackingJobs.delete(mediaId);rememberTracking(mediaId);delete trackingErrors.value[mediaId]
+      trackingSucceeded = true
     } catch (error) {
       if (restartAbandoned()) return
       if (job&&(definiteRejection(error)||messageOf(error,'').includes('此服务器未启用 AI Tracking'))) {trackingJobs.delete(mediaId);rememberTracking(mediaId)}
@@ -2407,6 +2429,11 @@ const createWorkspace = () => {
       // This call added mediaId to trackingMedia; no other loop can own the video meanwhile.
       trackingMedia.delete(mediaId)
       delete trackingProgressByMedia.value[mediaId]
+      delete trackingStatusByMedia.value[mediaId]
+      if (trackingSucceeded) {
+        trackingFinishedByMedia.value[mediaId] = true
+        setTimeout(() => { delete trackingFinishedByMedia.value[mediaId] }, 2600)
+      }
       if (!restartAbandoned() && !trackingJobs.has(mediaId) && mediaId === currentMediaId.value) scheduleWorkspaceStateSave(mediaId)
     }
   }
@@ -2789,14 +2816,14 @@ const createWorkspace = () => {
     pendingRestart.value = null; trackingRestartBusy.value = false; trackingRestartError.value = ''; trackingRestartStorageWarning.value = ''
     videoDeletionHistory.value = {}; histories.clear(); historyRevision.value++
     objectDeletionError.value = ''; trackingFeedbackError.value = ''
-    trackingJobs.clear();trackingMedia.clear();trackingProgressByMedia.value={};trackingErrors.value={}
+    trackingJobs.clear();trackingMedia.clear();trackingProgressByMedia.value={};trackingStatusByMedia.value={};trackingFinishedByMedia.value={};trackingErrors.value={}
     workspaceReadError.value = '账号已切换，请重新加载素材'
   })
 
   return {
     runEndpointTrack,
     restartTrackingFromEarlierFrame, retryTrackingRestart, cancelTrackingRestartRequest, trackingRestartBusy, trackingRestartError, trackingRestartPendingAction, trackingRestartStorageWarning,
-    trackingError,trackingProgress,trackingRetryLabel,trackingRetryBusy,retryTracking,isTrackingMedia,workspaceRecoveryRequired,saveRecoveryLabel,retryWorkspaceSave,reloadWorkspaceFromServer,
+    trackingError,trackingProgress,trackingProgressViewFor,currentTrackingProgress,currentTrackingFinished,trackingRetryLabel,trackingRetryBusy,retryTracking,isTrackingMedia,workspaceRecoveryRequired,saveRecoveryLabel,retryWorkspaceSave,reloadWorkspaceFromServer,
     getObjectDeletionSummary, removeObjectAcrossVideo, undoVideoObjectDeletion, retryObjectDeletion, canUndoVideoDeletion, lastVideoObjectDeletion, objectDeletionBusy, objectDeletionError, objectDeletionPendingAction, confirmTrackingAnomaly, retryTrackingAnomalyFeedback, trackingFeedbackBusy, trackingFeedbackError, trackingFeedbackPending, trackingFeedbackPendingAction, trackingCalibrationSummary, resetTrackingCalibration, trackingWarningSummary,
     deleteMedia, deletingMediaId, mediaDeleteError, persistWorkspaceState, retryExactFrame, saveState, saveError, playbackRate, pausePlayback, displayObjects, editingBlocked, workspaceRestoring, frameError, loadExactFrame, nudgeSelected, cancelAnnotationGesture, canUndo, canRedo,
     edgeDiscovery, headBoxBusy, headBoxError, cancelHeadBox, createHeadBox, api, mediaAssets, selectedMediaId, submissionLocks, submissionBusy, mediaImportBusy, importError, duplicateImport, reimportSaving, cancelDuplicateImport, confirmDuplicateImport, restoreImportIntent, activeTool, objectNameInput, selectedObjectId, currentFrame, currentTime, videoDuration, videoFps, frameInput, isPlaying, isAiBusy, trackingFrameCount, statusMessage, toastMessage, showToast, zoom, zoomIn, zoomOut, zoomReset, savedResults, loadedRemoteResultKeys, effectResults, selectedEffectId, effectTime, effectPlaying, effectVideoRef, imageRef, videoRef, exactFrameImageRef, exactFrameUrl, exactFrameLoading, videoPlaybackFallback, annotationHitRef, fileInputRef, videoInputRef, packageInputRef, packageImportReport, importPackage, effectFolderInputRef, annotationsByMedia, trackingFramesByMedia, anomalyObjectIds, anomalyFrames, pausedAnomalies, anomalyPanelVisible, trackingPausedFrame, closeAnomalyPanel, selectedMedia, isVideo, maxFrameIndex, currentMediaId, currentObjects, selectedObject, selectedEffect, formatTime, timeToFrame, frameToTime, getStagePoint, addObject, adoptReviewTrack, resetVideoViewToFirstFrame, ensureVideoFirstFrame, selectTool, onStageClick, tempBbox, onBboxDown, onBboxMove, onBboxUp, onObjectDropdownChange, selectObject, removeObject, renameObject, undo, redo, copyPreviousFrame, brightness, contrast, mediaFilterStyle, resetMediaFilter, annotatedFrameCount, clearSelection, openFilePicker, handleFiles, onImageLoaded, onVideoLoaded, onVideoTimeUpdate, onVideoError, loadTrackingResult, seekVideo, seekToInputFrame, seekByFrame, togglePlayback, onVideoEnded, onTimelineClick, runAiSegment, runAiTrack, getMediaPixelSize, buildSam3AnnotationsJson, generateAnnotationsJson, loadSavedResults, openEffectFolderPicker, handleEffectFolder, loadEffects, onEffectTimeUpdate, toggleEffectPlayback, selectEffect, effectOverlayObjects, resetAnnotationViewForMedia, loadServerMedia

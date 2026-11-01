@@ -259,8 +259,8 @@ const delayedTrackingCleanup = ts.transpileModule(
   `(async () => { ${abandonedRule.getText(trackingTree)} try { await responseGate } finally ${trackingFinalizer.getText(trackingTree)} })()`,
   { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
 ).outputText
-function trackingCleanupHarness({ restart = true, launched = false, unconfirmedJob = false } = {}) {
-  const gate = deferred(), scheduled = []
+function trackingCleanupHarness({ restart = true, launched = false, unconfirmedJob = false, succeeded = false } = {}) {
+  const gate = deferred(), scheduled = [], timers = []
   const context = {
     responseGate: gate.promise,
     restartIntent: restart ? { actorId: 'actor-A' } : undefined,
@@ -274,15 +274,20 @@ function trackingCleanupHarness({ restart = true, launched = false, unconfirmedJ
     trackingJobs: new Map([['media-B', { taskId: 'job-B' }], ...(unconfirmedJob ? [['media-A', { taskId: 'job-A' }]] : [])]),
     trackingMedia: new Set(['media-A', 'media-B']),
     trackingProgressByMedia: { value: { 'media-A': '正在追踪第 3 帧', 'media-B': '排队中' } },
+    trackingStatusByMedia: { value: { 'media-A': { stage: 'tracking' }, 'media-B': { stage: 'queued' } } },
+    trackingFinishedByMedia: { value: {} },
+    trackingSucceeded: succeeded,
+    setTimeout: (fn, ms) => timers.push({ fn, ms }),
     scheduleWorkspaceStateSave: mediaId => scheduled.push(mediaId),
   }
   context.useAuth = () => ({ user: { value: { id: context.currentActor } } })
   const completion = runInNewContext(delayedTrackingCleanup, context)
-  return { context, scheduled, completion, resolve: gate.resolve }
+  return { context, scheduled, timers, completion, resolve: gate.resolve }
 }
 const otherVideoIntact = context => {
   assert(context.trackingMedia.has('media-B') && context.trackingJobs.has('media-B'), 'another video keeps tracking')
   assert.equal(context.trackingProgressByMedia.value['media-B'], '排队中', 'another video keeps its progress')
+  assert.equal(context.trackingStatusByMedia.value['media-B']?.stage, 'queued', 'another video keeps its progress bar')
 }
 
 for (const [reason, switchContext] of [
@@ -314,8 +319,21 @@ test('a matching restart clears its state and schedules its completed workspace'
   h.resolve(); await h.completion
   assert(!h.context.trackingMedia.has('media-A'))
   assert.equal(h.context.trackingProgressByMedia.value['media-A'], undefined)
+  assert.equal(h.context.trackingStatusByMedia.value['media-A'], undefined, 'its progress bar is removed')
+  assert.equal(h.context.trackingFinishedByMedia.value['media-A'], undefined, 'a run that did not succeed never shows the finished state')
   otherVideoIntact(h.context)
   assert.deepEqual(h.scheduled, ['media-A'])
+})
+
+test('a successful run shows its finished state briefly and only for its own video', async () => {
+  const h = trackingCleanupHarness({ restart: false, succeeded: true })
+  h.resolve(); await h.completion
+  assert.equal(h.context.trackingStatusByMedia.value['media-A'], undefined)
+  assert.equal(h.context.trackingFinishedByMedia.value['media-A'], true)
+  assert.equal(h.timers.length, 1)
+  h.timers[0].fn()
+  assert.equal(h.context.trackingFinishedByMedia.value['media-A'], undefined, 'the finished state leaves on its own')
+  otherVideoIntact(h.context)
 })
 
 test('an unconfirmed job keeps its video locked against saving', async () => {
