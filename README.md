@@ -43,7 +43,7 @@ cd sperm-annotation
 
 ## 医院内网：持续交付离线更新
 
-已安装的医院服务器通过完整离线更新包升级。联网 Windows 电脑安装 Git、Docker Desktop 并使用 Linux 容器模式；不需要 GPU、Python 或 Node.js。每次发布后，在干净的仓库目录运行：
+已安装的医院服务器通过完整离线更新包升级。推送 `vX.Y.Z` 版本标签后，GitHub Actions 自动制作 GPU 更新包并发布到仓库 [Releases](https://github.com/huangwww11222/sperm-annotation/releases)；在联网电脑下载该版本全部附件，传入医院服务器新目录，解开 `*-files.tar.gz` 后先运行 `bash update-offline.sh --assemble` 合并并校验分块。也可在联网 Windows 电脑（Git、Docker Desktop Linux 容器模式）于干净的仓库目录手工制作：
 
 ```powershell
 git pull --ff-only
@@ -52,7 +52,7 @@ git pull --ff-only
 
 默认构建 Linux amd64 的 GPU 后端和前端，生成 `output/sperm-annotation-git-<提交号前12位>-gpu-linux-amd64/`。版本固定到本次 Git 提交，包内含完整镜像、校验清单和升级工具，不带业务数据、密码或模型。也可用 `-Ref v1.2.0 -Version v1.2.0` 制作已存在的发布标签，显式 `-Mode cpu` 才制作仅人工模式的包。
 
-将**整个输出目录**传入医院内网，保留原部署目录。在服务器先检查，再于无人使用时更新：
+手工包将**整个输出目录**传入医院内网。保留原部署目录。在服务器先检查，再于无人使用时更新：
 
 ```bash
 bash /新包目录/update-offline.sh /原部署目录 --check

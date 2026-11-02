@@ -46,7 +46,7 @@ docker compose down
 APP_DATA_DIR="$PWD/work/offline-update-test-data" \
 APP_DB_FILE="$PWD/work/offline-update-test-data/app.db" \
 APP_STORAGE_DIR="$PWD/work/offline-update-test-storage" \
-PYTHONPATH=backend work/review-venv/bin/python -m pytest backend/tests/test_offline_update.py -q
+PYTHONPATH=backend work/review-venv/bin/python -m pytest backend/tests/test_offline_update.py backend/tests/test_offline_release.py -q
 bash -n update-offline.sh
 python3 scripts/check_repository.py
 ```
@@ -56,5 +56,7 @@ python3 scripts/check_repository.py
 ```
 
 集成验收必须另建隔离 Compose 项目，沿用上方 `scripts/docker_smoke.py` 的新测试数据目录，使用已知基线镜像创建账号、素材、工作区、B/C/F 和训练包。新包按 [离线升级流程](../DOCKER_DEPLOYMENT.md#医院内网可复用的离线升级流程) 构建；不能直接以可变本地源码替代指定提交快照。先执行 `--check` 并确认旧服务仍可用，再执行真实升级和 `--verify-restart`，核对镜像、版本状态与现有登录令牌/数据保留。必须另验证重复安装、坏包/未知旧版/运行配置变化拒绝、升级失败恢复、中断后 `--recover`，以及完成升级后的 `--rollback <编号> --restore-data`。回滚后核对恢复数据及回滚前数据副本；不得只凭 HTTP 200 判定保留了业务状态。
+
+`test_offline_release.py` 用模拟 Git/Docker 和几十字节的分块验证 Releases 附件：分块恰好等于、超过一块边界，缺块、同大小篡改、截断、混入其他版本分块及清单不一致都被拒绝且不留下半个 `images.tar`，下载→解开→`--assemble` 后字节与原归档一致并通过 `verify_bundle`。它不运行 GitHub Actions；`offline-package` 作业的托管机器磁盘空间、真实 GPU 镜像大小和上传须由第一次真实版本标签的运行记录确认。
 
 测试记录应明确区分模拟 Docker、真实 CPU 容器和真实 GPU 服务器。Windows PowerShell 脚本通过不代表 Windows Docker 已构建出 GPU 包；CPU 镜像通过不代表 Linux amd64 / NVIDIA L20 上的推理通过。GitHub Actions 结果以实际运行记录为准。

@@ -164,13 +164,32 @@ Windows：`.\deploy.ps1 -Mode gpu -Pull`。等价命令是 `docker compose pull`
 
 ### 医院内网：可复用的离线升级流程
 
-`build-offline.ps1` 在联网 Windows 电脑制作完整更新包，`update-offline.sh` 在已有 Linux Docker 部署上安装更新。医院服务器全程使用本地镜像，不需要访问 GitHub、镜像仓库、PyPI 或 npm。此流程只升级已运行的项目；全新服务器仍需完成 Docker/GPU 环境、首次配置和模型准备，不能以升级包代替首次安装包。
+每个 `vX.Y.Z` 版本标签由 GitHub Actions 自动制作完整 GPU 更新包并发布到仓库 Releases 页面；`build-offline.ps1` 是在联网 Windows 电脑手工制作同样完整包的备用方式。`update-offline.sh` 在已有 Linux Docker 部署上安装更新。医院服务器全程使用本地镜像，不需要访问 GitHub、镜像仓库、PyPI 或 npm。此流程只升级已运行的项目；全新服务器仍需完成 Docker/GPU 环境、首次配置和模型准备，不能以升级包代替首次安装包。
 
-服务器需有 Bash、Python 3、Docker + Compose，以及读取运行容器、读写实际数据库/Storage 和创建备份的权限；Ubuntu 24.04 通常已带 Python 3。沿用现有部署管理员账号执行；以 root 安装的数据不能换成无权限账号备份。检查和升级均要求原前后端正常运行，已中断的升级按第 8 节恢复。
+服务器需有 Bash、Python 3、Docker + Compose，以及读取运行容器、读写实际数据库/Storage 和创建备份的权限；Ubuntu 24.04 通常已带 Python 3。沿用现有部署管理员账号执行；以 root 安装的数据不能换成无权限账号备份。检查和升级均要求原前后端正常运行，已中断的升级按第 8 节恢复。当前医院服务器的实际软硬件和网络条件见 [医院离线服务器环境](details/hospital-server.md)。
 
-#### A. 联网 Windows 电脑制作更新包
+#### A. 取得更新包
 
-准备 Git、Docker Desktop 的 Linux 容器模式和 PowerShell 5.1+。准备电脑无需 GPU、Python 或 Node.js；应用依赖在 Docker 内构建。确认 `docker info --format '{{.OSType}}'` 输出 `linux`。镜像构建和导出占用额外磁盘，包大小取决于 GPU 依赖；首次构建需要下载基础镜像、Python 与 npm 依赖。
+**默认：GitHub Releases 自动发布。** 维护者确认要发布的提交已在 main 并通过 CI 后，创建并推送版本标签：
+
+```bash
+git tag -a v1.3.0 -m "v1.3.0"
+git push target v1.3.0   # target 换成指向 huangwww11222/sperm-annotation 的远端名
+```
+
+`release-images.yml` 先运行完整 CI，再以该标签对应的固定提交和完整 Git 历史构建 Linux amd64 GPU 前后端镜像（镜像标签、构建参数与 `build-offline.ps1` 相同），生成同格式 `manifest.json`，并在仓库 [Releases](https://github.com/huangwww11222/sperm-annotation/releases) 创建同名版本。GitHub 限制每个附件小于 2 GiB，所以 `images.tar` 被流式切成若干 `images.tar.partNN`（每块 2,000,000,000 字节，最后一块较小）；`parts.json` 记录每块与整包的大小和 SHA256。附件包括：
+
+| 附件 | 内容 |
+| --- | --- |
+| `sperm-annotation-<版本>-gpu-linux-amd64-files.tar.gz` | `manifest.json`、`parts.json`、`update-offline.sh`、`export-audit.sh`、`scripts/`、部署配置参考文件 |
+| `images.tar.part01` … | 前后端完整镜像归档的分块 |
+| `SHA256SUMS` | 以上所有附件的 SHA256，可在下载电脑上用 `sha256sum -c SHA256SUMS` 先核对 |
+
+同名 Release 已存在时工作流拒绝覆盖，修正后发布新版本号。工作流在 GitHub 托管机器上构建，只证明包已生成，不代表 GPU 推理已在医院服务器验收。CPU 仅人工模式或非标签提交仍用下面的手工方式制作。
+
+医院服务器不能访问 GitHub：由维护者或医院人员在联网电脑打开该版本页面，下载**全部附件**放入同一文件夹，再人工传入医院服务器的新目录，例如 `/opt/sperm-updates/v1.3.0/`。内网传输没有单文件大小限制。
+
+**备用：联网 Windows 电脑手工制作。** 准备 Git、Docker Desktop 的 Linux 容器模式和 PowerShell 5.1+。准备电脑无需 GPU、Python 或 Node.js；应用依赖在 Docker 内构建。确认 `docker info --format '{{.OSType}}'` 输出 `linux`。镜像构建和导出占用额外磁盘，包大小取决于 GPU 依赖；首次构建需要下载基础镜像、Python 与 npm 依赖。
 
 在已克隆的仓库根目录执行：
 
@@ -195,11 +214,21 @@ git fetch --tags
 .\build-offline.ps1 -Ref v1.2.0 -Version v1.2.0
 ```
 
-输出目录包括完整前后端 `images.tar`、含提交号/镜像身份/文件校验的 `manifest.json`、`update-offline.sh`、配套 `scripts/` 和部署配置参考文件。包不含 `.env`、密码、业务视频、数据库或模型；现有医院模型继续复用。构建日志位于制作机器 `work/offline-build-<编号>/build.log`，构建失败不会发布完整目标目录。交付时传入**整个目录及其子目录**，不能只发 `.sh` 或只换校验清单。
+输出目录包括完整前后端 `images.tar`、含提交号/镜像身份/文件校验的 `manifest.json`、`update-offline.sh`、配套 `scripts/` 和部署配置参考文件。包不含 `.env`、密码、业务视频、数据库或模型；现有医院模型继续复用。构建日志位于制作机器 `work/offline-build-<编号>/build.log`，构建失败不会发布完整目标目录。手工包不分块，交付时传入**整个目录及其子目录**，不能只发 `.sh` 或只换校验清单。
 
 #### B. 医院服务器先检查
 
-把更新包放入独立目录，例如 `/opt/sperm-updates/<版本>/`，保留原部署 `/opt/sperm-annotation/sperm-annotation-offline/`。以下 `/新包目录` 和 `/原部署目录` 均替换为实际绝对路径：
+把更新包放入独立目录，例如 `/opt/sperm-updates/<版本>/`，保留原部署 `/opt/sperm-annotation/sperm-annotation-offline/`。以下 `/新包目录` 和 `/原部署目录` 均替换为实际绝对路径。
+
+从 Releases 下载的包先在新包目录解开工具并合并分块（手工包没有 `parts.json`，跳过这一步）：
+
+```bash
+cd /新包目录
+tar -xzf sperm-annotation-<版本>-gpu-linux-amd64-files.tar.gz
+bash update-offline.sh --assemble
+```
+
+`--assemble` 不接触原部署和 Docker：先核对 `parts.json` 与 `manifest.json` 属于同一包、所有分块齐全且大小正确，再逐块校验 SHA256 并合并，最后核对整包 SHA256 与 `manifest.json` 一致才生成 `images.tar`。缺块、坏块、混入其他版本的分块或磁盘不足时停止并列出出错的分块，不会留下半个 `images.tar`；重新下载相应分块后再运行即可。合并成功后可加 `--remove-parts` 再运行一次删除分块，节省空间。不要手工 `cat` 拼接分块代替此步骤。
 
 ```bash
 bash /新包目录/update-offline.sh /原部署目录 --status
@@ -235,7 +264,7 @@ bash /新包目录/update-offline.sh /原部署目录 --status
 
 升级成功后，浏览器按 Ctrl+F5。核对原账号、素材、标注和审查结果，再用测试视频检查上传抽帧、审查通过、删除后刷新、训练包和一次实际 AI Tracking。健康检查或 CUDA 张量计算不能代替真实模型推理验收。
 
-普通 Git push 只发布源码；每次医院升级仍需制作、传入并安装对应更新包。现有版本标签工作流发布镜像与此本地打包流程并行，不能把“仓库有工作流文件”视为医院自动升级或 GPU 已通过验收。
+普通 Git push 只发布源码；只有推送版本标签才会生成 Releases 更新包，医院仍需人工传入并安装。不能把“仓库有工作流文件”或 Release 已生成视为医院已升级或 GPU 已通过验收。
 
 ### 服务器批量提取质量审计
 

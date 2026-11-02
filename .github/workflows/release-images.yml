@@ -1,4 +1,4 @@
-name: Publish versioned images
+name: Publish versioned images and offline package
 on:
   push:
     tags: ['v*']
@@ -55,3 +55,58 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ github.ref_name }}
+
+  offline-package:
+    # Hospital servers cannot reach GitHub or registries: publish the complete
+    # offline update package as Release assets (each file < 2 GiB). Built the
+    # same way as build-offline.ps1, so update-offline.sh accepts it.
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Free runner disk for the GPU image
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune -af
+          df -h /
+      - name: Build labelled GPU images
+        env:
+          VERSION: ${{ github.ref_name }}
+          REVISION: ${{ github.sha }}
+        run: |
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]] || exit 1
+          [[ "$(git rev-parse HEAD)" == "$REVISION" ]] || exit 1
+          labels=(--label "org.opencontainers.image.revision=$REVISION" --label "org.opencontainers.image.version=$VERSION"
+            --label "org.opencontainers.image.source=https://github.com/huangwww11222/sperm-annotation"
+            --label io.sperm-annotation.offline-contract=1 --label io.sperm-annotation.mode=gpu)
+          docker build --pull --platform linux/amd64 -f backend/Dockerfile \
+            --build-arg PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cu132 --build-arg "APP_RELEASE_REVISION=$REVISION" \
+            -t "sperm-annotation-backend:$VERSION-gpu" "${labels[@]}" .
+          docker build --pull --platform linux/amd64 -f frontend/Dockerfile -t "sperm-annotation-frontend:$VERSION" "${labels[@]}" .
+          df -h /
+      - name: Package offline update
+        env:
+          VERSION: ${{ github.ref_name }}
+          REVISION: ${{ github.sha }}
+        run: |
+          python3 scripts/offline_release.py --version "$VERSION" --revision "$REVISION" --mode gpu \
+            --output "$RUNNER_TEMP/offline-release" --notes "$RUNNER_TEMP/release-notes.md"
+          ls -l "$RUNNER_TEMP/offline-release"
+          df -h /
+      - name: Publish Release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            # Never replace assets of a release that may already be delivered.
+            echo "Release $VERSION already exists; publish a new version instead." >&2
+            exit 1
+          fi
+          gh release create "$VERSION" --verify-tag --title "$VERSION 医院离线更新包" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" "$RUNNER_TEMP/offline-release"/*

@@ -17,6 +17,7 @@
 | [details/testing-specialty.md](details/testing-specialty.md) | 各专项测试覆盖的场景与限制 | 按 TESTING 表找到修改面后 |
 | [details/testing-browser-suites.md](details/testing-browser-suites.md) | 七组浏览器套件内容、4K 性能、Chrome 93 专项 | 修改或排查某套件 |
 | [details/testing-delivery.md](details/testing-delivery.md) | Docker、离线升级验收 | 部署、镜像、数据库升级 |
+| [details/hospital-server.md](details/hospital-server.md) | 医院离线服务器的系统、GPU、驱动、Docker 版本与网络条件 | 制作医院更新包、判断兼容或估算空间 |
 | [details/tracking-pause-policy.md](details/tracking-pause-policy.md) | 旧暂停兼容路径：暂停核对、异常判定、原图/Mask 证据 | 改异常判定或暂停核对界面 |
 | [decisions/](decisions/README.md) | 重大方案取舍的原因 | 想改回某个已定方案前 |
 | [HANDOFF_TEMPLATE.md](HANDOFF_TEMPLATE.md) | `work/HANDOFF.md` 交接记录格式 | 每段工作开始和结束 |
@@ -25,7 +26,7 @@
 
 ## 怎样读大文档
 
-每份文档开头有几行“要点”，先读要点；再用 `grep -n '^#' docs/<文件>` 看章节，只读与任务相关的章节。当前大小（KB）：WORKFLOW 34、API 36、STORAGE_LAYOUT 29、ANNOTATION 26、DOCKER_DEPLOYMENT 26、TESTING 19、PROJECT_STRUCTURE 12。新增内容放进已有章节；一节超过约 5 KB、且只在少数任务中用到时，移到 `details/`。
+每份文档开头有几行“要点”，先读要点；再用 `grep -n '^#' docs/<文件>` 看章节，只读与任务相关的章节。当前大小（KB）：WORKFLOW 34、API 36、STORAGE_LAYOUT 29、ANNOTATION 26、DOCKER_DEPLOYMENT 29、TESTING 19、PROJECT_STRUCTURE 12。新增内容放进已有章节；一节超过约 5 KB、且只在少数任务中用到时，移到 `details/`。
 
 ## 给工具使用者的说明
 

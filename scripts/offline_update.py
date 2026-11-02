@@ -23,6 +23,7 @@ import uuid
 
 CONTRACT = 1
 REQUIRED = {'images.tar', 'update-offline.sh', 'scripts/offline_update.py', 'scripts/offline_legacy.json'}
+PARTS_FILE = 'parts.json'
 DIGEST = re.compile(r'^[0-9a-f]{64}$')
 IMAGE_ID = re.compile(r'^sha256:[0-9a-f]{64}$')
 VERSION = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$')
@@ -99,6 +100,8 @@ def verify_bundle(root):
     require(REQUIRED <= files.keys(), '更新包缺少必需文件清单')
     for name, checksum in files.items():
         path = root / name
+        require(path.exists() or path.is_symlink() or not (root / PARTS_FILE).is_file(),
+                '更新包是分块发布的，请先运行 bash ' + str(root / 'update-offline.sh') + ' --assemble 合并并校验')
         require(not Path(name).is_absolute() and '..' not in Path(name).parts and '\\' not in name,
                 '更新包文件路径无效')
         require(not path.is_symlink() and root in path.resolve().parents and path.is_file(), '更新包文件缺失或符号链接：' + name)
@@ -110,6 +113,68 @@ def verify_bundle(root):
         require(isinstance(value.get('size'), int) and value['size'] > 0, '镜像大小无效')
         require(isinstance(value.get('tag'), str) and value['tag'] and not value['tag'].startswith('-'), '镜像标签无效')
     return manifest
+
+
+def assemble(root, remove_parts=False):
+    """Rebuild files split for release hosting; bytes must equal manifest.json."""
+    root = Path(root).resolve()
+    require((root / PARTS_FILE).is_file(), '更新包没有分块清单 ' + PARTS_FILE + '，无需合并')
+    expected = read_json(root / 'manifest.json').get('files', {})
+    plan = read_json(root / PARTS_FILE)
+    require(plan.get('format') == 1 and isinstance(plan.get('files'), list) and plan['files'], '分块清单格式不支持')
+    for entry in plan['files']:
+        name = entry.get('name', '')
+        require(isinstance(name, str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', name), '分块清单文件名无效')
+        size, checksum, parts = entry.get('size'), entry.get('sha256'), entry.get('parts')
+        require(isinstance(size, int) and size > 0 and isinstance(checksum, str) and DIGEST.fullmatch(checksum), '分块清单整包信息无效：' + name)
+        require(expected.get(name) == checksum, '分块清单与 manifest.json 不属于同一更新包：' + name)
+        require(isinstance(parts, list) and parts, '分块清单缺少分块：' + name)
+        pattern = re.compile(re.escape(name) + r'\.part([0-9]{2,})')
+        for index, part in enumerate(parts, 1):
+            match = pattern.fullmatch(str(part.get('asset', '')))
+            require(match and int(match.group(1)) == index, '分块清单的分块名或顺序无效：' + name)
+            require(isinstance(part.get('size'), int) and part['size'] > 0 and DIGEST.fullmatch(str(part.get('sha256', ''))), '分块信息无效：' + part['asset'])
+        require(sum(part['size'] for part in parts) == size, '分块大小合计与整包不符：' + name)
+        listed = {part['asset'] for part in parts}
+        extra = sorted(p.name for p in root.iterdir() if pattern.fullmatch(p.name) and p.name not in listed)
+        require(not extra, '目录中有清单以外的分块，可能混入了其他版本：' + '、'.join(extra))
+        target = root / name
+        if target.exists() or target.is_symlink():
+            require(not target.is_symlink() and target.is_file() and sha256_file(target) == checksum,
+                    name + ' 已存在但与清单不符；删除它后重新运行 --assemble')
+            print(name + ' 已合并并校验通过。', flush=True)
+        else:
+            missing = [part['asset'] for part in parts if not (root / part['asset']).is_file() or (root / part['asset']).is_symlink()]
+            require(not missing, '缺少分块，请重新下载：' + '、'.join(missing))
+            wrong = [part['asset'] for part in parts if (root / part['asset']).stat().st_size != part['size']]
+            require(not wrong, '分块大小不符（下载不完整或已损坏），请重新下载：' + '、'.join(wrong))
+            require(shutil.disk_usage(root).free > size + 512 * 1024**2, '更新包目录磁盘空间不足，合并需要约 ' + str(size) + ' 字节')
+            temp = root / ('.' + name + '.assembling-' + uuid.uuid4().hex)
+            whole = hashlib.sha256()
+            try:
+                with temp.open('xb') as output:
+                    for part in parts:
+                        print('校验并合并 ' + part['asset'] + ' …', flush=True)
+                        digest = hashlib.sha256()
+                        with (root / part['asset']).open('rb') as stream:
+                            for block in iter(lambda: stream.read(8 * 1024 * 1024), b''):
+                                digest.update(block)
+                                whole.update(block)
+                                output.write(block)
+                        require(digest.hexdigest() == part['sha256'], '分块校验失败（已损坏或被修改），请重新下载：' + part['asset'])
+                    output.flush()
+                    os.fsync(output.fileno())
+                require(whole.hexdigest() == checksum and temp.stat().st_size == size, '合并结果与整包校验值不符：' + name)
+                os.replace(temp, target)
+                sync_directory(root)
+            finally:
+                if temp.exists():
+                    temp.unlink()
+            print(name + ' 合并完成，SHA256 与清单一致。', flush=True)
+        if remove_parts:
+            for part in parts:
+                (root / part['asset']).unlink(missing_ok=True)
+    print('合并完成。下一步：bash ' + str(root / 'update-offline.sh') + ' /原部署目录 --check', flush=True)
 
 
 def runtime_env(container):
@@ -569,17 +634,24 @@ class Updater:
 
 def main():
     parser = argparse.ArgumentParser(description='医院已有 Docker 部署的离线升级；保留持久数据和模型')
-    parser.add_argument('deployment', type=Path)
+    parser.add_argument('deployment', type=Path, nargs='?')
     parser.add_argument('--bundle', type=Path, default=Path(__file__).resolve().parents[1])
     group = parser.add_mutually_exclusive_group()
     group.add_argument('--check', action='store_true')
     group.add_argument('--status', action='store_true')
     group.add_argument('--recover', action='store_true')
     group.add_argument('--rollback', metavar='BACKUP_ID')
+    group.add_argument('--assemble', action='store_true', help='合并并校验分块发布的更新包，不需要原部署目录')
     parser.add_argument('--restore-data', action='store_true')
+    parser.add_argument('--remove-parts', action='store_true', help='与 --assemble 合用：合并校验成功后删除分块')
     args = parser.parse_args()
+    if args.assemble == (args.deployment is not None) or (args.remove_parts and not args.assemble):
+        parser.error('--assemble 不带原部署目录；其他操作必须指定原部署目录')
     os.umask(0o077)
     try:
+        if args.assemble:
+            assemble(args.bundle, args.remove_parts)
+            return 0
         updater = Updater(args.deployment, args.bundle)
         if args.status:
             updater.status()
