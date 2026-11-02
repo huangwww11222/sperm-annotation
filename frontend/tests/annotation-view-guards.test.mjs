@@ -94,9 +94,9 @@ test('stale review action never sends a check to a newly selected video',async()
   assert.equal(calls.length,0)
 })
 
-const workspaceSource=readProduction('stores/workspace.ts')
+const workspaceSource=readProduction('stores/workspace/editing.ts')
 function workspaceHandler(name,context){
-  const ast=ts.createSourceFile('workspace.ts',workspaceSource,ts.ScriptTarget.Latest,true)
+  const ast=ts.createSourceFile('editing.ts',workspaceSource,ts.ScriptTarget.Latest,true)
   let body
   function visit(n){if(ts.isVariableDeclaration(n)&&n.name.getText(ast)===name)body=n.initializer.getText(ast);ts.forEachChild(n,visit)}visit(ast)
   assert(body,`production ${name} must exist`)

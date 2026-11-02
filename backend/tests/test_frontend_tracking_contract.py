@@ -4,9 +4,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def _store_source() -> str:
+    # The workspace store is split into frontend/src/stores/workspace/*.ts modules.
+    store = ROOT / "frontend/src/stores"
+    files = [store / "workspace.ts", *sorted((store / "workspace").glob("*.ts"))]
+    return "\n".join(path.read_text(encoding="utf-8") for path in files)
+
+
 def test_frontend_no_longer_calls_frame_difference_plan() -> None:
     api = (ROOT / "frontend/src/api/trackApi.ts").read_text(encoding="utf-8")
-    store = (ROOT / "frontend/src/stores/workspace.ts").read_text(encoding="utf-8")
+    store = _store_source()
     assert "/track/plan" not in api
     assert "trackApi.plan" not in store
     assert "lastProcessedFrame" in store
@@ -15,7 +22,7 @@ def test_frontend_no_longer_calls_frame_difference_plan() -> None:
 def test_anomaly_panel_contract_keeps_markers_and_uses_real_names() -> None:
     page = (ROOT / "frontend/src/pages/AnnotatePage.vue").read_text(encoding="utf-8")
     panel = (ROOT / "frontend/src/components/AnnotationTrackingFeedback.vue").read_text(encoding="utf-8")
-    store = (ROOT / "frontend/src/stores/workspace.ts").read_text(encoding="utf-8")
+    store = _store_source()
     assert "AnnotationTrackingFeedback" in page
     # Layout and copy may change; retain evidence bindings. The browser policy
     # checks validate the saved reference frame and actual rendered values.
@@ -40,10 +47,10 @@ def test_anomaly_panel_contract_keeps_markers_and_uses_real_names() -> None:
 
 
 def test_tracking_requires_explicit_per_object_feedback_before_resume() -> None:
-    store = (ROOT / "frontend/src/stores/workspace.ts").read_text(encoding="utf-8")
+    store = _store_source()
     panel = (ROOT / "frontend/src/components/AnnotationTrackingFeedback.vue").read_text(encoding="utf-8")
     api = (ROOT / "frontend/src/api/trackApi.ts").read_text(encoding="utf-8")
-    run = store[store.index("const performTracking"):store.index("const buildSam3AnnotationsJson")]
+    run = store[store.index("const performTracking"):store.index("const runAiTrack")]
     assert "confirmedPausedIds" not in run
     assert "请先逐项确认暂停对象" in run
     assert "const prepareTrackingFeedback" in store
@@ -74,7 +81,7 @@ def test_track_api_401_expires_session_and_login_route_is_available() -> None:
 
 
 def test_removed_annotation_folder_entry_retains_server_media_restore() -> None:
-    store = (ROOT / "frontend/src/stores/workspace.ts").read_text(encoding="utf-8")
+    store = _store_source()
     api = (ROOT / "frontend/src/api/trackApi.ts").read_text(encoding="utf-8")
     backend = (ROOT / "backend/app/main.py").read_text(encoding="utf-8")
     page = (ROOT / "frontend/src/pages/AnnotatePage.vue").read_text(encoding="utf-8")
@@ -94,9 +101,9 @@ def test_removed_annotation_folder_entry_retains_server_media_restore() -> None:
 
 
 def test_media_deletion_requires_confirmation_and_retains_legacy_identity() -> None:
-    store = (ROOT / "frontend/src/stores/workspace.ts").read_text(encoding="utf-8")
+    store = _store_source()
     page = (ROOT / "frontend/src/pages/AnnotatePage.vue").read_text(encoding="utf-8")
-    delete_block = store[store.index("const deleteMedia"):store.index("// Switching assets")]
+    delete_block = store[store.index("const deleteMedia"):store.index("const openFilePicker")]
     assert "closeMedia" not in store
     assert "asset-close" not in page
     assert "deleteMedia(media.id)" in page
@@ -110,12 +117,12 @@ def test_media_deletion_requires_confirmation_and_retains_legacy_identity() -> N
 
 
 def test_workspace_state_is_restored_before_tracking_results_and_uses_canonical_media_id() -> None:
-    store = (ROOT / "frontend/src/stores/workspace.ts").read_text(encoding="utf-8")
+    store = _store_source()
     api = (ROOT / "frontend/src/api/trackApi.ts").read_text(encoding="utf-8")
     backend = (ROOT / "backend/app/main.py").read_text(encoding="utf-8")
     tracker = (ROOT / "backend/app/tracker.py").read_text(encoding="utf-8")
 
-    reset_block = store[store.index("const resetAnnotationViewForMedia"):store.index("const loadServerMedia")]
+    reset_block = store[store.index("const resetAnnotationViewForMedia"):store.index("const setupRestoreWatchers")]
     assert reset_block.index("restoreWorkspaceState(mediaId, isCurrent)") < reset_block.index("loadTrackingResult(mediaId, true, true)")
     assert "media.serverMediaId || mediaId" in store
     assert "getWorkspaceState" in api and "saveWorkspaceState" in api
@@ -139,7 +146,7 @@ def test_results_page_groups_same_file_frame_and_user_instead_of_batches() -> No
 
 
 def test_workspace_switch_and_rename_preserve_complete_video_state() -> None:
-    store = (ROOT / "frontend/src/stores/workspace.ts").read_text(encoding="utf-8")
+    store = _store_source()
 
     rename_block = store[store.index("const renameObject"):store.index("const copyPreviousFrame")]
     assert "const allObjects = annotationsByMedia.value[mediaId]" in rename_block

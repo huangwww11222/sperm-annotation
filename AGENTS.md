@@ -22,7 +22,7 @@
 
 ## 节省上下文
 
-本仓库文档和核心源文件都很大（`docs/` 主文档合计约 200 KB；`frontend/src/stores/workspace.ts` 约 3000 行），整份读取会迅速耗尽上下文和额度。
+本仓库文档和核心源文件都很大（`docs/` 主文档合计约 200 KB；`frontend/src/pages/AnnotatePage.vue` 约 98 KB），整份读取会迅速耗尽上下文和额度。
 
 - 文档：先读开头的“要点”，再 `grep -n '^#' <文件>` 看章节，按行号只读相关章节；超过 20 KB 的文档不要整份读取。只在少数任务用到的细节在 `docs/details/`，需要时才读。各文档大小见 [docs/README.md](docs/README.md)。
 - 源码：超过 500 行的文件先 `grep -n` 定位函数或关键字，再读附近几十到一两百行；不要整份读取。大文件清单见 [PROJECT_STRUCTURE.md](docs/PROJECT_STRUCTURE.md#大文件定位)。

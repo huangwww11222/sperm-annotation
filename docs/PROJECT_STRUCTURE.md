@@ -18,15 +18,16 @@ Vue 3 + TypeScript + Vite；FastAPI + SQLite；SAM3 在后端按需加载。前�
 | 训练包按视频合并 | `scripts/merge_training_exports.py`：多个已下载 ZIP / 目录按整段视频重新划分 train/val/test，换算与服务端 `training_export.video_bucket` 一致 |
 | 仓库与容器验收 | `scripts/check_repository.py`、`scripts/docker_smoke.py`、`.github/workflows/` |
 | 固定浏览器回归与执行记录 | `scripts/run_browser_regression.py`；`frontend/tests/critical-workflows-browser.mjs` 从真实登录/上传走完整用户流程；测试专用模拟模型只在 `backend/tests/browser_server.py` |
-| 输入完整性、读取竞态与登录恢复 | `annotation/trackingResult.ts`、`stores/workspace.ts`、`stores/auth.ts`；`test_independent_integrity_audit.py`、`test_integrity_recovery.py` 及固定 `independent-integrity-browser.mjs` |
+| 输入完整性、读取竞态与登录恢复 | `annotation/trackingResult.ts`、`stores/workspace/restore.ts` / `trackingResult.ts`、`stores/auth.ts`；`test_independent_integrity_audit.py`、`test_integrity_recovery.py` 及固定 `independent-integrity-browser.mjs` |
 | 路由/认证/布局/主题 | `frontend/src/router/index.ts`、`stores/auth.ts`、`layouts/AppLayout.vue`、`stores/appearance.ts`、`style.css` |
 | 观看快捷键/平移/专注 | `workbench/viewTransform.ts`、`useViewportNavigation.ts`、`useWorkbenchFocus.ts`；观看不写业务 |
 | 共享工作台 | `components/WorkbenchShell.vue`、`workbench/shell.css`；站点顶栏上下文、视频抽屉、画布与可收起检查面板；帧条 `components/WorkbenchFrameStrip.vue`（审查模式显示待查/已查帧），布局约束见 WORKFLOW |
-| 人工标注 UI / 状态 | `pages/AnnotatePage.vue`、`stores/workspace.ts`、`annotation/annotation.css` / `annotation-shell.css`；缩放小地图 `components/AnnotationMinimap.vue` |
+| 标注工作区 store | `stores/workspace.ts` 只组装 `useWorkspace()` 的对外接口；实现按职责在 `stores/workspace/`：`state.ts`（共享状态与派生值，含跨模块计数器 `runtime`）、`history.ts`（撤销/重做）、`editing.ts`（画布手势、点选头部、对象增删改、采用审查轨迹）、`frames.ts`（精确帧读取/缓存、定位与播放）、`save.ts`（本机草稿、构建工作区、写入队列与重试）、`collaboration.ts`（观看状态、三方合并应用、冲突解决、stamp 轮询）、`trackingActions.ts`（较早帧重追、整视频删除、异常确认反馈）、`media.ts`（素材列表/导入/删除）、`restore.ts`（切换素材/账号时恢复）、`trackingResult.ts`（追踪结果加载与暂停说明）、`tracking.ts`（启动/轮询/续追 SAM3）、`results.ts`（JSON 导出与效果预览）；合并/重放协议在 `annotation/workspaceWrites.ts` |
+| 人工标注 UI / 状态 | `pages/AnnotatePage.vue`、`stores/workspace/editing.ts`、`annotation/annotation.css` / `annotation-shell.css`；缩放小地图 `components/AnnotationMinimap.vue` |
 | 框绘制/坐标/缓存 | `components/AnnotationOverlay.vue`、`annotation/geometry.ts`、`annotation/frameCache.ts` |
 | 审查 | `pages/AnnotatePage.vue`（`mode="review"`）、`components/AnnotationReviewPanel.vue`、`stores/annotationReview.ts`、`api/annotationReviewApi.ts`；后端 `annotation_review.py`（清单、加严抽检、通过与修改记录、导出门槛）与 `annotation_review_routes.py`；共享请求与日志 `api_common.py` |
-| 重复视频与覆盖重新标注 | `stores/workspace.ts`、`backend/app/media_reimport.py`、`main.py`；文件恢复日志与轮次保护见 STORAGE_LAYOUT |
-| 导入标注包 | `backend/app/package_import.py`（训练 ZIP → 新素材 + 人工工作区）、`main.py` 的 `/api/track/import-package`；前端 `stores/workspace.ts` 的 `importPackage` 与素材库“标注包”按钮 |
+| 重复视频与覆盖重新标注 | `stores/workspace/media.ts`、`backend/app/media_reimport.py`、`main.py`；文件恢复日志与轮次保护见 STORAGE_LAYOUT |
+| 导入标注包 | `backend/app/package_import.py`（训练 ZIP → 新素材 + 人工工作区）、`main.py` 的 `/api/track/import-package`；前端 `stores/workspace/media.ts` 的 `importPackage` 与素材库“标注包”按钮 |
 | 追踪疑点证据 | `backend/app/review_evidence.py` / `endpoint_tracking.py` 写入Tracking行；当前 `annotation_review.frame_findings/reverse_items/detector_items` 提取并分组，旧 `concentrated_review` 仅保留历史数据层 |
 | 人工首尾与独立反追 | `backend/app/endpoint_tracking.py`：端点校验、反向有界窗口、多帧身份匹配与只读证据；`main.py` 编排、`annotation_completion.py` 有效尾框合并 |
 | 三路综合标注 | `backend/app/joint_tracking.py`：已有身份内关联、连续路径选择、统一几何与不确定片段；`head_click.detect_regions` 批量ROI推理；新首尾请求 combineResults=true |
@@ -39,9 +40,9 @@ Vue 3 + TypeScript + Vite；FastAPI + SQLite；SAM3 在后端按需加载。前�
 | 记录查询 | `pages/ResultsPage.vue`、`backend/app/db.py` |
 | 媒体/工作区/Tracking API | `api/trackApi.ts`、`api/httpAnnotationApi.ts`、`backend/app/main.py` |
 | Tracking 编排 / 模型 / 异常 | `backend/app/tracker.py`、`services/sam3_engine.py`、`services/anomaly_detector.py`、`services/annotation_seed.py` |
-| 异常后较早帧重建 | `pages/AnnotatePage.vue` 的确认窗口、`components/AnnotationTrackingFeedback.vue`、`stores/workspace.ts` / `api/trackApi.ts`、`backend/app/tracking_restart.py`；持久暂停在 `annotation_state.py`，版本/SQL 收据/跨文件恢复见 API 与 STORAGE_LAYOUT |
+| 异常后较早帧重建 | `pages/AnnotatePage.vue` 的确认窗口、`components/AnnotationTrackingFeedback.vue`、`stores/workspace/trackingActions.ts` / `api/trackApi.ts`、`backend/app/tracking_restart.py`；持久暂停在 `annotation_state.py`，版本/SQL 收据/跨文件恢复见 API 与 STORAGE_LAYOUT |
 | 按需带框视频预览 | `backend/app/tracking_preview.py`；长时编码在来源锁外，输入签名校验后发布 |
-| 点选头部生成框 | `backend/app/head_click.py` 与 `main.py` 的 head-box 接口；前端 `stores/workspace.ts`、`pages/AnnotatePage.vue` |
+| 点选头部生成框 | `backend/app/head_click.py` 与 `main.py` 的 head-box 接口；前端 `stores/workspace/editing.ts` 的 `createHeadBox`、`pages/AnnotatePage.vue` |
 | 可选边缘入画新增 | `backend/app/edge_entry.py`、`head_click.detect_edges`、`tracker.track_video`；现有 AI Tracking 开关与请求正文 |
 | 精确帧性能与缓存 | `backend/app/video_frames.py` 复用/限量解码器、原子 JPEG 与源签名；`frontend/src/api/sourceFrameApi.ts` 限量 Blob 缓存 |
 | 数据库和增量迁移 | `db.py`、`review_schema.py`、各 workflow/export/review 模块中的 `migrate()`（`annotation_review.migrate` 随历史 schema 一起执行） |
@@ -59,7 +60,7 @@ Vue 3 + TypeScript + Vite；FastAPI + SQLite；SAM3 在后端按需加载。前�
 
 | 文件 | 约行数 | 定位建议 |
 | --- | --- | --- |
-| `frontend/src/stores/workspace.ts` | 3000 | 标注/审查前端状态的总入口；按动作名搜索，如 `grep -n "const save\|function save\|importPackage\|seekVideo" ` |
+| `frontend/src/stores/workspace/*.ts` | 每个 60–430 | 原 3000 行的 `workspace.ts` 已按职责拆分（见上表“标注工作区 store”），先按职责选模块；不知道函数在哪个模块时 `grep -n "export const 函数名" frontend/src/stores/workspace/*.ts` |
 | `frontend/src/pages/AnnotatePage.vue` | 1000（单行很长，约 100 KB） | 按模板中的类名、`mode === 'review'` 或组件名搜索 |
 | `backend/app/main.py` | 1500 | 路由集中处；按路径搜索，如 `grep -n '"/api/track/' ` |
 | `backend/app/services/anomaly_detector.py` | 1500 | 仅旧暂停兼容路径的异常判定；按原因码搜索 |

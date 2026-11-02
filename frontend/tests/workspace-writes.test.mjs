@@ -242,8 +242,8 @@ test('a malformed successful write receipt cannot clear pending state or remove 
 
 // Run the real tracking finalizer after a delayed response. This verifies the
 // observable cleanup behavior without starting a model or touching user data.
-const trackingSource = readFileSync(new URL('../src/stores/workspace.ts', import.meta.url), 'utf8')
-const trackingTree = ts.createSourceFile('workspace.ts', trackingSource, ts.ScriptTarget.Latest, true)
+const trackingSource = readFileSync(new URL('../src/stores/workspace/tracking.ts', import.meta.url), 'utf8')
+const trackingTree = ts.createSourceFile('tracking.ts', trackingSource, ts.ScriptTarget.Latest, true)
 let trackingOperation
 function findTrackingOperation(node) {
   if (ts.isVariableDeclaration(node) && node.name.getText(trackingTree) === 'performTracking') trackingOperation = node.initializer
@@ -266,7 +266,7 @@ function trackingCleanupHarness({ restart = true, launched = false, unconfirmedJ
     restartIntent: restart ? { actorId: 'actor-A' } : undefined,
     launched,
     restartSerial: 7,
-    restartEpoch: 7,
+    runtime: { restartEpoch: 7 },
     currentActor: 'actor-A',
     mediaId: 'media-A',
     currentMediaId: { value: 'media-A' },
@@ -292,7 +292,7 @@ const otherVideoIntact = context => {
 
 for (const [reason, switchContext] of [
   ['account changed', context => { context.currentActor = 'actor-B' }],
-  ['restart was cancelled or page unmounted', context => { context.restartEpoch++ }],
+  ['restart was cancelled or page unmounted', context => { context.runtime.restartEpoch++ }],
   ['media changed', context => { context.currentMediaId.value = 'media-B' }],
 ]) {
   test(`a late unlaunched restart releases only its own video when ${reason}`, async () => {
@@ -307,7 +307,7 @@ for (const [reason, switchContext] of [
 
 test('a launched restart keeps running after the user opens another video and does not save the hidden video', async () => {
   const h = trackingCleanupHarness({ launched: true })
-  h.context.restartEpoch++; h.context.currentMediaId.value = 'media-B'
+  h.context.runtime.restartEpoch++; h.context.currentMediaId.value = 'media-B'
   h.resolve(); await h.completion
   assert(!h.context.trackingMedia.has('media-A'))
   otherVideoIntact(h.context)
@@ -354,7 +354,7 @@ test('ordinary tracking finishing in the background releases its video without s
 
 test('ordinary tracking on the open video saves its workspace', async () => {
   const h = trackingCleanupHarness({ restart: false })
-  h.context.currentActor = 'actor-B'; h.context.restartEpoch++
+  h.context.currentActor = 'actor-B'; h.context.runtime.restartEpoch++
   h.resolve(); await h.completion
   assert(!h.context.trackingMedia.has('media-A'))
   assert.deepEqual(h.scheduled, ['media-A'])
