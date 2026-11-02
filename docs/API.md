@@ -1,5 +1,11 @@
 # 当前接口与数据契约
 
+> 要点
+> - 当前路由见“路由概览”；旧 `/api/review/*`、`/api/confirmation/*`、`/api/final-versions/*` 已删除。
+> - 业务写请求：Bearer + `Idempotency-Key`（审查/导出另需 `X-Review-Contract`）；未知结果用原键原正文重试，409 版本冲突须重新读取。
+> - 帧号从 0 开始；工作区坐标 0–100 百分比，追踪/证据为原图像素 xyxy。
+> - 旧暂停兼容路径的接口细节在 [details/tracking-pause-policy.md](details/tracking-pause-policy.md)。
+
 ## 路由概览
 
 标注 → 审查 → 导出。审查与旧 A/B/C/F 无关；旧 `/api/review/*`、`/api/confirmation/*`、`/api/final-versions/*` 已删除（说明见 [archive](archive/旧审查与对比确认流程_2026-11-01前.md)），对应数据表只读保留供统计/审计导出。实现：[annotation_review_routes.py](../backend/app/annotation_review_routes.py)、[annotationReviewApi.ts](../frontend/src/api/annotationReviewApi.ts)。均需登录；审查接口无需幂等头，重复调用天然幂等。
@@ -111,23 +117,7 @@
 
 ### 正常参照与短时风险观察
 
-新版“本帧所有对象无异常”使用原 feedback API，另带 `scope:"frame"`（仅 `decision:"normal"`）。默认/省略 `scope` 保持以上逐对象旧契约，`corrected/reset` 仍逐对象。帧级确认不按请求 `objectId` 限定范围：服务端读取暂停帧全部有效对象、人工修框优先、应用删除规则；包括正常对象，缺失异常对象的有效框则拒绝全部操作。不能用客户端传来的框、对象列表或参照取代实际数据。
-
-每个有效对象追加一个 normal 事件，带共同 `checkpointId`、`scope:"frame"`、`createdAt`/`userId`；`geometryReference` 带 `checkpoint:true` 和实际像素 bbox/name/frameIndex，可带真实 maskArea。实际相交组合保存 overlapReferences，已人工修框的对象不采纳旧 AI 运动样本。全部事件、所有暂停项的清除和版本/回执一次原子保存，版本只增加一次。失败不部分确认；原键重放返回原响应且不新增检查点。后续从事件恢复最新适用检查点作为固定尺寸基准，reset 或更新人工框按原规则优先；原人工标注和 AI 数据不改写。
-
-尺寸/形状的 `normal` 可在 `geometryReference` 追加正值 `maskArea`（取自服务端模型结果；未知不填），恢复时最多使用每对象最近 3 个完整人工认可框，不拼接不同框的宽高范围。原人工框与来源不改变。续追校验最新适用的正常参考确实已载入；删除、人工修正、重置或分支时序使参照不适用时按各自规则处理，不把缺失参考静默当正常。
-
-重叠认可来自同帧实际有效框，不接受客户端组合或坐标。单项正常只记录本对象的候选邻居快照，不能直接认可整对。双方在同一次暂停、同一双框/人工编辑快照下分别正常确认成功，或显式 `scope:"frame"` 同时检查后，才保存 `overlapReferences:[{objectIds:[a,b],frameIndex,bboxes:[boxA,boxB],source:"confirmed-normal",approvalVersion:2,pauseId,pairSnapshotId,generationId,objectEpochs,confirmedObjectIds,confirmedEventIds}]`。首个事件保持不可变，第二次确认只在自己的新事件中发布有效双边认可；不能拼凑历史暂停的双方决定。修改、删除/撤销删除、重置和新追踪分支使对应旧认可失效；撤销恢复框不能复活已退休的关系认可。仅更名或其他对象的编辑不退休这对认可。认可仅限原对象对的相近状态，不豁免新的伙伴、明显恶化、分离后的新风险或独立异常。双方还须有服务器核验的可靠身份参照，才能附带 `identityReferences`；仅有旧几何认可不提供新的图像可信身份。成功反馈可返回兼容扩展 `confirmedReference:{eventId,geometryReference|null,overlapReferences:[],identityReference?}`，原键重放保留原摘要。
-
-`identityReference` 是与几何检查点分开的可选服务器字段：`{version:2,source:"native-frame-mask-v2",objectId,frameIndex,bbox,originFrameIndex,referenceBBox,referencePoint,point,radius,appearance,status:"reliable",sourceSignature,generationId,objectEpoch}`。仅从当前真实追踪行的新版可靠来源取候选，并在一次当前原视频解码的小区域核验后保存；不接受客户提供可信点、外观、阈值或参考帧。旧 v1 的 `matched` 光学点不能升级为可信身份，缺新版依据时正常确认仍保存几何，身份由后续追踪后台按真实人工来源重新核验。旧身份原点不能通过改帧号伪装成当前可靠来源；无法分辨时保留不确定而不生成可信引用。
-
-普通尺寸越界与新增疑似合并按原始帧观察连续 3 帧，同对象/对象对独立计数；严重几何突变、极端跳跃与异常消失仍及时暂停。初始稳定重叠及低 IoU 的大小框包含仅提示。JSONL 的 `anomaly_details` 提供 `geometry_thresholds`、`geometry_observation_count/required`、`overlap_pairs`（全部组合）、`pause_started_frame` 和 `decision_frame_index`。持续异常暂停定位首次风险帧，观察窗口中的后续帧不发布为正常结果；`lastProcessedFrame`/`processedFrames` 对应实际发布结果，不能用模型分析到的第三帧冒充已保存进度。短时观察跨追踪轮次恢复，确认或新的人工工作结束对应旧观察。
-
-真实原图/Mask 辅助核验的诊断为 `identity_evidence:{version:2,source:"native-frame-mask-v2",sourceSignature,objectId,frameIndex,bbox,maskArea,status,geometryReferenceFrameIndex,geometryReferenceBBox,head,coverage,reasons,thresholds,identityReference?}`，仍兼容读取 v1 诊断。当前对象/源帧/框/Mask 面积、原始身份建立帧/框和最新适用几何检查点分别校验，不能改帧号伪造引用。status 为 supported/risk/unknown/warning/uncertain；head 包含光学匹配点、原身份参考/前次可靠点、半径与 associationStatus，coverage 区分明确丢失、局部 Mask 覆盖不足、邻居污染与暂时粘连。它不是精子分类概率，也不证明完整尾部。
-
-可靠独立主体仍保留时，旋转、甩尾和仅 Mask 混入邻居不直接按宽高硬停；局部细线在框内但 Mask 覆盖不足为提示，明确大段结构跑出框仍保护。短暂粘连使用有限不确定观察并冻结可信身份；不能将粘连质心更新成正常位置，也不能无限放行。缺字段、坏绑定或其他未知证据保留旧保护，已确认Mask骤减仅在可靠当前主体且无明确丢失时降为候选，明确消失仍检查。图像持续风险提供 `image_observation_count/required`、`image_pending` 与首次风险帧；pausedObjects.type 兼容 `coverage_loss` / `identity_loss`。前端只解释实际证据，不推断或决定风险。Mask ROI 和原图不进入 JSON，仍按真实原始像素坐标保存。
-
-暂停工作区可带服务端 `diagnostic` 以刷新恢复完整解释。客户端展示字段不参与后端判定；原始帧号、稳定对象 ID、幂等/版本、删除及导出边界保持原协议。
+整帧/单对象正常确认、几何与身份参照、风险持续观察和诊断字段属于旧暂停兼容路径，见 [details/tracking-pause-policy.md](details/tracking-pause-policy.md#接口正常参照与短时风险观察)。
 
 ### 异常暂停后从较早帧重新追踪
 

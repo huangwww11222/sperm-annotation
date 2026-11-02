@@ -5,7 +5,7 @@
 ## 开始工作
 
 1. 先读 `work/HANDOFF.md`（如存在）和 `git log -5`，了解上一位开发者（人或另一个 AI 工具）留下的进行中工作。检查 `git status`，保留已有未提交改动。
-2. 读 [当前流程与不变量](docs/WORKFLOW.md) 和 [代码地图](docs/PROJECT_STRUCTURE.md)。按任务再读：标注、追踪、画布、快捷键 → [ANNOTATION.md](docs/ANNOTATION.md)；接口、数据库 → [API.md](docs/API.md)、[STORAGE_LAYOUT.md](docs/STORAGE_LAYOUT.md)；部署 → [DOCKER_DEPLOYMENT.md](docs/DOCKER_DEPLOYMENT.md)。
+2. 读 [代码地图](docs/PROJECT_STRUCTURE.md) 找到要改的文件，再只读与任务相关的文档**章节**（见下文“节省上下文”）：业务规则 → [WORKFLOW.md](docs/WORKFLOW.md)；标注、追踪、画布、快捷键 → [ANNOTATION.md](docs/ANNOTATION.md)；接口、数据库 → [API.md](docs/API.md)、[STORAGE_LAYOUT.md](docs/STORAGE_LAYOUT.md)；部署 → [DOCKER_DEPLOYMENT.md](docs/DOCKER_DEPLOYMENT.md)。
 3. 用户当前明确要求优先。文档与代码不一致时，以代码和测试为事实，调查原因后修正文档；不能从 `docs/archive/`、旧原型、旧报告或旧注释推断现有规则。
 
 ## 关键边界
@@ -19,6 +19,16 @@
 - 保留版本校验、幂等键、事务回滚、失败待重试状态和日志。不要把网络失败当成功或空数据。
 - 内网客户端兼容 Chrome 93 / HTTP；超时和 UUID 使用 `frontend/src/utils/browserCompat.ts`，不要直接依赖新版 API。素材列表只提供经确认的删除，不提供“关闭素材”；服务器视频与本地图片的删除范围须明确，被历史审查基准引用的源视频不可删。
 - 只支持一个后端进程/worker。测试设置独立 `APP_DATA_DIR`、`APP_DB_FILE`、`APP_STORAGE_DIR`，禁止向用户业务目录生成夹具。
+
+## 节省上下文
+
+本仓库文档和核心源文件都很大（`docs/` 主文档合计约 200 KB；`frontend/src/stores/workspace.ts` 约 3000 行），整份读取会迅速耗尽上下文和额度。
+
+- 文档：先读开头的“要点”，再 `grep -n '^#' <文件>` 看章节，按行号只读相关章节；超过 20 KB 的文档不要整份读取。只在少数任务用到的细节在 `docs/details/`，需要时才读。各文档大小见 [docs/README.md](docs/README.md)。
+- 源码：超过 500 行的文件先 `grep -n` 定位函数或关键字，再读附近几十到一两百行；不要整份读取。大文件清单见 [PROJECT_STRUCTURE.md](docs/PROJECT_STRUCTURE.md#大文件定位)。
+- 不要搜索或列出 `work/`（数十 GB 的日志、夹具和旧代码副本，内容可能是过时版本），只读 `work/HANDOFF.md` 和本次任务明确指出的文件。`docs/archive/` 只在追溯具体历史原因时读取。
+- 测试和构建输出写入 `work/` 下的日志文件，对话里只看结尾摘要或失败部分（例如 `pytest -q … 2>&1 | tail -20`）；不要把完整日志、完整 diff 或大段 JSON 贴进对话。
+- 一个会话只做一个任务；任务完成就更新 `work/HANDOFF.md` 并结束，下一个任务开新会话，不要在长会话里连续处理多件无关工作。
 
 ## 测试分层
 

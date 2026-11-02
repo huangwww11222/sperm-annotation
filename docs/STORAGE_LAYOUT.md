@@ -1,5 +1,11 @@
 # 存储、快照与迁移边界
 
+> 要点
+> - 每个视频的工作区、追踪结果和恢复日志在媒体目录下；业务库为单个 SQLite（`APP_DB_FILE`）。
+> - 审查数据：`annotation_reviews` / `annotation_review_checks` / `annotation_review_exclusions`；历史 A/B/C/F 表只读。
+> - 写入依赖版本、幂等回执与原子发布；删除是持久过滤规则，不物理擦除追踪原始数据。
+> - 测试与夹具必须使用独立的 `APP_DATA_DIR` / `APP_DB_FILE` / `APP_STORAGE_DIR`。
+
 `annotation_reviews` 兼容追加可空的 `evidence_policy`、`checklist_history_json`。未结束旧轮次升级审查筛选/分组策略时，在同一SQLite事务内归档旧items/检查快照并替换疑点清单；原 `annotation_review_checks` 记录不删除。已通过历史轮次不重建，原Tracking诊断和几何文件不改写。新增列对旧数据兼容，不改变离线存储 contract；策略版本（当前 actionable-review-v6）包含筛选版本和独立候选对应容差指纹，避免每次读取反复重建。
 
 ## 概览
