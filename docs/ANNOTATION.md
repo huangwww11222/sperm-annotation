@@ -140,7 +140,7 @@ endpoint_tracking.project_endpoints 是无写入投影：从已保存的真实�
 
 ## 观看操作
 
-`workbench/viewTransform.ts` 统一观看键识别和边界数学，标注与审查共用同一画布、暂停锚点机制与缩放键识别。可视变换不能写 bbox/工作区或产生检查结果。`workbench/useViewportNavigation.ts`、`useWorkbenchFocus.ts` 原供已删除的 B/C 页使用，当前无引用。
+`workbench/viewTransform.ts` 统一观看键识别和边界数学，标注与审查共用同一画布、暂停锚点机制与缩放键识别。可视变换不能写 bbox/工作区或产生检查结果。
 
 ### 点选头部生成框
 

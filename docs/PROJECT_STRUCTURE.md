@@ -20,7 +20,7 @@ Vue 3 + TypeScript + Vite；FastAPI + SQLite；SAM3 在后端按需加载。前�
 | 固定浏览器回归与执行记录 | `scripts/run_browser_regression.py`；`frontend/tests/critical-workflows-browser.mjs` 从真实登录/上传走完整用户流程；测试专用模拟模型只在 `backend/tests/browser_server.py` |
 | 输入完整性、读取竞态与登录恢复 | `annotation/trackingResult.ts`、`stores/workspace/restore.ts` / `trackingResult.ts`、`stores/auth.ts`；`test_independent_integrity_audit.py`、`test_integrity_recovery.py` 及固定 `independent-integrity-browser.mjs` |
 | 路由/认证/布局/主题 | `frontend/src/router/index.ts`、`stores/auth.ts`、`layouts/AppLayout.vue`、`stores/appearance.ts`、`style.css` |
-| 观看快捷键/平移/专注 | `workbench/viewTransform.ts`、`useViewportNavigation.ts`、`useWorkbenchFocus.ts`；观看不写业务 |
+| 观看快捷键/平移 | `workbench/viewTransform.ts`；观看不写业务 |
 | 共享工作台 | `components/WorkbenchShell.vue`、`workbench/shell.css`；站点顶栏上下文、视频抽屉、画布与可收起检查面板；帧条 `components/WorkbenchFrameStrip.vue`（审查模式显示待查/已查帧），布局约束见 WORKFLOW |
 | 标注工作区 store | `stores/workspace.ts` 只组装 `useWorkspace()` 的对外接口；实现按职责在 `stores/workspace/`：`state.ts`（共享状态与派生值，含跨模块计数器 `runtime`）、`history.ts`（撤销/重做）、`editing.ts`（画布手势、点选头部、对象增删改、采用审查轨迹）、`frames.ts`（精确帧读取/缓存、定位与播放）、`save.ts`（本机草稿、构建工作区、写入队列与重试）、`collaboration.ts`（观看状态、三方合并应用、冲突解决、stamp 轮询）、`trackingActions.ts`（较早帧重追、整视频删除、异常确认反馈）、`media.ts`（素材列表/导入/删除）、`restore.ts`（切换素材/账号时恢复）、`trackingResult.ts`（追踪结果加载与暂停说明）、`tracking.ts`（启动/轮询/续追 SAM3）、`results.ts`（JSON 导出与效果预览）；合并/重放协议在 `annotation/workspaceWrites.ts` |
 | 人工标注 UI / 状态 | `pages/AnnotatePage.vue`、`stores/workspace/editing.ts`、`annotation/annotation.css` / `annotation-shell.css`；缩放小地图 `components/AnnotationMinimap.vue` |
