@@ -191,8 +191,29 @@ async function fixInCanvas(frame: number) {
   const entry = currentEntry.value
   reviewView.value = 'canvas'
   await seekFrame(frame)
-  const target = currentObjects.value.find(o => o.objectId === entry?.objectId)
-  if (target) selectObject(target.id)
+  if (currentFrame.value !== frame || !entry) return
+  const target = currentObjects.value.find(o => o.objectId === entry.objectId)
+  if (!target) return
+  selectTool('select'); selectObject(target.id)
+  await nextTick(); await zoomToBox(target.bbox)
+}
+/** Zoom in so the box sits in the middle with about the card's crop of context around it. */
+async function zoomToBox(box?: { x: number; y: number; width: number; height: number }) {
+  const sc = scrollContainerRef.value, el = stageRef.value, media = selectedMedia.value
+  if (!box || !sc || !el || pointerActive || pan) return
+  cancelPendingPauseView()
+  const w = media?.width || 1, h = media?.height || 1, crop = 400 * Math.max(w, h) / 4096 // ±200 px at 4K
+  const spanX = Math.max(3 * box.width / 100, crop / w), spanY = Math.max(3 * box.height / 100, crop / h)
+  const target = Math.min(4, Math.max(1, +Math.min(size.value.w / (spanX * base.value.w), size.value.h / (spanY * base.value.h)).toFixed(2)))
+  if (Math.abs(target - zoom.value) > .005) {
+    pauseStageMargins.value = null
+    if (target > zoom.value) zoomIn(target - zoom.value); else zoomOut(zoom.value - target)
+    await nextTick()
+  }
+  const r = el.getBoundingClientRect(), vp = sc.getBoundingClientRect()
+  const left = sc.scrollLeft + r.left + (box.x + box.width / 2) / 100 * r.width - vp.left - sc.clientWidth / 2
+  const top = sc.scrollTop + r.top + (box.y + box.height / 2) / 100 * r.height - vp.top - sc.clientHeight / 2
+  sc.scrollTo({ left, top, behavior: motionAllowed.value ? 'smooth' : 'auto' })
 }
 async function confirmUnknownEmpty() {
   const frame = firstUnknownFrame.value, round = reviewRound.value, mediaId = reviewMediaId.value
