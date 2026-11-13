@@ -77,15 +77,11 @@ request('/api/annotation/annotations/manual','POST',{'mediaId':media,'mediaName'
 assert request('/api/annotation/media/'+media)['total'] == 2
 request('/api/track/workspace/'+media,'PUT',{'manualAnnotations':objects})
 review = '/api/annotation-review/media/'+media
-current = request(review+'/start','POST')
-rid = current['review']['reviewId']
-assert current['status'] == 'open' and current['review']['total'] > 0
-for start, end in current['review']['frames']:
-    for frame in range(start, end + 1):
-        # Frames with boxes are confirmed; frames without any annotation are confirmed empty.
-        result = 'ok' if any(o['frameIndex'] == frame for o in objects) else 'empty'
-        request(review+'/frames/'+str(frame),'PUT',{'reviewId':rid,'result':result})
-assert request(review+'/pass','POST',{'reviewId':rid})['status'] == 'passed'
+round_ref = {'reviewId': request(review+'/start','POST')['review']['reviewId']}
+# Both fixture frames contain the same annotated target.
+request(review+'/targets/1','PUT',{**round_ref,'result':'tail'})
+request(review+'/playthrough','POST',round_ref)
+assert request(review+'/pass','POST',round_ref)['status'] == 'passed'
 preview = request('/api/datasets/annotations/'+media+'/preview')
 final = request('/api/datasets/annotations/'+media+'/snapshot','POST',{'expectedSourceRevision':preview['sourceRevision'],'confirmComplete':True,'explicitEmptyFrameRanges':[]})['finalVersionId']
 job = request('/api/datasets/exports','POST',{'finalVersionIds':[final],'format':'yolo','splitRatio':0.5})

@@ -6,6 +6,10 @@ import MediaLibrary from '../components/MediaLibrary.vue'
 import { importRunning, prepareImport } from '../stores/importQueue'
 import { reviewFilterKey } from '../stores/annotationReview'
 import AnnotationReviewPanel from '../components/AnnotationReviewPanel.vue'
+import TargetReviewCard from '../components/TargetReviewCard.vue'
+import { buildQueue, nextOpen, type QueueEntry, type TargetFlag } from '../annotation/targetQueue'
+import type { TargetResult } from '../api/annotationReviewApi'
+import { readFrame } from '../stores/workspace/frames'
 import AppNotice from '../components/AppNotice.vue'
 import { useNoticeCollapse } from '../annotation/useNoticeCollapse'
 import { TOAST_DURATION } from '../annotation/notices'
@@ -18,9 +22,10 @@ import TrackingProgress from '../components/TrackingProgress.vue'
 import AppIcon from '../components/AppIcon.vue'
 import AnnotationOverlay from '../components/AnnotationOverlay.vue'
 import AnnotationTrackingFeedback from '../components/AnnotationTrackingFeedback.vue'
-import UserGuide from '../components/UserGuide.vue'
-import userGuide from '../help/user-guide.md?raw'
+import ToolButton from '../components/ToolButton.vue'
+import { helpOpen as help, openHelp } from '../help/guide'
 import { revealBoxScroll } from '../annotation/geometry'
+import { openHints, planBlocks, type ScanBlock } from '../annotation/scanBlocks'
 import { useAuth } from '../stores/auth'
 import { useWorkspace } from '../stores/workspace'
 import { addLeaveGuard, useRouter } from '../router'
@@ -28,9 +33,11 @@ import { useAnnotationReview } from '../stores/annotationReview'
 import type { MergeChoice, MergeEntry } from '../annotation/workspaceWrites'
 import '../annotation/annotation.css'
 import '../annotation/annotation-shell.css'
+import { completionFresh, currentCompletion, runCompletion, splitTrack, cancelExtend, checkFrames, currentCheckFrame, currentPrelabel, extendBusy, markFrameScanned, nextUnscannedFrame, prelabelErrors, reprelabelBusy, reprelabelCurrent, retryPrelabel, scanBusy, scanComplete, scannedCount } from '../stores/workspace/prelabel'
+import { enhancedView, isObjectDeleted, trackingResultState } from '../stores/workspace/state'
 const {
   collaborationConflict, collaborationBusy, resolveCollaboration, syncWorkspace, downloadWorkspaceBackup, currentRemoteTracking, lastEditors, discardLocalDraft, storageWarning, headBoxBusy, headBoxError, cancelHeadBox, mediaAssets, selectedMediaId, submissionBusy, mediaImportBusy, importError, duplicateImport, reimportSaving, cancelDuplicateImport, confirmDuplicateImport, restoreImportIntent, activeTool, selectedObjectId, currentFrame, currentTime, frameInput, isPlaying,
-  refreshLibrary, isAiBusy, statusMessage, toast, dismissToast, imageRef, videoRef, exactFrameImageRef, exactFrameUrl, exactFrameLoading, videoPlaybackFallback, annotationHitRef, fileInputRef, videoInputRef, packageInputRef, packageImportReport, importPackage,
+  refreshLibrary, isAiBusy, statusMessage, toast, showToast, dismissToast, imageRef, videoRef, exactFrameImageRef, exactFrameUrl, exactFrameLoading, videoPlaybackFallback, annotationHitRef, fileInputRef, videoInputRef, packageInputRef, packageImportReport, importPackage,
   annotationsByMedia, selectedMedia, isVideo, maxFrameIndex, currentMediaId, currentObjects, selectedObject, displayObjects, editingBlocked, workspaceRestoring,
   anomalyFrames, pausedAnomalies, trackingPausedFrame, formatTime, selectTool, onStageClick, tempBbox, onBboxDown, onBboxMove, onBboxUp,
   selectObject, removeObject, undo, redo, canUndo, canRedo, copyPreviousFrame, brightness, contrast, mediaFilterStyle, resetMediaFilter, annotatedFrameCount,
@@ -50,7 +57,6 @@ const props = withDefaults(defineProps<{ mode?: 'annotate' | 'review' }>(), { mo
 const reviewing = computed(() => props.mode === 'review')
 const router = useRouter()
 const review = useAnnotationReview()
-const reviewPanel = ref<InstanceType<typeof AnnotationReviewPanel> | null>(null)
 const reviewMediaId = computed(() => selectedMedia.value?.type === 'video' ? selectedMedia.value?.serverMediaId ?? null : null)
 const mergeChoices=ref<Record<string,MergeChoice>>({})
 watch(collaborationConflict,()=>{mergeChoices.value={} })
@@ -82,19 +88,144 @@ let collaborationTimer: ReturnType<typeof setInterval>|null=null
 // Refresh the review checklist only when the sync actually brought in someone else's change.
 onMounted(()=>{collaborationTimer=setInterval(async()=>{if(pointerActive||pan||review.busy.value)return;const id=reviewMediaId.value;const changed=await syncWorkspace();if(changed===true&&reviewing.value&&id&&id===reviewMediaId.value&&!review.busy.value)void review.load(id)},5000)})
 onUnmounted(()=>{if(collaborationTimer)clearInterval(collaborationTimer)})
-const reviewFrames = computed(() => {
-  const todo = new Set<number>(), done = new Set<number>()
-  for (const frame of review.targetFrames.value) (review.checkedFrames.value.has(frame) ? done : todo).add(frame)
-  return { todo, done }
+// Review by target (decision 0006): a queue of whole tracks shown as cards over the canvas.
+const reviewView = ref<'cards' | 'canvas'>('cards')
+const reviewRound = computed(() => review.state.value?.status === 'open' ? review.state.value.review : null)
+const targetFlags = computed(() => Object.fromEntries((currentPrelabel.value?.tracks ?? []).map(t => [t.objectId, t.flags as TargetFlag[]])) as Record<number, TargetFlag[]>)
+const manualTargets = computed(() => {
+  const ai = new Set<number>(), all = new Set<number>()
+  for (const o of annotationsByMedia.value[currentMediaId.value] ?? []) { if (o.objectId == null) continue; all.add(o.objectId); if (o.source !== 'manual') ai.add(o.objectId) }
+  return new Set([...all].filter(id => !ai.has(id)))
 })
-const flushWorkspace = () => persistWorkspaceState(currentMediaId.value, true)
-// A frame can be confirmed only once it is actually on screen and editable.
-const reviewFrameReady = computed(() => !exactFrameLoading.value && !frameError.value && !workspaceRestoring.value && !isAiBusy.value)
-function seekReviewFrame(frame: number) {
-  if (!reviewing.value || isAiBusy.value || pointerActive || pan) return
-  void seekFrame(frame)
+const targetFrames = computed(() => {
+  const out: Record<number, number[]> = {}
+  for (const o of annotationsByMedia.value[currentMediaId.value] ?? []) if (o.objectId != null) (out[o.objectId] ??= []).push(o.frameIndex ?? 0)
+  return out
+})
+const reviewQueue = computed<QueueEntry[]>(() => reviewRound.value ? buildQueue(reviewRound.value.targets ?? [], targetFlags.value, manualTargets.value, targetFrames.value) : [])
+const queueIndex = ref(0)
+const answeredEntry = (entry: QueueEntry) => {
+  const round = reviewRound.value
+  if (!round) return true
+  if (entry.repeat) return !!round.repeats?.[entry.objectId] || round.results?.[entry.objectId] === 'no'
+  return !!round.results?.[entry.objectId] && !(round.changedTargets ?? []).includes(entry.objectId)
 }
-watch(reviewMediaId, id => { void review.load(id) }, { immediate: true })
+const openCards = computed(() => reviewQueue.value.filter(e => !answeredEntry(e)).length)
+// What the reviewer is told is left: targets only, so the hidden repeat card is never announced.
+const openTargets = computed(() => reviewQueue.value.filter(e => !e.repeat && !answeredEntry(e)).length)
+watch(() => reviewRound.value?.reviewId, () => { queueIndex.value = Math.max(0, nextOpen(reviewQueue.value, answeredEntry, -1)) })
+const currentEntry = computed(() => reviewQueue.value[queueIndex.value] ?? null)
+const entryBoxes = computed(() => {
+  const out = new Map<number, [number, number, number, number]>(), entry = currentEntry.value, media = selectedMedia.value
+  if (!entry || !media?.width || !media.height) return out
+  for (const o of annotationsByMedia.value[currentMediaId.value] ?? []) {
+    if (o.objectId !== entry.objectId || !o.bbox) continue
+    const b = o.bbox, w = media.width, h = media.height
+    out.set(o.frameIndex ?? 0, [b.x / 100 * w, b.y / 100 * h, (b.x + b.width) / 100 * w, (b.y + b.height) / 100 * h])
+  }
+  return out
+})
+// Frames inside the target with no box that nobody deleted on purpose: completion found nothing there.
+const entryMissing = computed(() => {
+  const frames = [...entryBoxes.value.keys()].sort((a, b) => a - b), entry = currentEntry.value, out: number[] = []
+  if (!entry || frames.length < 2) return out
+  for (let f = frames[0] + 1; f < frames[frames.length - 1]; f++) if (!entryBoxes.value.has(f) && !isObjectDeleted(currentMediaId.value, entry.objectId, f)) out.push(f)
+  return out
+})
+const cardFrameReader = computed(() => { const id = selectedMedia.value?.serverMediaId, enhanced = enhancedView.value; return (fi: number) => readFrame(id!, fi, enhanced) })
+const cardVisible = computed(() => reviewing.value && reviewView.value === 'cards' && !!selectedMedia.value?.serverMediaId)
+const reviewEnd = computed<'start' | 'unknown' | 'playthrough' | 'ready' | 'passed' | null>(() => {
+  const state = review.state.value
+  if (!state) return null
+  if (state.status === 'passed') return 'passed'
+  if (state.status !== 'open') return 'start'
+  if (openCards.value) return null
+  const round = state.review!
+  const empty = new Set((round.emptyFrames ?? []).flatMap(([a, b]) => Array.from({ length: b - a + 1 }, (_, i) => a + i)))
+  if ((round.unknownFrames ?? []).some(([a, b]) => Array.from({ length: b - a + 1 }, (_, i) => a + i).some(f => !empty.has(f)))) return 'unknown'
+  return round.playthroughAt ? 'ready' : 'playthrough'
+})
+const firstUnknownFrame = computed(() => {
+  const round = reviewRound.value
+  if (!round) return null
+  const empty = new Set((round.emptyFrames ?? []).flatMap(([a, b]) => Array.from({ length: b - a + 1 }, (_, i) => a + i)))
+  for (const [a, b] of round.unknownFrames ?? []) for (let f = a; f <= b; f++) if (!empty.has(f)) return f
+  return null
+})
+const cardBusy = ref(false)
+const reviewCard = ref<InstanceType<typeof TargetReviewCard> | null>(null)
+const flushWorkspace = () => persistWorkspaceState(currentMediaId.value, true)
+async function answerCard(result: TargetResult) {
+  const entry = currentEntry.value, round = reviewRound.value, mediaId = reviewMediaId.value
+  if (!entry || !round || !mediaId || cardBusy.value || editingBlocked.value) return
+  cardBusy.value = true
+  try {
+    await flushWorkspace()
+    const ok = await review.checkTarget(mediaId, round.reviewId, entry.objectId, result, entry.repeat)
+    if (!ok) return
+    if (result === 'no' && !entry.repeat) {
+      if (!await removeObjectAcrossVideo(entry.objectId)) { showToast('判定已记录，但删除这条轨迹没成功，请在画面中删除', 'error'); return }
+      await flushWorkspace(); await review.load(mediaId)
+    }
+    const next = nextOpen(reviewQueue.value, answeredEntry, queueIndex.value)
+    if (next >= 0) queueIndex.value = next
+  } finally { cardBusy.value = false }
+}
+async function splitCard(frame: number) {
+  const entry = currentEntry.value, mediaId = reviewMediaId.value
+  if (!entry || !mediaId || cardBusy.value) return
+  const created = splitTrack(entry.objectId, frame)
+  if (created == null) { showToast('这一帧不能分开，请选中间的某一帧', 'info'); return }
+  cardBusy.value = true
+  try { await flushWorkspace(); await review.load(mediaId); showToast(`已从第 ${frame + 1} 帧分开，后半段排在后面确认`, 'success') }
+  finally { cardBusy.value = false }
+}
+function prevCard() { if (queueIndex.value > 0) queueIndex.value-- }
+/** Next card still to answer, without answering this one. */
+function skipCard() { const next = nextOpen(reviewQueue.value, answeredEntry, queueIndex.value); if (next >= 0 && next !== queueIndex.value) queueIndex.value = next }
+// Review toolbar: cards need no editing tools; the picture view adds a way back to the card's target.
+const cardTools = computed(() => cardVisible.value && !!reviewRound.value)
+async function locateTarget() {
+  const frames = [...entryBoxes.value.keys()].sort((a, b) => a - b)
+  if (!frames.length) return
+  await fixInCanvas(entryBoxes.value.has(currentFrame.value) ? currentFrame.value : frames[Math.floor(frames.length / 2)])
+}
+function jumpTarget(objectId: number) {
+  const i = reviewQueue.value.findIndex(e => e.objectId === objectId && !e.repeat)
+  if (i >= 0) { queueIndex.value = i; reviewView.value = 'cards' }
+}
+async function fixInCanvas(frame: number) {
+  const entry = currentEntry.value
+  reviewView.value = 'canvas'
+  await seekFrame(frame)
+  const target = currentObjects.value.find(o => o.objectId === entry?.objectId)
+  if (target) selectObject(target.id)
+}
+async function confirmUnknownEmpty() {
+  const frame = firstUnknownFrame.value, round = reviewRound.value, mediaId = reviewMediaId.value
+  if (frame == null || !round || !mediaId) return
+  await flushWorkspace(); await review.check(mediaId, round.reviewId, frame, 'empty')
+}
+// The last step: one playthrough of the whole video, recorded once it reaches the end.
+const playthroughRunning = ref(false)
+async function startPlaythrough() {
+  reviewView.value = 'canvas'; playthroughRunning.value = true
+  // The whole frame, whatever zoom the scan or a fix left behind: this pass is for what was missed anywhere.
+  await nextTick(); fitView()
+  await seekFrame(0); await togglePlayback()
+}
+// Block zoom belongs to the scan: once every check frame is done, or on the way into review, show the whole frame.
+watch(() => [scanComplete.value, reviewing.value] as const, ([done, inReview], [wasDone, wasInReview]) => {
+  if ((done && !wasDone) || (inReview && !wasInReview)) void nextTick(() => fitView())
+})
+watch(isPlaying, async playing => {
+  if (playing || !playthroughRunning.value) return
+  playthroughRunning.value = false
+  const round = reviewRound.value, mediaId = reviewMediaId.value
+  if (currentFrame.value < maxFrameIndex.value || !round || !mediaId) { showToast('没有播完，可以再播一遍', 'info'); return }
+  if (await review.playthrough(mediaId, round.reviewId)) { reviewView.value = 'cards'; showToast('已看完全片', 'success') }
+})
+watch(reviewMediaId, id => { void review.load(id); reviewView.value = 'cards'; queueIndex.value = 0 }, { immediate: true })
 const pictureEnters = ref(true)
 watch(selectedMediaId, () => { pictureEnters.value = true })
 watch(isPlaying, playing => { if (playing) pictureEnters.value = false })
@@ -133,7 +264,7 @@ const importDialog=ref<HTMLElement|null>(null)
 watch(duplicateImport,async value=>{if(value){await nextTick();importDialog.value?.querySelector<HTMLElement>('button:not(:disabled)')?.focus()}})
 function importDialogKeys(e:KeyboardEvent){if(e.key==='Escape'){e.preventDefault();cancelDuplicateImport()}if(e.key==='Tab'){const nodes=Array.from(importDialog.value?.querySelectorAll<HTMLElement>('button:not(:disabled)')||[]);if(nodes.length){e.preventDefault();const i=nodes.indexOf(document.activeElement as HTMLElement);nodes[(i+(e.shiftKey?-1:1)+nodes.length)%nodes.length]?.focus()}}}
 const scrollContainerRef = ref<HTMLDivElement | null>(null), stageRef = ref<HTMLDivElement | null>(null), loupe = ref<HTMLCanvasElement | null>(null)
-const help = ref(false), helpDialog = ref<HTMLElement | null>(null), focused = ref(false), labels = ref(false), hiddenBoxes = ref(false), magnifier = ref(false), inverted = ref(false), enhancing = ref(false), spaceHeld = ref(false)
+const focused = ref(false), labels = ref(false), hiddenBoxes = ref(false), magnifier = ref(false), spaceHeld = ref(false)
 // Switching or importing videos stays possible while the current video tracks.
 const libraryBusy = computed(() => submissionBusy.value || mediaImportBusy.value || !!duplicateImport.value || !!deletingMediaId.value || objectDeletionBusy.value || trackingFeedbackBusy.value || trackingRestartBusy.value || !!trackingRestartPendingAction.value || !!objectDeletionPendingAction.value || trackingFeedbackPending.value)
 const mediaBusy = computed(() => submissionBusy.value || mediaImportBusy.value || !!duplicateImport.value || isAiBusy.value || !!deletingMediaId.value || objectDeletionBusy.value || trackingFeedbackBusy.value || trackingRestartBusy.value || !!trackingRestartPendingAction.value || !!objectDeletionPendingAction.value || trackingFeedbackPending.value)
@@ -155,23 +286,85 @@ const frameStats = computed(() => {
 const anomalyFrameSet = computed(() => new Set(anomalyFrames.value.map(item => item.frame_index)))
 const frameKind = (frame: number) => { const s = frameStats.value.get(frame); return s?.manual ? 'manual' : s?.ai ? 'ai' : 'empty' }
 const frameFlags = (frame: number) => reviewing.value
-  ? [reviewFrames.value.todo.has(frame) ? 'review-todo' : reviewFrames.value.done.has(frame) ? 'review-done' : '']
-  : [anomalyFrameSet.value.has(frame) ? 'anomaly' : '', trackingPausedFrame.value === frame ? 'paused' : ''].filter(Boolean)
-const frameTitle = (frame: number) => { const s = frameStats.value.get(frame); const parts = [s?.manual ? `人工 ${s.manual}` : '', s?.ai ? `AI ${s.ai}` : ''].filter(Boolean); return `第 ${frame + 1} 帧 · ${parts.join(' · ') || '无框'}${trackingPausedFrame.value === frame ? ' · 追踪暂停' : anomalyFrameSet.value.has(frame) ? ' · 追踪提示' : ''}` }
-const frameManualCount = computed(() => currentObjects.value.filter(object => object.source === 'manual').length)
-const endpointCount = (frame:number) => (annotationsByMedia.value[currentMediaId.value]||[]).filter(o=>o.source==='manual' && (o.frameIndex??0)===frame && o.bbox).length
-async function requestEndpointTracking() {
-  if(editingBlocked.value || isAiBusy.value || hasPausedTracking.value || !isVideo.value)return
-  pausePlayback();cancelPointer()
-  const head=endpointCount(0),tail=endpointCount(maxFrameIndex.value)
-  if(!head){await seekVideo(0);return}
-  if(window.confirm(`首帧 ${head} 个人工头框；尾帧 ${tail} 个人工头框。\n${tail?'请确认已完整检查首尾两帧。':'请确认尾帧确实没有精子头；缺少尾帧目标的片段仍需审查。'}\n将重新生成整段视频标注，保留人工框并统一匹配对象编号。旧 AI 分支会重建。`)) await runEndpointTrack()
+  ? []
+  : [checkFrameState.value.get(frame) ?? '', anomalyFrameSet.value.has(frame) ? 'anomaly' : '', trackingPausedFrame.value === frame ? 'paused' : ''].filter(Boolean)
+const frameTitle = (frame: number) => { const s = frameStats.value.get(frame); const parts = [s?.manual ? `人工 ${s.manual}` : '', s?.ai ? `AI ${s.ai}` : ''].filter(Boolean); const check = checkFrameState.value.get(frame); return `第 ${frame + 1} 帧 · ${parts.join(' · ') || '无框'}${check ? (check === 'check-done' ? ' · 已查漏' : ' · 要查漏') : ''}${trackingPausedFrame.value === frame ? ' · 追踪暂停' : anomalyFrameSet.value.has(frame) ? ' · 追踪提示' : ''}` }
+// Frames the annotator scans for heads the detector missed, marked on the frame strip.
+const checkFrameState = computed(() => new Map(checkFrames.value.map(item => [item.frame, item.scannedAt ? 'check-done' : 'check'])))
+const prelabelError = computed(() => prelabelErrors.value[currentMediaId.value] || '')
+const legacyResult = computed(() => isVideo.value && trackingResultState.value[currentMediaId.value] === 'available' && currentPrelabel.value?.state === 'none')
+const reprelabelConfirm = ref(false)
+watch(currentMediaId, () => { reprelabelConfirm.value = false })
+const prelabelRunning = computed(() => currentTrackingProgress.value?.steps[0]?.key === 'detect')
+async function finishScan() {
+  if (!currentCheckFrame.value || currentCheckFrame.value.scannedAt || scanBusy.value || editingBlocked.value) return
+  await flushWorkspace().catch(() => undefined)
+  const id = currentMediaId.value
+  const next = await markFrameScanned()
+  if (next != null) await seekFrame(next)
+  else if (scanComplete.value && id === currentMediaId.value) void runCompletion(id)
 }
+// Every way into review from here first fills what it can next to confirmed boxes.
+const completionRunning = computed(() => currentCompletion.value?.state === 'running')
+async function goReview() {
+  const id = currentMediaId.value
+  if (isVideo.value && selectedMedia.value?.serverMediaId && !completionFresh(id)) {
+    if (!(await runCompletion(id))) return
+  }
+  if (id === currentMediaId.value) router.push('/review')
+}
+function goNextCheck() { if (nextUnscannedFrame.value != null) void seekFrame(nextUnscannedFrame.value) }
+const frameManualCount = computed(() => currentObjects.value.filter(object => object.source === 'manual').length)
 const frameAiCount = computed(() => currentObjects.value.length - frameManualCount.value)
-const minimapSource = computed(() => isVideo.value ? (exactFrameUrl.value && !isPlaying.value ? exactFrameImageRef.value : videoRef.value) : imageRef.value)
+const minimapSource = computed(() => isVideo.value ? (exactFrameUrl.value && (!isPlaying.value || enhancedView.value) ? exactFrameImageRef.value : videoRef.value) : imageRef.value)
 async function seekFrame(frame: number) { if (isAiBusy.value) return; frameInput.value = frame; await seekToInputFrame() }
 const size = ref({ w: 0, h: 0 }), base = ref({ w: 800, h: 450 })
 const mousePixel = ref<{ x: number; y: number } | null>(null)
+// Check frames are looked at block by block: the view jumps to each overlapping block in a
+// snake order, Enter moves on, the last Enter records the frame as scanned.
+const scanning = computed(() => isVideo.value && !reviewing.value && !!currentCheckFrame.value && !currentCheckFrame.value.scannedAt)
+const scanBlocks = computed<ScanBlock[]>(() => scanning.value ? planBlocks(selectedMedia.value?.width || 0, selectedMedia.value?.height || 0, size.value.w, size.value.h) : [])
+const blockIndex = ref(0)
+const blockCols = computed(() => Math.max(1, ...scanBlocks.value.map(b => b.col + 1)))
+const blockCells = computed(() => scanBlocks.value.map((b, i) => ({ ...b, i })).sort((a, b) => a.row - b.row || a.col - b.col))
+const lastBlock = computed(() => scanBlocks.value.length <= 1 || blockIndex.value >= scanBlocks.value.length - 1)
+async function showBlock(i: number, smooth = true) {
+  const b = scanBlocks.value[i], sc = scrollContainerRef.value, el = stageRef.value
+  if (!b || !sc || !el || pointerActive || pan) return
+  blockIndex.value = i
+  cancelPendingPauseView()
+  // The stage may still have the shape of a frame size not known yet: fit it to this video first.
+  const media = selectedMedia.value
+  if (media?.width && media.height && Math.abs(base.value.w / base.value.h - media.width / media.height) > .01) { fit(); await nextTick() }
+  const target = Math.min(10, Math.max(.25, +Math.min(size.value.w / ((b.x1 - b.x0) * base.value.w), size.value.h / ((b.y1 - b.y0) * base.value.h)).toFixed(2)))
+  if (Math.abs(target - zoom.value) > .005) {
+    pauseStageMargins.value = null
+    if (target > zoom.value) zoomIn(target - zoom.value); else zoomOut(zoom.value - target)
+    await nextTick()
+  }
+  const r = el.getBoundingClientRect(), vp = sc.getBoundingClientRect()
+  const left = sc.scrollLeft + r.left + b.x0 * r.width - vp.left - (sc.clientWidth - (b.x1 - b.x0) * r.width) / 2
+  const top = sc.scrollTop + r.top + b.y0 * r.height - vp.top - (sc.clientHeight - (b.y1 - b.y0) * r.height) / 2
+  sc.scrollTo({ left, top, behavior: smooth && motionAllowed.value ? 'smooth' : 'auto' })
+}
+async function scanNext() {
+  if (!lastBlock.value) { await showBlock(blockIndex.value + 1); return }
+  await finishScan()
+}
+// A new check frame starts at its first block; a resized view keeps the block it was on.
+watch(() => `${currentMediaId.value}:${currentFrame.value}:${scanning.value}`, () => { blockIndex.value = 0 })
+watch(() => [currentMediaId.value, currentFrame.value, scanBlocks.value.length, blockCols.value, base.value.w], async () => {
+  if (scanBlocks.value.length < 2) return
+  blockIndex.value = Math.min(blockIndex.value, scanBlocks.value.length - 1)
+  await nextTick(); requestAnimationFrame(() => { void showBlock(blockIndex.value, false) })
+})
+const scanHints = computed(() => {
+  const media = selectedMedia.value, hints = scanning.value ? currentCheckFrame.value?.hints ?? [] : []
+  if (!media?.width || !media.height || !hints.length) return []
+  const pct = hints.map(h => [h[0] / media.width! * 100, h[1] / media.height! * 100, h[2] / media.width! * 100, h[3] / media.height! * 100])
+  const boxes = displayObjects.value.filter(o => o.bbox).map(o => [o.bbox!.x, o.bbox!.y, o.bbox!.x + o.bbox!.width, o.bbox!.y + o.bbox!.height])
+  return openHints(pct, boxes, .1)
+})
 const stageSize = computed(() => ({ w: Math.round(base.value.w * zoom.value), h: Math.round(base.value.h * zoom.value) }))
 const stageStyle = computed(() => ({
   width: `${stageSize.value.w}px`, height: `${stageSize.value.h}px`,
@@ -184,14 +377,10 @@ const stageStyle = computed(() => ({
 const pauseStageMargins = ref<{marginLeft:number;marginRight:number;marginTop:number;marginBottom:number} | null>(null)
 // Another video tracking in the background: the closed media drawer shows a pulsing dot.
 const backgroundTracking = computed(() => mediaAssets.value.some(media => media.id !== selectedMediaId.value && isTrackingMedia(media.id)))
-const filter = computed(() => `${mediaFilterStyle.value} ${inverted.value ? 'invert(1)' : ''}`)
+// Display filters were replaced by the server-side enhanced frame; saved brightness/contrast are ignored.
+const filter = computed(() => '')
 const saveLabel = computed(() => workspaceRecoveryRequired.value ? '需重新读取' : selectedMedia.value?.serverMediaId ? ({ idle:'自动保存', saving:'保存中…', saved:'已保存', error:'保存失败' }[saveState.value]) : '本机自动保存')
-// Shortcut help and the full guide share the same maintained Markdown source.
 const jumpFrameInput = ref<HTMLInputElement|null>(null)
-const shortcutSection = userGuide.split(/^## 快捷键速查\s*$/m)[1] || ''
-const shortcutHelpNote = shortcutSection.trim().split(/\n\s*\n/)[0] || ''
-const annotationShortcuts = (shortcutSection.match(/人工标注\s*\n\s*(\| 快捷键[\s\S]*?)(?=\n\s*审查\s*\n)/)?.[1] || '')
-  .trim().split('\n').slice(2).filter(row => row.startsWith('|')).map(row => row.split('|').slice(1,-1).map(cell => cell.trim()))
 const selectedObjectCoverage = computed(() => {
   const id = selectedObject.value?.objectId
   if (id == null) return 0
@@ -392,8 +581,30 @@ function deletionDialogKeys(event:KeyboardEvent) {
 }
 let observer: ResizeObserver | null = null, removeGuard: (()=>void) | null = null, pointerRaf = 0
 let pan: { x:number; y:number; left:number; top:number; id:number } | null = null, suppressClick = false, latestMove: PointerEvent | null = null
-let helpPriorFocus: HTMLElement | null = null
 const focusButton = ref<HTMLButtonElement | null>(null)
+const setFocusButton = (instance: unknown) => { focusButton.value = ((instance as { $el?: HTMLButtonElement } | null)?.$el) ?? null }
+// Labels fold away when the toolbar does not fit; they come back once it does again.
+const toolbarRef = ref<HTMLElement | null>(null), toolbarCompact = ref(false)
+let toolbarObserver: ResizeObserver | null = null, toolbarFull = 0
+function measureToolbar() {
+  const el = toolbarRef.value
+  if (!el) return
+  // A row normally; a column on the left in focus mode, where height is what can run out.
+  const vertical = focused.value
+  const items = Array.from(el.children).filter(child => !(child as HTMLElement).classList.contains('shell-tools-fill')) as HTMLElement[]
+  const style = getComputedStyle(el), gap = parseFloat(vertical ? style.rowGap : style.columnGap) || 0
+  const size = (child: HTMLElement) => vertical ? child.offsetHeight + (parseFloat(getComputedStyle(child).marginTop) || 0) + (parseFloat(getComputedStyle(child).marginBottom) || 0) : child.offsetWidth
+  const pad = vertical ? (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0) : (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0)
+  const needed = items.reduce((sum, child) => sum + size(child), 0) + gap * Math.max(0, items.length - 1) + pad
+  const room = vertical ? el.clientHeight : el.clientWidth
+  if (!toolbarCompact.value && needed > room) { toolbarFull = needed; toolbarCompact.value = true }
+  else if (toolbarCompact.value && room >= toolbarFull + 8) toolbarCompact.value = false
+}
+onMounted(() => { toolbarObserver = new ResizeObserver(measureToolbar); if (toolbarRef.value) toolbarObserver.observe(toolbarRef.value) })
+onUnmounted(() => toolbarObserver?.disconnect())
+const remeasureToolbar = async () => { toolbarCompact.value = false; await nextTick(); measureToolbar() }
+watch(() => [props.mode, focused.value], remeasureToolbar)
+watch(cardTools, remeasureToolbar)
 let pointerActive = false
 let normalView: { mediaId: string; zoom: number; base: {w:number;h:number}; left: number; top: number; pageY: number } | null = null
 let priorOverflow = '', priorHeaderInert = false
@@ -483,6 +694,9 @@ function restorePage() {
   const header = document.querySelector<HTMLElement>('.app-header')
   if (header) header.inert = priorHeaderInert
 }
+// While scanning, Enter means "next block" even if a toolbar button kept keyboard focus from a click
+// (or 退出专注 after pressing F); other buttons, links and fields keep their own Enter.
+const enterForScan = (target: EventTarget | null) => { const hit = (target as HTMLElement | null)?.closest?.('button,a,summary'); return !hit || hit.classList.contains('wb-tool') }
 async function toggleFocus() {
   cancelPointer(); spaceHeld.value = false
   const scroller = scrollContainerRef.value
@@ -515,7 +729,9 @@ async function toggleFocus() {
     window.scrollTo(0, normalView?.pageY || 0)
   }
   if (pausedView) await settlePauseView(pausedView, viewSerial)
-  focusButton.value?.focus({preventScroll:true})
+  // Entering focus: no button keeps keyboard focus, so Enter goes to the scan and not to 退出专注.
+  if (focused.value) (document.activeElement as HTMLElement | null)?.blur?.()
+  else focusButton.value?.focus({preventScroll:true})
 }
 function fit() {
   pauseStageMargins.value=null
@@ -539,6 +755,20 @@ async function zoomAt(steps:number, point?:{x:number;y:number}) {
   const now=el.getBoundingClientRect();scroller.scrollBy(now.left+nx*now.width-p.x,now.top+ny*now.height-p.y)
 }
 function wheel(e:WheelEvent) { if(e.ctrlKey||e.metaKey) { e.preventDefault();void zoomAt(e.deltaY<0?.6:-.6,{x:e.clientX,y:e.clientY}) } }
+// The loupe floats beside the pointer (below-right, flipping near the edges), never parked over a corner of the picture.
+const loupePos = ref({ x: 0, y: 0 })
+function placeLoupe(e: PointerEvent) {
+  const box = stageRef.value?.closest('.annotation-canvas') as HTMLElement | null, el = loupe.value?.parentElement
+  if (!box || !el) return
+  const c = box.getBoundingClientRect(), w = el.offsetWidth || 202, h = el.offsetHeight || 176, gap = 26, edge = 8
+  const bar = box.querySelector('.shell-tools') as HTMLElement | null  // A row on top, or a column on the left in focus mode.
+  const top = (focused.value ? 0 : bar?.offsetHeight ?? 0) + edge, left = (focused.value ? bar?.offsetWidth ?? 0 : 0) + edge
+  const px = e.clientX - c.left, py = e.clientY - c.top
+  let x = px + gap, y = py + gap
+  if (x + w > c.width - edge) x = px - gap - w
+  if (y + h > c.height - edge) y = py - gap - h
+  loupePos.value = { x: Math.max(left, x), y: Math.max(top, y) }
+}
 function drawLoupe(e:PointerEvent) {
   const stage=stageRef.value, media=selectedMedia.value
   if(!stage||!media)return
@@ -547,6 +777,7 @@ function drawLoupe(e:PointerEvent) {
   const w=media.width||1,h=media.height||1
   mousePixel.value={x:Math.min(w-1,Math.floor(nx*w)),y:Math.min(h-1,Math.floor(ny*h))}
   if(!magnifier.value||!loupe.value)return
+  placeLoupe(e)
   const source=isVideo.value ? (exactFrameUrl.value && !isPlaying.value ? exactFrameImageRef.value : videoRef.value) : imageRef.value
   const ctx=loupe.value.getContext('2d');if(!source||!ctx)return
   ctx.fillStyle='#0d1726';ctx.fillRect(0,0,200,150)
@@ -583,18 +814,21 @@ async function retrySave(){
   if(workspaceRecoveryRequired.value){try{await reloadWorkspaceFromServer()}catch(error){saveError.value=(error as Error)?.message||'本机备份未成功，请保持页面打开并导出备份'}return}
   try{await retryWorkspaceSave()}catch{/* The store logs and exposes the failure. */}
 }
-function enhancement(preset:string){if(preset==='原图'){resetMediaFilter();inverted.value=false}else if(preset==='暗场'){brightness.value=150;contrast.value=125}else{brightness.value=100;contrast.value=160}}
 function keys(e:KeyboardEvent){
   if(document.querySelector('[data-user-guide][open], [data-object-delete-dialog][open], [data-reimport-dialog]'))return
 
   if(e.isComposing||e.keyCode===229||document.querySelector('[data-completion-dialog]'))return
-  if(help.value){if(e.key==='Escape'){help.value=false;e.preventDefault()}if(e.key==='Tab'){const nodes=Array.from(helpDialog.value?.querySelectorAll<HTMLElement>('button,input,[tabindex="0"]')||[]);if(nodes.length){e.preventDefault();const i=nodes.indexOf(document.activeElement as HTMLElement);nodes[(i+(e.shiftKey?-1:1)+nodes.length)%nodes.length]?.focus()}}return}
+  if(help.value)return // The help window handles its own keys.
   if((e.target as HTMLElement)?.closest('input,textarea,select,[contenteditable="true"]'))return
   if(reviewing.value&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.repeat){
-    const reviewKey=e.key.toLowerCase()
-    if(reviewKey==='1'){e.preventDefault();reviewPanel.value?.confirm();return}
-    if(reviewKey==='n'){e.preventDefault();reviewPanel.value?.next();return}
+    if(e.key==='Tab'&&reviewRound.value){e.preventDefault();reviewView.value=reviewView.value==='cards'?'canvas':'cards';return}
+    if(cardVisible.value&&currentEntry.value&&!reviewEnd.value){
+      if(reviewCard.value?.key(e.key)){e.preventDefault();return}
+      if(e.key==='ArrowLeft'){e.preventDefault();prevCard();return}
+      if(e.key==='ArrowRight'){e.preventDefault();return}
+    }
   }
+  if(!reviewing.value&&e.key==='Enter'&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.repeat&&currentCheckFrame.value&&!currentCheckFrame.value.scannedAt&&enterForScan(e.target)){e.preventDefault();void scanNext();return}
   if(e.key==='Escape'){e.preventDefault();if(pointerActive||pan){cancelPointer();return}if(focused.value){void toggleFocus();return}cancelPointer();hiddenBoxes.value=false;clearSelection();return}
   if(e.key.toLowerCase()==='f'&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.repeat){e.preventDefault();void toggleFocus();return}
   if(mediaBusy.value||workspaceRestoring.value)return
@@ -605,24 +839,24 @@ function keys(e:KeyboardEvent){
   const key=e.key.toLowerCase()
   if(key==='arrowleft'||key==='arrowright'){e.preventDefault();void seekByFrame((key==='arrowleft'?-1:1)*(e.shiftKey?10:1))}
   else if(key==='delete'||key==='backspace'){if(selectedObject.value){e.preventDefault();deleteSelectedFrame()}}
-  else if(key==='v'||key==='b')selectTool(key==='v'?'select':'bbox')
+  else if(key==='v'||key==='b')selectTool(key==='v'?'select':'smart')
   else if(key==='m')libraryOpen.value=!libraryOpen.value
   else if(key==='h')hiddenBoxes.value=!hiddenBoxes.value
   else if(key==='l')magnifier.value=!magnifier.value
+  else if(key==='e')enhancedView.value=!enhancedView.value
   else if(key==='k'){e.preventDefault();void togglePlayback()}
   else if(key==='g'){e.preventDefault();jumpFrameInput.value?.focus();jumpFrameInput.value?.select()}
   else if(canvasZoomKey(e)==='in'){e.preventDefault();void zoomAt(1)}
   else if(canvasZoomKey(e)==='out'){e.preventDefault();void zoomAt(-1)}
   else if(canvasZoomKey(e)==='fit'){e.preventDefault();fitView()}
-  else if(key==='?'){e.preventDefault();help.value=true}
+  else if(key==='?'){e.preventDefault();openHelp()}
 }
 function keyup(e:KeyboardEvent){if(e.key===' ')spaceHeld.value=false}
 function blur(){spaceHeld.value=false;cancelPointer()}
 function beforeUnload(e:BeforeUnloadEvent){if(importRunning.value||mediaImportBusy.value||duplicateImport.value||saveState.value==='saving'||saveState.value==='error'||objectDeletionBusy.value||trackingFeedbackBusy.value||trackingRestartBusy.value||trackingRestartPendingAction.value||objectDeletionPendingAction.value||trackingFeedbackPending.value){e.preventDefault();e.returnValue=''}}
 watch(trackingRestartPendingAction,(value,previous)=>{if(!value&&previous&&restartDialogOpen.value)closeRestartDialog()})
-watch(help,async value=>{if(value){helpPriorFocus=document.activeElement as HTMLElement;await nextTick();helpDialog.value?.querySelector<HTMLElement>('button')?.focus()}else helpPriorFocus?.focus()})
 // Single-class head boxes: the point tool and per-object names are no longer offered.
-watch(activeTool,tool=>{if(tool==='point')selectTool('bbox')},{immediate:true})
+watch(activeTool,tool=>{if(tool==='point'||tool==='bbox'||tool==='head')selectTool('smart')},{immediate:true})
 watch(selectedObjectId,()=>{if(!trackingFeedbackPending.value&&selectedObject.value?.objectId!=null){feedbackTargetId.value=selectedObject.value.objectId;if(!applyingFeedbackSelection)feedbackSelectionRequest.value=null}},{flush:'sync'})
 watch(()=>feedbackTarget.value?.objectId,()=>{if(!trackingFeedbackPending.value)learnNormalMotion.value=true})
 watch(trackingPausedFrame,()=>{feedbackTargetId.value=null;if(!trackingFeedbackPending.value)learnNormalMotion.value=true})
@@ -647,7 +881,7 @@ onMounted(()=>{
   observer=new ResizeObserver(()=>{const scroller=scrollContainerRef.value;if(scroller)size.value={w:scroller.clientWidth,h:scroller.clientHeight};if(zoom.value===1 && !pauseResizeLocked)fit()})
   if(scrollContainerRef.value)observer.observe(scrollContainerRef.value)
   window.addEventListener('keydown',keys);window.addEventListener('keyup',keyup);window.addEventListener('blur',blur);window.addEventListener('beforeunload',beforeUnload)
-  removeGuard=addLeaveGuard(async()=>{if(mediaBusy.value)return false;cancelHeadBox();cancelPointer();pausePlayback();try{await persistWorkspaceState(currentMediaId.value,true);return true}catch{return false}})
+  removeGuard=addLeaveGuard(async()=>{if(mediaBusy.value)return false;cancelHeadBox();cancelExtend();cancelPointer();pausePlayback();try{await persistWorkspaceState(currentMediaId.value,true);return true}catch{return false}})
   if(selectedMedia.value)void resetAnnotationViewForMedia(selectedMediaId.value)
   void review.loadSummary()
 })
@@ -658,6 +892,7 @@ const {noticeOpen,collapse,expandNotices,collapsedCount}=useNoticeCollapse(compu
   restart:trackingRestartError.value&&!restartDialogOpen.value?`restart|${trackingRestartError.value}`:'',
   deletion:objectDeletionError.value&&!deletionDialogOpen.value?`deletion|${objectDeletionError.value}`:'',
 })))
+watch(collapsedCount, remeasureToolbar)
 // A failed head click loses nothing and can simply be clicked again, so its message expires.
 let headErrorTimer:ReturnType<typeof setTimeout>|null=null
 watch(headBoxError,message=>{if(headErrorTimer)clearTimeout(headErrorTimer);headErrorTimer=message?setTimeout(()=>{headBoxError.value=''},TOAST_DURATION.error):null})
@@ -681,18 +916,32 @@ onUnmounted(()=>{if(reviewRefresh)clearTimeout(reviewRefresh);cancelHeadBox();ca
     </div></Teleport>
     <WorkbenchShell name="annotate" :focused="focused" :focus-keeps-inspector="reviewing || !!collaborationConflict" drawer-label="素材库" :drawer-count="mediaAssets.length" :drawer-forced="!selectedMedia" :drawer-busy="backgroundTracking||importRunning" v-model:drawer-open="libraryOpen" :inspector-forced="showPauseFeedback || !!collaborationConflict" :inspector-badge="currentObjects.length">
       <template #context="{ inspectorVisible }"><span class="annot-context" :class="{'is-tracking':(!inspectorVisible||reviewing)&&(currentTrackingProgress||currentTrackingFinished)}" data-testid="annotation-stage-status" aria-label="标注工作区状态">
-        <strong :title="selectedMedia?.name">{{ selectedMedia?.name || (reviewing?'选择视频开始审查':'选择素材开始标注') }}</strong>
-        <span v-if="isVideo" class="shell-meta">第 {{ currentFrame+1 }} / {{ maxFrameIndex+1 }} 帧 · {{ annotatedFrameCount }} 帧有框</span>
-        <span class="save-indicator" :class="saveState" role="status"><i />{{ saveLabel }}</span>
+        <span class="ctx-file">
+          <AppIcon v-if="selectedMedia" class="ctx-file-icon" :name="isVideo?'film':'image'" :size="16" />
+          <strong :title="selectedMedia?.name">{{ selectedMedia?.name || (reviewing?'选择视频开始审查':'选择素材开始标注') }}</strong>
+          <span class="save-indicator" :class="saveState" role="status" :title="saveLabel"><i /><span>{{ saveLabel }}</span></span>
+        </span>
+        <span v-if="reviewMediaId && review.status.value" class="review-chip" :class="review.status.value" title="这段视频的审查进度，不是当前页面的模式"><small>本视频</small><span data-testid="header-review-status">{{ review.label(reviewMediaId,review.status.value) }}</span></span>
         <!-- The AI card already shows the full bar; the header carries it only when that card is off screen. -->
         <TrackingProgress v-if="!inspectorVisible || reviewing" variant="compact" :view="currentTrackingProgress" :finished="currentTrackingFinished" />
-        <button class="icon-button" title="快捷键 (?)" aria-label="快捷键" @click="help=true"><AppIcon name="keyboard" :size="17" /></button>
-        <span v-if="reviewMediaId && review.status.value" class="review-chip" :class="review.status.value" title="这段视频的审查进度，不是当前页面的模式"><small>本视频</small><span data-testid="header-review-status">{{ review.label(reviewMediaId,review.status.value) }}</span></span>
-        <button v-if="!reviewing && reviewMediaId && review.status.value!=='passed'" class="btn-secondary" data-testid="go-review" @click="router.push('/review')">去审查</button>
-        <button v-if="reviewing" class="quiet-button" @click="router.push('/annotate')">回到标注</button>
-        <AnnotationDatasetExport />
-        <template v-if="focused && isVideo && !reviewing"><button class="quiet-button" :disabled="editingBlocked||isAiBusy" @click="seekVideo(0)">首帧</button><button class="quiet-button" :disabled="editingBlocked||isAiBusy" @click="seekVideo(frameToTime(maxFrameIndex))">尾帧</button><button class="quiet-button" :disabled="editingBlocked||isAiBusy||hasPausedTracking||maxFrameIndex<1||!endpointCount(0)" @click="requestEndpointTracking">首尾双向追踪</button></template>
-        <template v-if="focused"><UserGuide :page="reviewing?'/review':'/annotate'" /></template>
+        <span class="ctx-actions">
+          <!-- Focus mode: the minimap shrinks to a thumbnail in this bar instead of covering the picture. -->
+          <AnnotationMinimap v-if="focused && selectedMedia && minimapOn && !reviewing" class="focus-map" docked :width="50" :source="minimapSource" :scroller="scrollContainerRef" :stage="stageRef" :media-width="selectedMedia.width||4" :media-height="selectedMedia.height||3" :redraw-key="`${currentMediaId}:${currentFrame}:${exactFrameUrl}:${stageSize.w}`" />
+          <!-- Focus mode hides the task card: the same scan step, compact, so the flow is unchanged. -->
+          <template v-if="focused && isVideo && !reviewing && checkFrames.length">
+            <span v-if="!scanComplete" class="focus-scan" data-testid="focus-scan">
+              <span class="shell-meta">查漏 第 {{ (checkFrames.findIndex(item => item.frame === currentFrame) + 1) || (scannedCount + 1) }} / {{ checkFrames.length }} 张<template v-if="scanBlocks.length > 1"> · 第 {{ blockIndex + 1 }} / {{ scanBlocks.length }} 块</template></span>
+              <span v-if="scanBlocks.length > 1" class="scan-grid mini" :style="{ '--cols': blockCols }" aria-hidden="true"><i v-for="cell in blockCells" :key="cell.i" class="scan-cell" :class="{ done: cell.i < blockIndex, current: cell.i === blockIndex }" /></span>
+              <button v-if="currentCheckFrame && !currentCheckFrame.scannedAt" class="btn-primary" :disabled="scanBusy||editingBlocked" @click="scanNext">{{ lastBlock ? '这张看完了' : '下一块' }}<kbd>Enter</kbd></button>
+              <button v-else class="btn-secondary" :disabled="isAiBusy" @click="goNextCheck">回到要看的那张</button>
+            </span>
+            <span v-else-if="completionRunning" class="shell-meta">正在补全…</span>
+          </template>
+          <button v-if="!reviewing && reviewMediaId && review.status.value!=='passed' && (!checkFrames.length || scanComplete)" class="btn-secondary ctx-step" data-testid="go-review" :disabled="completionRunning" @click="goReview">{{ completionRunning ? '补全中…' : '提交审查' }}<AppIcon v-if="!completionRunning" name="next" :size="14" /></button>
+          <button v-if="reviewing" class="btn-secondary ctx-step" @click="router.push('/annotate')"><AppIcon name="prev" :size="14" />回到标注</button>
+          <AnnotationDatasetExport />
+          <button v-if="focused" class="header-help" title="使用说明和快捷键 (?)" @click="openHelp"><AppIcon name="help" :size="16" /><span>帮助</span></button>
+        </span>
       </span></template>
       <template #drawer><MediaLibrary :busy="libraryBusy" :reviewing="reviewing" @select="id=>{selectedMediaId=id;libraryOpen=false}" /></template>
       <template #canvas>
@@ -709,46 +958,72 @@ onUnmounted(()=>{if(reviewRefresh)clearTimeout(reviewRefresh);cancelHeadBox();ca
             <AppNotice v-if="mediaDeleteError" key="media-delete" @close="mediaDeleteError=''">{{ mediaDeleteError }}</AppNotice>
             <AppNotice v-if="noticeOpen('deletion')" key="deletion" close-label="收起提示（问题未解决）" @close="collapse('deletion')">{{ objectDeletionError }}<template #actions><button class="quiet-button" :disabled="objectDeletionBusy" @click="objectDeletionPendingAction?.action==='delete'?openVideoDeletion():retryObjectDeletion()">重试本次{{ objectDeletionPendingAction?.action==='undo'?'撤销':objectDeletionPendingAction?.action==='redo'?'重做':'删除' }}</button></template></AppNotice>
           </TransitionGroup>
-          <div ref="scrollContainerRef" class="canvas-scroll" @wheel.capture="cancelPendingPauseView" @pointerdown.capture="cancelPendingPauseView" @wheel="wheel">
+          <div v-show="!(cardVisible && reviewRound)" ref="scrollContainerRef" class="canvas-scroll" @wheel.capture="cancelPendingPauseView" @pointerdown.capture="cancelPendingPauseView" @wheel="wheel">
             <div ref="stageRef" class="annotation-stage" :style="stageStyle">
               <template v-if="selectedMedia"><template v-if="isVideo">
-                <video :key="selectedMedia.id" ref="videoRef" :src="selectedMedia.url" class="stage-media" :class="{'hidden-video':videoPlaybackFallback||(exactFrameUrl&&!isPlaying)}" :style="{filter}" preload="metadata" playsinline @loadedmetadata="onVideoLoaded" @timeupdate="onVideoTimeUpdate" @ended="onVideoEnded" @error="onVideoError" />
-                <img v-if="exactFrameUrl&&(!isPlaying||videoPlaybackFallback)" ref="exactFrameImageRef" :src="exactFrameUrl" :alt="`${selectedMedia.name} 第 ${currentFrame+1} 帧`" class="stage-media exact-media" :class="{'picture-enter':pictureEnters}" :style="{filter}" />
+                <video :key="selectedMedia.id" ref="videoRef" :src="selectedMedia.url" class="stage-media" :class="{'hidden-video':videoPlaybackFallback||enhancedView||(exactFrameUrl&&!isPlaying)}" :style="{filter}" preload="metadata" playsinline @loadedmetadata="onVideoLoaded" @timeupdate="onVideoTimeUpdate" @ended="onVideoEnded" @error="onVideoError" />
+                <img v-if="exactFrameUrl&&(!isPlaying||videoPlaybackFallback||enhancedView)" ref="exactFrameImageRef" :src="exactFrameUrl" :alt="`${selectedMedia.name} 第 ${currentFrame+1} 帧`" class="stage-media exact-media" :class="{'picture-enter':pictureEnters}" :style="{filter}" />
               </template><img v-else :key="selectedMedia.id" ref="imageRef" :src="selectedMedia.url" :alt="selectedMedia.name" class="stage-media picture-enter" :style="{filter}" @load="onImageLoaded" /></template>
               <div v-else-if="reviewing" class="canvas-empty"><AppIcon name="folder" :size="36" /><h3>选择一段视频开始审查</h3><p>在左侧素材库里选择要审查的视频。</p></div><div v-else class="canvas-empty"><AppIcon name="upload" :size="36" /><h3>把注意力留给画面</h3><p>导入一段视频，开始精细标注。</p><button class="btn-primary" @click="openFilePicker('video')">导入视频</button></div>
               <div ref="annotationHitRef" data-testid="annotation-hit" class="annotation-hit" :class="{panning:spaceHeld||pan,selecting:activeTool==='select',locked:editingBlocked}" @click="stageClick" @pointerdown="pointerDown" @pointermove="pointerMove" @pointerup="pointerUp" @pointercancel="cancelPointer" @lostpointercapture="cancelPointer" @pointerleave="mousePixel=null" />
+              <div v-if="scanHints.length && !hiddenBoxes" class="scan-hints" aria-hidden="true"><i v-for="(h, n) in scanHints" :key="n" class="scan-hint" :style="{ left: `${(h[0] + h[2]) / 2}%`, top: `${(h[1] + h[3]) / 2}%`, width: `calc(${(h[2] - h[0]) * 2.2}% + 14px)`, aspectRatio: '1' }" /></div>
               <AnnotationOverlay :objects="displayObjects" :selected="selectedObjectId" :width="stageSize.w" :height="stageSize.h" :draft="tempBbox" :labels="labels" :hidden="hiddenBoxes || (!!frameError && !exactFrameUrl)" />
             </div>
           </div>
-          <div class="shell-tools" aria-label="标注工具">
-            <span :key="mode" class="mode-tag" data-testid="workbench-mode"><AppIcon :name="reviewing?'check':'box'" :size="14" />{{ reviewing?'审查模式':'标注模式' }}</span>
-            <i class="shell-tools-sep" />
-            <button v-for="tool in ([['select','cursor','选择','V'],['bbox','box','画框','B']] as const)" :key="tool[0]" class="shell-tool" :class="{active:activeTool===tool[0]}" :aria-pressed="activeTool===tool[0]" :disabled="editingBlocked" :title="`${tool[2]} (${tool[3]})`" :aria-label="tool[2]" @click="selectTool(tool[0])"><AppIcon :name="tool[1]" :size="17" /></button>
-            <button class="shell-tool" :class="{active:activeTool==='head'}" :aria-pressed="activeTool==='head'" :disabled="editingBlocked||!isVideo" title="点击头部自动生成框，生成后可微调" aria-label="点选头部" @click="selectTool('head')"><AppIcon name="box" :size="17" /><span>点选头部</span></button>
-            <i class="shell-tools-sep" />
-            <button class="shell-tool" title="撤销 (Ctrl/⌘ Z)" aria-label="撤销本帧操作" :disabled="editingBlocked||!!objectDeletionPendingAction||trackingFeedbackPending||!canUndo" @click="undo"><AppIcon name="undo" :size="17" /></button>
-            <button class="shell-tool" title="重做 (Ctrl/⌘ Shift Z)" aria-label="重做本帧操作" :disabled="editingBlocked||!!objectDeletionPendingAction||trackingFeedbackPending||!canRedo" @click="redo"><AppIcon name="redo" :size="17" /></button>
-            <button class="shell-tool delete-frame-tool" title="删除本帧选中框 (Delete)" aria-label="删除本帧选中对象" :disabled="editingBlocked||!selectedObject||!!objectDeletionPendingAction||trackingFeedbackPending" @click="deleteSelectedFrame"><AppIcon name="trash" :size="16" /></button>
-            <i class="shell-tools-sep" />
-            <button class="shell-tool" :class="{active:magnifier}" :aria-pressed="magnifier" title="放大镜 (L)" aria-label="局部放大镜" @click="magnifier=!magnifier"><AppIcon name="zoom" :size="17" /></button>
-            <button class="shell-tool" :class="{active:hiddenBoxes}" :aria-pressed="hiddenBoxes" title="隐藏框 (H)" aria-label="显示或隐藏标注" @click="hiddenBoxes=!hiddenBoxes"><AppIcon name="eye" :size="17" /></button>
-            <button class="shell-tool" :class="{active:labels}" :aria-pressed="labels" title="显示对象编号" aria-label="显示对象编号" @click="labels=!labels"><AppIcon name="hash" :size="16" /></button>
-            <button class="shell-tool" :class="{active:enhancing}" :aria-expanded="enhancing" title="画面增强" aria-label="画面增强" @click="enhancing=!enhancing"><AppIcon name="sun" :size="17" /></button>
-            <button class="shell-tool" :class="{active:minimapOn}" :aria-pressed="minimapOn" title="放大后显示小地图（会遮住画面右上角）" aria-label="小地图" @click="minimapOn=!minimapOn"><span>小地图</span></button>
-            <button ref="focusButton" class="shell-tool" :class="{active:focused}" :aria-pressed="focused" :title="focused?'退出专注 (F / Esc)':'专注模式 (F)'" :aria-label="focused?'退出专注':'专注'" @click="toggleFocus"><AppIcon name="fit" :size="16" /></button>
-            <Transition name="notice-chip"><button v-if="collapsedCount" class="notice-chip" data-testid="notice-chip" title="展开未处理的提示" @click="expandNotices"><AppIcon name="alert" :size="14" /><span>{{ collapsedCount }} 条未处理</span></button></Transition>
-          </div>
-          <Transition name="toast-corner"><div v-if="headBoxBusy || headBoxError" class="head-proposal-status" :class="{failed:!headBoxBusy&&!!headBoxError}" :role="headBoxError?'alert':'status'">
-            <AppIcon v-if="!headBoxBusy" name="alert" :size="15" /><i v-else class="notice-spinner" aria-hidden="true" />
-            <span>{{ headBoxBusy?'正在识别点击处的头部…':headBoxError }}</span>
-            <button class="quiet-button" @click="headBoxBusy?cancelHeadBox():headBoxError=''">{{ headBoxBusy?'取消':'关闭' }}</button>
+          <TargetReviewCard v-if="cardVisible && currentEntry && !reviewEnd" ref="reviewCard" :entry="currentEntry" :remaining="Math.max(1,openTargets)" :can-go-back="queueIndex>0" :boxes="entryBoxes" :missing="entryMissing" :media-width="selectedMedia?.width||1" :media-height="selectedMedia?.height||1" :read-frame="cardFrameReader" :answer="currentEntry.repeat?(reviewRound?.repeats?.[currentEntry.objectId]??null):(reviewRound?.results?.[currentEntry.objectId]??null)" :busy="cardBusy||review.busy.value" @answer="answerCard" @split="splitCard" @fix="fixInCanvas" @prev="prevCard" />
+          <Transition name="tr-end" :css="motionAllowed"><div v-if="cardVisible && reviewEnd && reviewEnd!=='passed' && reviewEnd!=='start'" class="review-end" data-testid="review-end">
+            <template v-if="reviewEnd==='unknown'"><AppIcon name="alert" :size="28" /><h2>第 {{ (firstUnknownFrame??0)+1 }} 帧没有任何标注</h2><p>这一帧确实没有精子吗？</p><div class="review-end-actions"><button class="btn-secondary" @click="reviewView='canvas';seekFrame(firstUnknownFrame??0)">去这一帧补框</button><button class="btn-primary" :disabled="review.busy.value" @click="confirmUnknownEmpty">确认没有</button></div></template>
+            <template v-else-if="reviewEnd==='playthrough'"><AppIcon name="play" :size="28" /><h2>最后一步</h2><p>快速播放一遍全片，看看有没有明显漏掉的。</p><div class="review-end-actions"><button class="btn-primary" data-testid="review-playthrough" :disabled="isAiBusy" @click="startPlaythrough">开始播放</button></div></template>
+            <template v-else><AppIcon name="check" :size="28" /><h2>都确认好了</h2><p>没问题就点右侧的“审查通过”。</p></template>
           </div></Transition>
-          <Transition name="enhance-glide" :css="motionAllowed"><div v-if="enhancing" class="annot-enhance enhancement-bar"><button v-for="p in ['原图','暗场','低对比']" :key="p" class="quiet-button" @click="enhancement(p)">{{ p }}</button><label>亮度 <input v-model.number="brightness" aria-label="亮度" type="range" min="50" max="200" /></label><label>对比 <input v-model.number="contrast" aria-label="对比度" type="range" min="50" max="220" /></label><label><input v-model="inverted" type="checkbox" />反相</label><span>只影响显示</span></div></Transition>
-          <AnnotationMinimap v-if="selectedMedia && minimapOn" :source="minimapSource" :scroller="scrollContainerRef" :stage="stageRef" :media-width="selectedMedia.width||4" :media-height="selectedMedia.height||3" :redraw-key="`${currentMediaId}:${currentFrame}:${exactFrameUrl}:${stageSize.w}`" />
-          <div v-if="exactFrameLoading||workspaceRestoring||isAiBusy||currentRemoteTracking" class="canvas-status" data-testid="canvas-status">{{ isAiBusy?'AI 正在追踪本视频 · 可切换到其他视频继续标注':currentRemoteTracking?`${currentRemoteTracking.userName||'其他人'}正在追踪本视频 · 完成后自动刷新，可先标注其他视频`:workspaceRestoring?'正在恢复工作区…':'正在读取帧…' }}</div>
+          <div ref="toolbarRef" class="shell-tools" :class="{compact:toolbarCompact}" aria-label="标注工具">
+            <span :key="mode" class="mode-tag" data-testid="workbench-mode"><AppIcon :name="reviewing?'check':'box'" :size="14" />{{ reviewing?'审查模式':'标注模式' }}</span>
+            <span v-if="reviewing" class="tool-seg" :style="{'--n':2,'--i':reviewView==='cards'?0:1}" role="group" aria-label="审查视图"><i class="tool-seg-thumb" aria-hidden="true" />
+              <ToolButton icon="cards" label="逐个确认" hint="一个目标一张卡片，回答是不是精子" keys="Tab" tip-align="start" :selected="reviewView==='cards'" :pressed="reviewView==='cards'" data-testid="view-cards" @click="reviewView='cards'" />
+              <ToolButton icon="image" label="看画面" hint="回到整幅画面查看和修改" keys="Tab" :selected="reviewView==='canvas'" :pressed="reviewView==='canvas'" data-testid="view-canvas" @click="reviewView='canvas'" />
+            </span>
+            <template v-if="!cardTools">
+              <i class="shell-tools-sep" />
+              <span class="tool-seg" :style="{'--n':2,'--i':activeTool==='select'?1:0}" role="group" aria-label="画框工具"><i class="tool-seg-thumb" aria-hidden="true" />
+                <ToolButton icon="box" label="标注" hint="点一下精子头补框（其他帧检到的同一个头一起加上）；按住拖动画框" keys="B" :tip-align="reviewing?'center':'start'" :selected="activeTool==='smart'" :pressed="activeTool==='smart'" :disabled="editingBlocked" @click="selectTool('smart')" />
+                <ToolButton icon="cursor" label="选择" hint="只选中、移动和缩放已有的框，不会新加框" keys="V" :selected="activeTool==='select'" :pressed="activeTool==='select'" :disabled="editingBlocked" @click="selectTool('select')" />
+              </span>
+              <i class="shell-tools-sep" />
+              <ToolButton icon="undo" label="撤销" hint="撤回上一步" keys="Ctrl/⌘ Z" aria-label="撤销本帧操作" :disabled="editingBlocked||!!objectDeletionPendingAction||trackingFeedbackPending||!canUndo" @click="undo" />
+              <ToolButton icon="redo" label="重做" hint="恢复刚撤回的一步" keys="Ctrl/⌘ ⇧ Z" aria-label="重做本帧操作" :disabled="editingBlocked||!!objectDeletionPendingAction||trackingFeedbackPending||!canRedo" @click="redo" />
+              <ToolButton icon="trash" label="删除" hint="删掉本帧选中的框；整条删除在右侧对象里" keys="Del" class="delete-frame-tool" aria-label="删除本帧选中对象" :disabled="editingBlocked||!selectedObject||!!objectDeletionPendingAction||trackingFeedbackPending" @click="deleteSelectedFrame" />
+              <i class="shell-tools-sep" />
+            </template>
+            <i v-else class="shell-tools-sep" />
+            <ToolButton icon="contrast" label="增强" hint="去掉背景、加强对比，尾巴更清楚；只影响显示" keys="E" :on="enhancedView" :pressed="enhancedView" data-testid="enhance-toggle" @click="enhancedView=!enhancedView" />
+            <template v-if="cardTools">
+              <i class="shell-tools-sep" />
+              <ToolButton icon="prev" label="上一个" hint="回到上一张卡片" keys="←" :disabled="queueIndex===0" @click="prevCard" />
+              <ToolButton icon="next" label="下一个" hint="先跳过这张，看下一张没答的" :disabled="openCards<=1" @click="skipCard" />
+            </template>
+            <template v-else>
+              <ToolButton icon="zoom" label="放大镜" hint="鼠标下方放大显示一小块" keys="L" aria-label="局部放大镜" :on="magnifier" :pressed="magnifier" @click="magnifier=!magnifier" />
+              <ToolButton :icon="hiddenBoxes?'eye-off':'eye'" label="藏框" hint="暂时藏起所有框，看清原图" keys="H" aria-label="显示或隐藏标注" :on="hiddenBoxes" :pressed="hiddenBoxes" @click="hiddenBoxes=!hiddenBoxes" />
+              <ToolButton icon="hash" label="编号" hint="在框旁显示目标编号" aria-label="显示对象编号" :on="labels" :pressed="labels" @click="labels=!labels" />
+              <ToolButton v-if="!reviewing" icon="map" label="小地图" hint="在右侧面板显示全图和当前视野，点一下就能移过去" :on="minimapOn" :pressed="minimapOn" @click="minimapOn=!minimapOn" />
+              <template v-if="reviewing && reviewRound && currentEntry">
+                <i class="shell-tools-sep" />
+                <ToolButton icon="point" label="当前目标" hint="跳到当前卡片的目标并选中它" @click="locateTarget" />
+              </template>
+            </template>
+            <span class="shell-tools-fill" />
+            <Transition name="notice-chip"><button v-if="collapsedCount" class="notice-chip" data-testid="notice-chip" title="展开未处理的提示" @click="expandNotices"><AppIcon name="alert" :size="14" /><span>{{ collapsedCount }} 条未处理</span></button></Transition>
+            <ToolButton :ref="setFocusButton" icon="fit" :label="focused?'退出专注':'专注'" :hint="focused?'恢复两侧面板':'收起两侧面板，画面铺满窗口'" :keys="focused?'F / Esc':'F'" tip-align="end" :aria-label="focused?'退出专注':'专注'" :on="focused" :pressed="focused" @click="toggleFocus" />
+          </div>
+          <Transition name="toast-corner"><div v-if="headBoxBusy || headBoxError || extendBusy" class="head-proposal-status" :class="{failed:!headBoxBusy&&!extendBusy&&!!headBoxError}" :role="headBoxError&&!extendBusy?'alert':'status'">
+            <AppIcon v-if="!headBoxBusy&&!extendBusy" name="alert" :size="15" /><i v-else class="notice-spinner" aria-hidden="true" />
+            <span>{{ extendBusy||headBoxBusy?'正在识别点击处的头部…':headBoxError }}</span>
+            <button class="quiet-button" @click="extendBusy?cancelExtend():headBoxBusy?cancelHeadBox():headBoxError=''">{{ extendBusy||headBoxBusy?'取消':'关闭' }}</button>
+          </div></Transition>
+          <div v-if="exactFrameLoading||workspaceRestoring||isAiBusy||currentRemoteTracking" class="canvas-status" data-testid="canvas-status">{{ isAiBusy?(prelabelRunning?'AI 正在预标本视频 · 可以先看其他视频':'AI 正在追踪本视频 · 可切换到其他视频继续标注'):currentRemoteTracking?`${currentRemoteTracking.userName||'其他人'}正在追踪本视频 · 完成后自动刷新，可先标注其他视频`:workspaceRestoring?'正在恢复工作区…':'正在读取帧…' }}</div>
           <div v-if="frameError" class="canvas-error" role="alert">{{ frameError }}<button class="btn-secondary" @click="retryExactFrame">重试读取</button></div>
           <Transition name="toast"><div v-if="toast" :key="toast.id" class="status-toast" :class="`toast-${toast.tone}`" role="status" data-testid="status-toast"><span class="notice-icon"><AppIcon :name="toast.tone==='success'?'check':toast.tone==='info'?'info':'alert'" :size="14" /></span><span>{{ toast.message }}</span><button v-if="toast.tone==='error'" type="button" class="notice-close" aria-label="关闭提示" @click="dismissToast"><AppIcon name="close" :size="13" /></button></div></Transition>
-          <div v-if="magnifier" class="loupe"><canvas ref="loupe" width="200" height="150" :style="{filter}" /><span>4× 原图局部 · {{ mousePixel?`${mousePixel.x}, ${mousePixel.y}`:'移动指针查看' }}</span></div>
+          <div v-if="magnifier" v-show="mousePixel" class="loupe" :style="{ transform: `translate(${loupePos.x}px, ${loupePos.y}px)` }"><canvas ref="loupe" width="200" height="150" :style="{filter}" /><span>4× · {{ mousePixel?`${mousePixel.x}, ${mousePixel.y}`:'' }}</span></div>
           <div v-if="!isVideo" class="shell-zoom" role="group" aria-label="画面缩放"><span v-if="mousePixel" class="annot-coords">{{ mousePixel.x }}, {{ mousePixel.y }} px</span><button aria-label="缩小画面" @click="zoomAt(-1)">−</button><button title="适应画面 (0)" aria-label="适应画面" @click="fitView">{{ Math.round(zoom*100) }}%</button><button aria-label="放大画面" @click="zoomAt(1)">＋</button></div>
         </div>
         <aside v-show="focused && showPauseFeedback && pauseDetailsOpen" ref="focusDetailsHost" class="pause-details-dock" aria-label="暂停检查依据" />
@@ -787,35 +1062,76 @@ onUnmounted(()=>{if(reviewRefresh)clearTimeout(reviewRefresh);cancelHeadBox();ca
         <button class="btn-primary" :disabled="!mergeReady||collaborationBusy" @click="resolveCollaboration(mergeChoices)">{{ collaborationBusy?'正在保存…':'应用选择并继续' }}</button>
         <div class="collaboration-more"><button class="quiet-button" @click="downloadWorkspaceBackup">导出本地备份</button><button class="quiet-button" @click="discardLocalDraft">全部用服务器版本</button></div>
       </section>
-      <AnnotationReviewPanel v-if="reviewing" ref="reviewPanel" :media-id="reviewMediaId" :last-editor="lastEditors[currentMediaId]||null" :next-video="nextReviewVideo?.name||null" @next-video="nextReviewVideo&&(selectedMediaId=nextReviewVideo.id)" :current-frame="currentFrame" :frame-count="maxFrameIndex+1" :object-count="currentObjects.length" :frame-ready="reviewFrameReady" :blocked="editingBlocked" :tracking-pending="hasPausedTracking" :flush="flushWorkspace" @seek="seekReviewFrame" />
+      <AnnotationReviewPanel v-if="reviewing" :media-id="reviewMediaId" :last-editor="lastEditors[currentMediaId]||null" :next-video="nextReviewVideo?.name||null" :blocked="editingBlocked" :tracking-pending="hasPausedTracking" :flush="flushWorkspace" :scan-remaining="checkFrames.length-scannedCount" :current="currentEntry?.objectId??null" @next-video="nextReviewVideo&&(selectedMediaId=nextReviewVideo.id)" @jump="jumpTarget" @to-annotate="router.push('/annotate')" />
       <section v-show="showPauseFeedback" class="pause-inspector-panel" aria-label="暂停核对">
         <div ref="pauseControlHost" class="pause-control-host" />
         <div v-show="pauseDetailsOpen" ref="inspectorDetailsHost" class="pause-inspector-details" />
       </section>
-      <section v-show="!reviewing && (!showPauseFeedback || trackingCalibrationSummary.length || (trackingFeedbackError && trackingFeedbackPendingAction?.decision==='reset'))" class="shell-card annot-ai">
+      <section v-show="!reviewing && (!showPauseFeedback || trackingCalibrationSummary.length || (trackingFeedbackError && trackingFeedbackPendingAction?.decision==='reset'))" class="shell-card annot-task" data-testid="prelabel-card">
         <template v-if="!showPauseFeedback">
-          <div class="shell-card-head"><AppIcon name="spark" :size="16"/><strong>AI 追踪</strong><span class="ai-state">{{ isAiBusy?'追踪中':hasPausedTracking?'待核对':'就绪' }}</span></div>
-          <TrackingProgress v-if="currentTrackingProgress || currentTrackingFinished" class="annot-tracking-progress" :view="currentTrackingProgress" :finished="currentTrackingFinished" />
-          <p v-else class="shell-card-note">{{ trackingProgress || '框好首尾帧头部后，生成整段标注，自动识别边缘入画。' }}</p>
-          <p v-if="currentTrackingProgress && currentTrackingProgress.mode !== 'finishing'" class="shell-card-note annot-tracking-hint">追踪在服务器上进行，可以切换到其他视频继续标注。</p>
-          <div v-if="isVideo" class="endpoint-tracking" aria-label="首尾帧标注">
-            <div class="endpoint-navigation"><button class="btn-secondary" :disabled="editingBlocked||isAiBusy" @click="seekVideo(0)">首帧 · {{ endpointCount(0) }} 人工框</button><button class="btn-secondary" :disabled="editingBlocked||isAiBusy" @click="seekVideo(frameToTime(maxFrameIndex))">尾帧 · {{ endpointCount(maxFrameIndex) }} 人工框</button></div>
-            <p class="shell-card-note">完整框出两端的头部；编号可不同。尾帧框须人工绘制或修正。</p>
-            <button class="btn-primary shell-wide" :disabled="editingBlocked||isAiBusy||hasPausedTracking||maxFrameIndex<1||!endpointCount(0)" @click="requestEndpointTracking">首尾双向追踪</button>
+          <Transition name="task-swap" mode="out-in" :css="motionAllowed">
+          <div v-if="currentTrackingProgress || currentTrackingFinished" key="running" class="task-body">
+            <div class="shell-card-head"><AppIcon name="spark" :size="16"/><strong>{{ prelabelRunning || currentTrackingFinished ? '自动预标' : 'AI 追踪' }}</strong></div>
+            <TrackingProgress class="annot-tracking-progress" :view="currentTrackingProgress" :finished="currentTrackingFinished" />
+            <p v-if="currentTrackingProgress && currentTrackingProgress.mode !== 'finishing'" class="shell-card-note">在服务器上识别，可以先看其他视频。</p>
           </div>
-          <div v-if="trackingWarningSummary.length && !hasPausedTracking" class="tracking-warning-summary" role="status"><span>{{ trackingWarningSummary.reduce((count,item)=>count+item.count,0) }} 次追踪变化已合并提示</span><details><summary>详情</summary><p v-for="item in trackingWarningSummary" :key="`${item.objectId}:${item.reason}`">对象 {{ item.objectId }} · {{ item.reason==='overlap'?'重叠':item.reason==='size'?'尺寸 / 形状':item.reason==='image'?'主体 / 覆盖':'运动' }} · 第 {{ item.firstFrame+1 }}–{{ item.lastFrame+1 }} 帧 · {{ item.count }} 次{{ item.calibrated?' · 参考已确认正常样本':'' }}</p></details></div>
+          <div v-else-if="prelabelError" key="failed" class="task-body" role="alert">
+            <div class="shell-card-head"><AppIcon name="alert" :size="16"/><strong>自动预标没完成</strong></div>
+            <p class="shell-card-note">{{ prelabelError }}</p>
+            <button class="btn-primary shell-wide" :disabled="isAiBusy" @click="retryPrelabel">重试</button>
+          </div>
+          <div v-else-if="checkFrames.length" key="scan" class="task-body" data-testid="scan-task">
+            <div class="task-eyebrow"><span>第 1 步 · 标注</span><span class="num">{{ scannedCount }} / {{ checkFrames.length }}</span></div>
+            <h3 class="task-title">{{ scanComplete ? '都看完了' : '找漏掉的精子' }}</h3>
+            <p v-if="!scanComplete" class="shell-card-note">看这一块，没框到的头点一下就补上。黄色虚线圈是模型拿不准的地方。</p>
+            <template v-else-if="completionRunning">
+              <p class="shell-card-note">正在补全：在已有框的前后帧里再找一遍…</p>
+              <div class="completion-bar" role="progressbar" :aria-valuenow="currentCompletion?.done||0" :aria-valuemax="currentCompletion?.total||0"><i :style="{ width: `${currentCompletion?.total ? Math.round(100 * (currentCompletion.done||0) / currentCompletion.total) : 8}%` }" /></div>
+            </template>
+            <p v-else-if="currentCompletion?.state==='failed'" class="shell-card-note task-warn" role="alert">{{ currentCompletion.error }}</p>
+            <p v-else-if="currentCompletion?.state==='done'" class="shell-card-note">{{ currentCompletion.added ? `自动补上了 ${currentCompletion.added} 帧。` : '没有需要补的帧。' }}{{ currentCompletion.missing ? `还有 ${currentCompletion.missing} 帧没找到，审查时会标出来。` : '' }}</p>
+            <p v-else class="shell-card-note">看完了，点“提交审查”交给审查员。</p>
+            <div class="check-steps" role="group" aria-label="要查漏的帧">
+              <button v-for="(item,i) in checkFrames" :key="item.frame" class="check-step" :class="{done:!!item.scannedAt,current:item.frame===currentFrame}" :aria-current="item.frame===currentFrame?'step':undefined" :title="`第 ${item.frame+1} 帧${item.scannedAt?` · ${item.scannedByName||''}已看`:''}`" :aria-label="`第 ${i+1} 张，第 ${item.frame+1} 帧${item.scannedAt?'，已看':''}`" :disabled="isAiBusy" @click="seekFrame(item.frame)"><AppIcon v-if="item.scannedAt" name="check" :size="12" /><template v-else>{{ i+1 }}</template></button>
+            </div>
+            <div v-if="scanBlocks.length > 1" class="scan-grid" :style="{ '--cols': blockCols }" role="group" :aria-label="`这张分成 ${scanBlocks.length} 块`">
+              <button v-for="cell in blockCells" :key="cell.i" class="scan-cell" :class="{ done: cell.i < blockIndex, current: cell.i === blockIndex }" :aria-current="cell.i === blockIndex ? 'step' : undefined" :aria-label="`第 ${cell.i + 1} 块`" @click="showBlock(cell.i); ($event.currentTarget as HTMLElement).blur()" />
+              <span class="scan-count num">第 {{ blockIndex + 1 }} / {{ scanBlocks.length }} 块</span>
+            </div>
+            <button v-if="!scanComplete && currentCheckFrame && !currentCheckFrame.scannedAt" class="btn-primary shell-wide task-primary" data-testid="scan-done" :disabled="scanBusy||editingBlocked" @click="scanNext">{{ lastBlock ? '这张看完了' : '下一块' }}<kbd>Enter</kbd></button>
+            <button v-else-if="!scanComplete" class="btn-primary shell-wide task-primary" :disabled="isAiBusy" @click="goNextCheck">回到要看的那张</button>
+            <button v-else-if="currentCompletion?.state==='failed'" class="btn-primary shell-wide task-primary" @click="runCompletion(currentMediaId)">重试补全</button>
+            <button v-else class="btn-primary shell-wide task-primary" :disabled="completionRunning" @click="goReview">{{ completionRunning ? '补全中…' : '提交审查' }}<AppIcon v-if="!completionRunning" name="next" :size="14" /></button>
+            <button v-if="scanComplete && currentCompletion?.state==='failed'" class="quiet-button shell-wide" @click="router.push('/review')">不补了，直接去审查</button>
+            <div v-if="!scanComplete" class="task-how" aria-hidden="true"><span><AppIcon name="cursor" :size="15" />点一下 补框</span><span><AppIcon name="box" :size="15" />拖动 画框</span><span><kbd>Del</kbd>删除</span></div>
+          </div>
+          <div v-else-if="legacyResult" key="legacy" class="task-body">
+            <div class="shell-card-head"><AppIcon name="spark" :size="16"/><strong>旧流程标注的视频</strong></div>
+            <p class="shell-card-note">可以继续手动修改；也可以清空现有的框，用新模型重新预标。</p>
+            <button v-if="!reprelabelConfirm" class="btn-secondary shell-wide" :disabled="isAiBusy||editingBlocked||reprelabelBusy" @click="reprelabelConfirm=true">用新模型重新预标…</button>
+            <div v-else class="task-confirm" role="alert"><p>会清空这段视频现有的全部框，审查也要重新做。确定吗？</p><div><button class="btn-secondary" @click="reprelabelConfirm=false">取消</button><button class="btn-primary" :disabled="reprelabelBusy" @click="reprelabelConfirm=false;reprelabelCurrent()">{{ reprelabelBusy?'正在清空…':'清空并重新预标' }}</button></div></div>
+          </div>
+          <div v-else-if="isVideo" key="idle" class="task-body">
+            <div class="shell-card-head"><AppIcon name="spark" :size="16"/><strong>自动预标</strong></div>
+            <p class="shell-card-note">{{ workspaceRestoring ? '正在读取这段视频…' : '打开视频后自动识别精子头。' }}</p>
+          </div>
+          </Transition>
         </template>
         <details v-if="trackingCalibrationSummary.length" class="tracking-calibration"><summary>已保存的正常确认（{{ trackingCalibrationSummary.length }} 个对象）</summary><div v-for="item in trackingCalibrationSummary" :key="item.objectId" :data-calibration-object-id="item.objectId"><span>对象 {{ item.objectId }}<template v-if="item.sampleCount"> · {{ item.sampleCount }} 次正常运动确认</template><template v-if="item.geometryFrame!=null"> · 第 {{ item.geometryFrame+1 }} 帧尺寸已确认</template><template v-if="item.overlapCount"> · {{ item.overlapCount }} 个重叠组合已确认（{{ item.overlapPartnerIds.map(id=>'对象 '+id).join('、') }}）</template></span><button class="quiet-button" :disabled="feedbackBlocked||trackingFeedbackPending" @click="resetTrackingCalibration(item.objectId)">恢复默认判断</button></div></details>
         <div v-if="trackingFeedbackError && trackingFeedbackPendingAction?.decision==='reset'" class="tracking-feedback-error" role="alert">{{ trackingFeedbackError }}<button class="quiet-button" :disabled="trackingFeedbackBusy" @click="retryTrackingAnomalyFeedback">重试恢复默认判断</button></div>
       </section>
-      <section class="shell-card annot-objects" aria-label="当前帧对象">
+      <Transition name="map-card"><section v-if="selectedMedia && minimapOn && !focused && !reviewing" v-show="!(cardVisible && reviewRound)" class="shell-card annot-map" aria-label="小地图">
+        <div class="shell-card-head"><strong>小地图</strong><span class="annot-count">点一下或拖动，移动视野</span></div>
+        <AnnotationMinimap docked :width="240" :source="minimapSource" :scroller="scrollContainerRef" :stage="stageRef" :media-width="selectedMedia.width||4" :media-height="selectedMedia.height||3" :redraw-key="`${currentMediaId}:${currentFrame}:${exactFrameUrl}:${stageSize.w}`" />
+      </section></Transition>
+      <section v-show="!(cardVisible && reviewRound)" class="shell-card annot-objects" aria-label="当前帧对象">
         <div class="shell-card-head"><strong>本帧</strong><span class="annot-count" data-testid="frame-object-count">{{ currentObjects.length }} 个框</span><span class="annot-split"><i class="manual" />人工 {{ frameManualCount }}<i class="ai" />AI {{ frameAiCount }}</span></div>
         <div class="object-selection" data-testid="selected-object-actions">
           <template v-if="selectedObject">
             <div class="selection-context"><strong>对象 {{ selectedObject.objectId }}</strong><span>{{ selectedObject.source==='manual'?'人工':'AI 追踪' }}{{ selectedObject.confidence?` · ${Math.round(selectedObject.confidence*100)}%`:'' }}<template v-if="isVideo"> · {{ selectedObjectCoverage }}/{{ maxFrameIndex+1 }} 帧</template><template v-if="selectedObject.bbox"> · {{ (selectedObject.bbox.width*(selectedMedia?.width||0)/100).toFixed(0) }}×{{ (selectedObject.bbox.height*(selectedMedia?.height||0)/100).toFixed(0) }} px</template></span></div>
             <div class="object-delete-actions"><button class="btn-secondary" data-testid="delete-object-frame" title="只删当前帧 (Delete)" :disabled="editingBlocked||trackingFeedbackPending||!!objectDeletionPendingAction" @click="deleteSelectedFrame"><AppIcon name="trash" :size="13" />删除本帧的框</button><button class="btn-secondary delete-video-button" data-testid="delete-object-video" :disabled="editingBlocked||!isVideo||!selectedMedia?.serverMediaId||trackingFeedbackPending||!!objectDeletionPendingAction" title="删除这个对象在整段视频所有帧中的框，可撤销" @click="openVideoDeletion"><AppIcon name="trash" :size="13" />删除全视频中此对象</button></div>
           </template>
-          <p v-else class="object-no-selection">{{ activeTool==='bbox'?'在画面上拖出头部框；按 V 切换到选择。':'点击画面中的框，或下方编号选中对象。' }}</p>
+          <p v-else class="object-no-selection">{{ activeTool==='select'?'点击画面中的框，或下方编号选中对象。':'点一下精子头补框（其他帧检到的同一个头一起加上），按住拖动手动画框；点框可选中、拖动。' }}</p>
           <div v-if="frameDeletionVisible" class="object-deletion-feedback" role="status"><AppIcon name="check" :size="14"/><span>对象 {{ frameDeletion?.objectId }} 已删除本帧标注</span><button class="quiet-button" :disabled="editingBlocked||!canUndo||!!objectDeletionPendingAction||trackingFeedbackPending" @click="undoFrameDeletion"><AppIcon name="undo" :size="13" />撤销</button></div>
           <div v-else-if="videoDeletionVisible && lastVideoObjectDeletion" class="object-deletion-feedback" role="status"><AppIcon name="check" :size="14"/><span>对象 {{ lastVideoObjectDeletion.objectId }} 已删除 {{ lastVideoObjectDeletion.frameCount }} 帧标注</span><button class="quiet-button" :disabled="editingBlocked||!canUndoVideoDeletion||!!objectDeletionPendingAction||trackingFeedbackPending" @click="undoVideoDeletion"><AppIcon name="undo" :size="13" />撤销</button></div>
         </div>
@@ -846,12 +1162,54 @@ onUnmounted(()=>{if(reviewRefresh)clearTimeout(reviewRefresh);cancelHeadBox();ca
         <div v-if="objectDeletionError" class="error-banner" role="alert">{{ objectDeletionError }}<p v-if="objectDeletionPendingAction">删除结果尚未确认；重试沿用本次请求。</p></div>
         <div class="app-dialog-actions"><button class="btn-secondary" :disabled="objectDeletionBusy" @click="closeDeleteDialog">取消</button><button class="btn-primary confirm-delete-video" data-testid="confirm-delete-object-video" :disabled="objectDeletionBusy||(!objectDeletionPendingAction&&(deletionSummaryLoading||!deletionSummary||deletionSummary.frameCount===0))" @click="confirmVideoDeletion">{{ objectDeletionBusy?'正在确认删除…':objectDeletionPendingAction?`重试删除对象 ${deletionTarget?.objectId}`:`删除全部 ${deletionSummary?.frameCount || 0} 帧标注` }}</button></div>
       </dialog>
-      <div v-if="help" class="dialog-mask" @click.self="help=false"><section ref="helpDialog" class="app-dialog annotation-help" role="dialog" aria-modal="true" aria-labelledby="annotation-help-title"><h2 id="annotation-help-title">标注快捷键</h2><dl><div v-for="[key,desc] in annotationShortcuts" :key="key"><dt><kbd>{{ key }}</kbd></dt><dd>{{ desc }}</dd></div></dl><p class="muted">{{ shortcutHelpNote }}</p><div class="app-dialog-actions"><button class="btn-primary" @click="help=false">知道了</button></div></section></div>
     </Teleport>
   </section>
 </template>
 
 <style scoped>
+.annot-task { display:grid; gap:10px; }
+.review-views { display:inline-flex; gap:2px; padding:2px; border-radius:var(--radius-md); background:var(--surface-subtle); }
+.review-end { position:relative; flex:1; width:100%; min-height:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; background:var(--canvas); color:#e6eef0; text-align:center; padding:24px; }
+.review-end h2 { margin:0; font-size:var(--fs-2xl); letter-spacing:-.01em; }
+.review-end p { margin:0; color:#9fb2b9; }
+.review-end-actions { display:flex; gap:10px; margin-top:8px; }
+.review-end-actions button { min-width:140px; min-height:40px; }
+.tr-end-enter-active, .tr-end-leave-active { transition:opacity var(--dur-base) var(--ease-out); }
+.tr-end-enter-from, .tr-end-leave-to { opacity:0; }
+.task-body { display:grid; gap:10px; }
+.task-eyebrow { display:flex; justify-content:space-between; padding-right:30px; font-size:var(--fs-xs); font-weight:600; color:var(--accent); } /* Clear of the inspector collapse button. */
+.task-eyebrow .num { font-variant-numeric:tabular-nums; color:var(--muted); font-weight:500; }
+.task-title { margin:0; font-size:var(--fs-xl); line-height:1.25; letter-spacing:-.01em; }
+.check-steps { display:flex; flex-wrap:wrap; gap:5px; }
+.focus-scan { display:inline-flex; align-items:center; gap:10px; }
+.focus-scan kbd { margin-left:6px; font-size:var(--fs-2xs); opacity:.75; border:1px solid currentColor; border-radius:4px; padding:0 4px; }
+.scan-grid.mini { grid-template-columns:repeat(var(--cols), 10px); gap:2px; }
+.scan-grid.mini .scan-cell { width:10px; height:7px; border-radius:2px; cursor:default; }
+.completion-bar { height:6px; border-radius:3px; background:var(--accent-soft); overflow:hidden; }
+.completion-bar i { display:block; height:100%; background:var(--accent); transition:width var(--dur-base,.2s) var(--ease-out,ease); }
+.task-warn { color:var(--danger, #c0392b); }
+.scan-grid { display:grid; grid-template-columns:repeat(var(--cols), 22px); gap:3px; align-items:center; }
+.scan-cell { width:22px; height:16px; padding:0; border-radius:3px; border:1px solid var(--line-strong, #9bb); background:var(--surface); cursor:pointer; transition:background-color var(--dur-fast,.12s) var(--ease-out,ease), box-shadow var(--dur-fast,.12s) var(--ease-out,ease); }
+.scan-cell.done { background:var(--accent); border-color:var(--accent); }
+.scan-cell.current { box-shadow:0 0 0 2px var(--accent); border-color:var(--accent); background:var(--accent-soft); }
+.scan-count { grid-column:1 / -1; color:var(--muted); font-size:var(--fs-xs); }
+.scan-hints { position:absolute; inset:0; pointer-events:none; z-index:3; }
+.scan-hint { position:absolute; transform:translate(-50%,-50%); border:2px dashed #ffc542; border-radius:50%; box-shadow:0 0 0 1px #0006; }
+.check-step { min-width:28px; height:28px; padding:0 6px; border-radius:var(--radius-sm); border:1.5px solid var(--accent); background:var(--surface); color:var(--accent); font-size:var(--fs-xs); font-weight:650; font-variant-numeric:tabular-nums; display:inline-grid; place-items:center; cursor:pointer; transition:background-color var(--dur-fast,.12s) var(--ease-out,ease), color var(--dur-fast,.12s) var(--ease-out,ease), box-shadow var(--dur-fast,.12s) var(--ease-out,ease); }
+.check-step:hover:not(:disabled) { background:var(--accent-soft); }
+.check-step.done { background:var(--accent); color:var(--on-accent); }
+.check-step.current { box-shadow:0 0 0 2px var(--surface), 0 0 0 4px var(--accent); }
+.task-primary { display:flex; align-items:center; justify-content:center; gap:8px; min-height:40px; font-size:var(--fs-md); }
+.task-primary kbd { font-size:var(--fs-2xs); opacity:.75; border:1px solid currentColor; border-radius:4px; padding:0 4px; }
+.task-how { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; }
+.task-how span { display:flex; flex-direction:column; align-items:center; gap:3px; padding:7px 4px; border-radius:var(--radius-sm); background:var(--surface-subtle); color:var(--muted); font-size:var(--fs-2xs); }
+.task-how kbd { font-size:var(--fs-2xs); }
+.task-confirm { display:grid; gap:8px; padding:10px; border-radius:var(--radius-sm); background:var(--danger-soft); font-size:var(--fs-xs); }
+.task-confirm p { margin:0; }
+.task-confirm div { display:flex; gap:6px; justify-content:flex-end; }
+.task-swap-enter-active, .task-swap-leave-active { transition:opacity var(--dur-base,.2s) var(--ease-out,ease), transform var(--dur-base,.2s) var(--ease-out,ease); }
+.task-swap-enter-from { opacity:0; transform:translateY(6px); }
+.task-swap-leave-to { opacity:0; transform:translateY(-4px); }
 .collaboration-card { border:1px solid var(--warning,#b87b21); padding:12px; display:grid; gap:10px; }
 .collaboration-entries { max-height:260px; overflow:auto; display:grid; gap:12px; }
 .collaboration-entry { display:grid; gap:6px; }

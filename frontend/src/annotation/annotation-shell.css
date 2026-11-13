@@ -1,17 +1,32 @@
 /* Annotation-only content inside the shared WorkbenchShell (workbench/shell.css):
    canvas internals, enhancement popover, per-frame object chips. */
-.annot-context{display:flex;align-items:center;gap:12px;min-width:0}
+.annot-context{flex:1;display:flex;align-items:center;gap:10px;min-width:0}
+/* Header context: which video (and whether it is saved), its review status, then this stage's actions on the right. */
+.ctx-file{display:inline-flex;align-items:center;gap:8px;min-width:0;height:32px;padding:0 11px 0 9px;border-radius:var(--radius-md);background:var(--surface-subtle);border:1px solid var(--line)}
+.mode-review .ctx-file{background:var(--surface)}
+.ctx-file-icon{flex:none;color:var(--muted)}
+.ctx-file strong{min-width:0;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--fs-sm);font-weight:650;color:var(--text);letter-spacing:.01em}
+.ctx-file .save-indicator{flex:none;font-size:var(--fs-2xs);padding-left:8px;border-left:1px solid var(--line)}
+.ctx-actions{margin-left:auto;display:flex;align-items:center;gap:8px;flex:none}
+.ctx-step{display:inline-flex;align-items:center;gap:6px}
+@media(max-width:1280px){.ctx-file .save-indicator>span{display:none}.ctx-file .save-indicator{padding-left:6px}}
+@media(max-width:1100px){.ctx-file strong{max-width:150px}}
 .shell-annotate .annotation-view-body{flex:1;min-height:0}
 .shell-annotate .annotation-canvas{flex:1;min-height:0;display:flex;flex-direction:column;align-items:flex-start}
 /* The image gets its own area below the toolbar: no control floats over the picture. */
 .shell-annotate .canvas-scroll{position:relative;inset:auto;flex:1;width:100%;min-height:0;padding:12px}
-.shell-annotate .loupe{right:auto;top:auto;left:12px;bottom:12px}
+.shell-annotate .loupe{right:auto;bottom:auto;left:0;top:0;width:202px;will-change:transform}
+.shell-annotate .loupe span{padding:4px 6px;font-variant-numeric:tabular-nums}
+.annot-map{flex:none}
+.map-card-enter-active,.map-card-leave-active{transition:opacity var(--dur-base) var(--ease-out)}
+.map-card-enter-from,.map-card-leave-to{opacity:0}
 .shell-annotate .canvas-status{top:auto;bottom:14px}
 /* Toolbar and enhancement popover are rows above the image, in normal flow. */
-.shell-annotate .annotation-canvas>.shell-tools{order:-2;position:relative;left:auto;top:auto;margin:0;width:100%;flex:none;flex-wrap:wrap;border:0;border-bottom:1px solid var(--line);border-radius:0;box-shadow:none;padding:4px 8px}
+.shell-annotate .annotation-canvas>.shell-tools{order:-2;position:relative;left:auto;top:auto;margin:0;width:100%;flex:none;flex-wrap:nowrap;gap:3px;border:0;border-bottom:1px solid var(--line);border-radius:0;box-shadow:none;padding:5px 10px}
+.shell-annotate .annotation-canvas>.shell-tools.compact{flex-wrap:wrap}
 .annot-enhance{order:-1;position:relative;left:auto;top:auto;margin:6px 12px 12px;width:fit-content;max-width:calc(100% - 24px);min-height:48px;max-height:160px;flex:0 1 auto;overflow:auto;overscroll-behavior:contain;z-index:34;border:1px solid var(--line);border-radius:var(--radius-md);box-shadow:var(--shadow-lg);background:var(--surface);animation:none}
 /* The current stage, right above the image and still there in focus mode. */
-.mode-tag{animation:rise-in var(--dur-base) var(--ease-out);flex:none;display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 10px 0 8px;margin-right:2px;border-radius:var(--radius-sm);background:var(--accent);color:var(--on-accent);font-size:var(--fs-xs);font-weight:650;letter-spacing:.04em;white-space:nowrap}
+.mode-tag{animation:rise-in var(--dur-base) var(--ease-out);flex:none;display:inline-flex;align-items:center;gap:5px;height:28px;padding:0 11px 0 9px;margin-right:4px;border-radius:var(--radius-sm);background:var(--accent);color:var(--on-accent);font-size:var(--fs-xs);font-weight:650;letter-spacing:.04em;white-space:nowrap}
 /* Review also tints the toolbar and rims the whole canvas, so the stage shows from the corner of the eye. */
 .shell-annotate .annotation-canvas>.shell-tools{transition:background-color var(--dur-slow) var(--ease-standard),border-color var(--dur-slow) var(--ease-standard)}
 .review-mode .shell-annotate .annotation-canvas>.shell-tools{background:var(--accent-soft);border-bottom-color:var(--accent)}
@@ -71,17 +86,17 @@
 .notice-spinner { width:13px; height:13px; flex-shrink:0; border-radius:50%; border:2px solid var(--line); border-top-color:var(--accent); animation:notice-spin .9s linear infinite; }
 @keyframes notice-spin { to { transform:rotate(360deg); } }
 .toast-corner-enter-active { transition:opacity var(--dur-base) var(--ease-standard),transform var(--dur-slow) var(--ease-out); }
-.toast-corner-leave-active { transition:opacity var(--dur-fast) var(--ease-standard); }
+.toast-corner-leave-active { transition:opacity var(--dur-base) var(--ease-standard),transform var(--dur-base) var(--ease-standard); }
 .toast-corner-enter-from { opacity:0; transform:translateY(6px); }
-.toast-corner-leave-to { opacity:0; }
+.toast-corner-leave-to { opacity:0; transform:translateY(4px); }
 /* Unresolved failures sit in their own row under the toolbar: they take space from the canvas
    instead of covering the image or capturing pointer events meant for it. */
 .shell-annotate .workbench-notices { order:-1; flex:none; width:100%; max-height:45%; overflow:auto; display:flex; flex-direction:column; gap:6px; padding:8px 12px 0; }
 .shell-annotate .workbench-notices:empty { display:none; }
 .notice-enter-active { transition:opacity var(--dur-base) var(--ease-standard),transform var(--dur-slow) var(--ease-out); }
-.notice-leave-active { transition:opacity var(--dur-fast) var(--ease-standard); }
+.notice-leave-active { transition:opacity var(--dur-base) var(--ease-standard),transform var(--dur-base) var(--ease-standard); }
 .notice-enter-from { opacity:0; transform:translateY(-6px); }
-.notice-leave-to { opacity:0; }
+.notice-leave-to { opacity:0; transform:translateY(-4px); }
 .shell-annotate .notice-chip { margin-left:auto; display:inline-flex; align-items:center; gap:6px; height:28px; padding:0 10px; border-radius:var(--radius-xl); border:0; background:var(--danger-soft); color:var(--danger); font-size:var(--fs-xs); font-weight:600; white-space:nowrap; }
 .shell-annotate .notice-chip:hover { box-shadow:var(--shadow-sm); }
 .notice-chip-enter-active { transition:opacity var(--dur-base) var(--ease-standard),transform var(--dur-base) var(--ease-out); }
@@ -113,4 +128,21 @@
 .annot-ai .annot-tracking-hint{margin-top:-4px;font-size:11px}
 /* While the header carries tracking progress, the frame count (also in the bottom bar) gives way. */
 .annot-context.is-tracking .shell-meta{display:none}
-@media(max-width:1000px){.annot-context.is-tracking>strong{max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+@media(max-width:1000px){.annot-context.is-tracking .ctx-file strong{max-width:96px}}
+
+/* Focus mode: the toolbar becomes a slim column on the left, so the picture keeps its height —
+   one bar on top (task and actions), the frame strip below, tools at the side. */
+.shell-annotate.is-focus .annotation-canvas{padding-left:68px}
+.shell-annotate.is-focus .annotation-canvas>.shell-tools{position:absolute;left:0;top:0;bottom:0;width:68px;flex-direction:column;align-items:center;flex-wrap:nowrap;gap:3px;padding:10px 6px;border-bottom:0;border-right:1px solid var(--line);background:var(--surface);z-index:35}
+.shell-annotate.is-focus .annotation-canvas>.shell-tools .wb-tool{width:54px;min-width:0}
+.shell-annotate.is-focus .mode-tag{flex-direction:column;height:auto;width:54px;padding:6px 2px;margin:0 0 2px;gap:3px;justify-content:center;text-align:center;white-space:normal;line-height:1.25;font-size:var(--fs-2xs)}
+.shell-annotate.is-focus .tool-seg{grid-auto-flow:row;width:58px}
+.shell-annotate.is-focus .tool-seg-thumb{right:2px;width:auto;bottom:auto;height:calc((100% - 4px - (var(--n) - 1) * 2px) / var(--n));transform:translateY(calc(var(--i) * (100% + 2px)))}
+.shell-annotate.is-focus .shell-tools-sep{width:30px;height:1px;margin:4px 0}
+.shell-annotate.is-focus .notice-chip{flex-direction:column;width:56px;padding:4px 2px;white-space:normal;text-align:center;font-size:var(--fs-2xs);line-height:1.25}
+/* Tips open to the right of the column. */
+.shell-annotate.is-focus .tool-tip,.shell-annotate.is-focus .tool-tip.start,.shell-annotate.is-focus .tool-tip.end{top:50%;left:calc(100% + 10px);right:auto;transform:translate(-4px,-50%)}
+.shell-annotate.is-focus .wb-tool:hover .tool-tip{transform:translate(0,-50%)}
+/* A short window: labels fold away here too. */
+.shell-annotate.is-focus .annotation-canvas>.shell-tools.compact .wb-tool{height:34px}
+.shell-annotate.is-focus .annotation-canvas>.shell-tools.compact .mode-tag span,.shell-annotate.is-focus .annotation-canvas>.shell-tools.compact .mode-tag{font-size:0;gap:0;padding:6px 0}

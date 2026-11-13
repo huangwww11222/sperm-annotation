@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
 import { useAuth } from './auth'
-import { annotationReviewApi as api, type CheckResult, type Failure, type ReviewPerson, type ReviewStage, type ReviewState, type ReviewStatus } from '../api/annotationReviewApi'
+import { annotationReviewApi as api, type CheckResult, type TargetResult, type Failure, type ReviewPerson, type ReviewStage, type ReviewState, type ReviewStatus } from '../api/annotationReviewApi'
 
 // One review state for the selected server video, shared by the review panel, the
 // frame strip, the header status and the export gate.
@@ -62,8 +62,8 @@ async function run(mediaId: string, reviewId: string | null, action: () => Promi
   } catch (e) {
     console.warn('[annotation_review.action_failed]', {mediaId,reviewId,error:e})
     if (current()) error.value = describe(e)
-    // The server saw a frame change that this page has not shown yet.
-    if (current() && (e as Failure).code === 'REVIEW_FRAME_CHANGED') { const message = error.value; await load(mediaId); error.value = message }
+    // The server saw a change that this page has not shown yet.
+    if (current() && ['REVIEW_FRAME_CHANGED', 'REVIEW_TARGET_CHANGED', 'ITEM_NOT_FOUND'].includes((e as Failure).code ?? '')) { const message = error.value; await load(mediaId); error.value = message }
     return false
   } finally { busy.value = false }
 }
@@ -80,16 +80,18 @@ export function useAnnotationReview() {
     start: (mediaId: string) => run(mediaId, null, () => api.start(mediaId)),
     check: (mediaId: string, reviewId: string, frame: number, result: CheckResult) => run(mediaId, reviewId, () => api.check(mediaId, reviewId, frame, result)),
     pass: (mediaId: string, reviewId: string) => run(mediaId, reviewId, () => api.pass(mediaId, reviewId)),
+    checkTarget: (mediaId: string, reviewId: string, objectId: number, result: TargetResult, repeat = false) => run(mediaId, reviewId, () => api.checkTarget(mediaId, reviewId, objectId, result, repeat)),
+    playthrough: (mediaId: string, reviewId: string) => run(mediaId, reviewId, () => api.playthrough(mediaId, reviewId)),
   }
 }
 
 export const reviewStatusLabel: Record<ReviewStatus, string> = {
   none: '待审查', open: '审查中', passed: '审查通过', stale: '需重新审查',
 }
-const stageLabel: Record<ReviewStage, string> = { unstarted: '未开始', annotating: '标注中', ready: reviewStatusLabel.none }
+const stageLabel: Record<ReviewStage, string> = { unstarted: '未开始', annotating: '标注中', scanning: '查漏中', ready: reviewStatusLabel.none }
 export type ReviewFilterKey = ReviewStage | 'open' | 'passed' | 'stale'
 export const reviewFilterOptions: { key: ReviewFilterKey; label: string }[] = [
-  { key: 'unstarted', label: '未开始' }, { key: 'annotating', label: '标注中' }, { key: 'ready', label: '待审查' },
+  { key: 'unstarted', label: '未开始' }, { key: 'annotating', label: '标注中' }, { key: 'scanning', label: '查漏中' }, { key: 'ready', label: '待审查' },
   { key: 'open', label: '审查中' }, { key: 'passed', label: '审查通过' }, { key: 'stale', label: '需重新审查' },
 ]
 /** One key per video for filters and folder counts. */

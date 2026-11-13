@@ -107,10 +107,12 @@ def test_media_deletion_requires_confirmation_and_retains_legacy_identity() -> N
     assert "closeMedia" not in store
     assert "asset-close" not in page
     assert "deleteMedia(row.media.id)" in (ROOT / "frontend/src/components/MediaLibrary.vue").read_text(encoding="utf-8")
-    assert delete_block.index("window.confirm") < delete_block.index("trackApi.deleteMedia")
+    confirmation = delete_block.index("await askConfirm(")
+    cancel_guard = delete_block.index("if (!ok")
+    assert confirmation < cancel_guard < delete_block.index("trackApi.deleteMedia")
     assert delete_block.index("!result.deleted") < delete_block.index("mediaAssets.value =")
     assert "if (media.serverMediaId)" in delete_block
-    assert "电脑原文件和已保存到服务器的标注记录会保留" in delete_block
+    assert "原文件不受影响" in delete_block
     # Older clients may have closed a media item under a different frontend ID.
     # Keep that mapping readable so its saved annotations still reconnect.
     assert "closedMediaFrontendIds[item.mediaId] || `server-${item.mediaId}`" in store
