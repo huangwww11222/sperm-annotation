@@ -15,16 +15,22 @@ const swap = (f: TargetFlag) => f.kind === 'cross' || f.kind === 'jump'
 
 /** A possible swap is worth asking only while the target still has boxes on both sides of it,
  *  within the ±3 frames the card shows. After a split, or once those boxes are deleted, there
- *  is nothing left to compare and the card asks the plain question instead. */
-export function liveFlags(flags: TargetFlag[], frames?: number[]): TargetFlag[] {
+ *  is nothing left to compare and the card asks the plain question instead.
+ *  ``checked``: the check frames, the only frames a training set takes (decision 0007). A swap
+ *  matters only when the target has a box on a check frame before it and on one after it: then
+ *  one answer would label two different things. Elsewhere the track's mistake never reaches the data. */
+export function liveFlags(flags: TargetFlag[], frames?: number[], checked?: number[]): TargetFlag[] {
   if (!frames) return flags
+  const exported = checked?.length ? frames.filter(x => checked.includes(x)) : null
   return flags.filter(f => !swap(f) || f.frame == null
-    || (frames.some(x => x < f.frame! && x >= f.frame! - 3) && frames.some(x => x >= f.frame! && x <= f.frame! + 3)))
+    || ((frames.some(x => x < f.frame! && x >= f.frame! - 3) && frames.some(x => x >= f.frame! && x <= f.frame! + 3))
+      && (!exported || (exported.some(x => x < f.frame!) && exported.some(x => x >= f.frame!)))))
 }
 
-/** ``frames``: frames each target has a box on now; omit to trust the prelabel flags as they are. */
-export function buildQueue(targets: number[], allFlags: Record<number, TargetFlag[]>, manual: Set<number>, frames?: Record<number, number[]>): QueueEntry[] {
-  const flags: Record<number, TargetFlag[]> = Object.fromEntries(targets.map(id => [id, liveFlags(allFlags[id] ?? [], frames?.[id])]))
+/** ``frames``: frames each target has a box on now; omit to trust the prelabel flags as they are.
+ *  ``checked``: check frames of the video, if it has a prelabel. */
+export function buildQueue(targets: number[], allFlags: Record<number, TargetFlag[]>, manual: Set<number>, frames?: Record<number, number[]>, checked?: number[]): QueueEntry[] {
+  const flags: Record<number, TargetFlag[]> = Object.fromEntries(targets.map(id => [id, liveFlags(allFlags[id] ?? [], frames?.[id], checked)]))
   const ordered = [...targets].sort((a, b) => rank(flags[a] ?? [], manual.has(a)) - rank(flags[b] ?? [], manual.has(b)) || a - b)
   const queue: QueueEntry[] = ordered.map(objectId => {
     const suspect = (flags[objectId] ?? []).find(swap)

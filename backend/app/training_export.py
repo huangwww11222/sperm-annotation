@@ -196,6 +196,10 @@ def snapshots(c, ids):
         ]
         if digest(frames) != v["final"]["snapshot_hash"]:
             raise ReviewError("FINAL_SNAPSHOT_CHANGED", "最终快照校验失败，不能导出")
+        # Only frames someone scanned for missed heads are trustworthy training images (decision 0007);
+        # snapshots without the mark (older ones, videos without a prelabel) keep every frame.
+        if any(frame.get("checked") for frame in frames):
+            frames = [frame for frame in frames if frame.get("checked")]
         for frame in frames:
             if not frame["objects"]:
                 empty_frames += 1
@@ -586,6 +590,7 @@ def build_package(eid, body, versions, summary, work, audit_snapshot, audit_sha,
                 "width": m["width"],
                 "height": m["height"],
                 "frameCount": m["frame_count"],
+                "exportedFrames": [frame["frameIndex"] for frame in v["frames"]],
                 "snapshotHash": v["final"]["snapshot_hash"],
                 "annotationOnly": "directFrames" in v,
                 "split": chosen[vi] if chosen else None,
@@ -596,9 +601,16 @@ def build_package(eid, body, versions, summary, work, audit_snapshot, audit_sha,
         try:
             if not cap.isOpened():
                 raise ReviewError("VIDEO_DECODE_FAILED", "无法打开原始视频")
+            position = 0
             for frame in v["frames"]:
                 fi = frame["frameIndex"]
-                ok, image = cap.read()
+                # Frames are decoded in order; skipped ones are only grabbed, not decoded.
+                while position < fi:
+                    if not cap.grab():
+                        break
+                    position += 1
+                ok, image = cap.read() if position == fi else (False, None)
+                position += 1
                 if not ok or image is None:
                     raise ReviewError(
                         "FRAME_DECODE_FAILED",
