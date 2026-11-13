@@ -1,6 +1,7 @@
 // 画布交互与对象编辑：工具切换、缩放、点选头部、框的绘制/拖拽/微调、对象增删改。
 import { ref, watch } from 'vue'
 import { hitHandle, moveBox, resizeBox, type Box } from '../../annotation/geometry'
+import { gapGuess } from '../../annotation/gapFill'
 import type { AnnotationObject, AnnotationTool } from '../../types/annotation'
 import { trackApi } from '../../api/trackApi'
 import { useAuth } from '../auth'
@@ -287,6 +288,29 @@ export const copyPreviousFrame = () => {
   deletedFrameObjects.value[mediaId] = (deletedFrameObjects.value[mediaId] ?? []).filter(d => d.frameIndex !== currentFrame.value || !copiedIds.has(d.objectId))
   annotationsByMedia.value = { ...annotationsByMedia.value, [mediaId]: [...allObjs, ...newObjs] }
   statusMessage.value = `已从上一帧补充 ${newObjs.length} 个标注`
+}
+
+/** Put a box for this target on the current frame where its neighbouring boxes say it should be,
+ *  and select it: the reviewer then only nudges it onto the head (or deletes it). Returns its id. */
+export const fillGapBox = (objectId: number): string | null => {
+  if (editingBlocked.value || isInteracting() || !isVideo.value) return null
+  if (currentObjects.value.some(o => o.objectId === objectId)) return null
+  const mediaId = currentMediaId.value, frame = currentFrame.value
+  const all = annotationsByMedia.value[mediaId] ?? []
+  const track = all.filter(o => o.objectId === objectId && o.bbox)
+  const boxes = new Map(track.map(o => [o.frameIndex ?? 0, o.bbox!]))
+  const bbox = gapGuess(boxes, frame)
+  if (!bbox) return null
+  const template = track.reduce((a, b) => Math.abs((b.frameIndex ?? 0) - frame) < Math.abs((a.frameIndex ?? 0) - frame) ? b : a)
+  snapshotUndo()
+  const creationId = `manual-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+  const object: AnnotationObject = { id: creationId, creationId, objectId, name: template.name, source: 'manual', bbox, frameIndex: frame, timestampMs: Math.round(currentTime.value * 1000) }
+  deletedFrameObjects.value[mediaId] = (deletedFrameObjects.value[mediaId] ?? []).filter(d => d.frameIndex !== frame || d.objectId !== objectId)
+  annotationsByMedia.value = { ...annotationsByMedia.value, [mediaId]: [...all, object] }
+  selectedObjectId.value = object.id
+  statusMessage.value = `已按前后帧在第 ${frame + 1} 帧补了 ${template.name} 的框`
+  scheduleWorkspaceStateSave(mediaId)
+  return object.id
 }
 
 export const clearSelection = () => {
