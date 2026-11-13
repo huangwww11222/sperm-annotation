@@ -321,3 +321,37 @@ def test_invalidated_download_names_the_changed_video(source, monkeypatch, tmp_p
     (source / 'workspace_state.json').write_text(json.dumps(state))
     result = export.status(eid, 1)
     assert result['state'] == 'invalidated' and 'complete-media' in result['errorMessage']
+
+
+def test_only_scanned_check_frames_become_training_images(source, monkeypatch, tmp_path):
+    """Frames between check frames were never scanned for misses: they stay out of the training set."""
+    import zipfile, cv2, numpy as np
+    from app import main, api_common as routes, confirmation_workflow as confirmation, detector_tracks, annotation_review as review
+    from .test_training_export import video_file
+    video=video_file(source, n=3)
+    with db.connect() as c:
+        confirmation.migrate(c)
+        export.migrate(c)
+    monkeypatch.setattr(routes,'completion_context',lambda mid:(source,video,INFO))
+    monkeypatch.setattr(main,'media_dir',lambda mid:source)
+    monkeypatch.setattr(export,'DATASET_EXPORT_DIR',tmp_path/'packages')
+    monkeypatch.setattr(export,'enqueue',lambda eid:None)
+    checks=[{'frame':0,'kind':'fixed'},{'frame':2,'kind':'fixed'}]
+    (source/detector_tracks.TRACKS_FILE).write_text(json.dumps({'policy':detector_tracks.POLICY,'checkFrames':checks}))
+    for item in checks:
+        review.record_scan('complete-media', item['frame'], 1, checks)
+    review_pass(source)
+    result=direct.freeze(source,video,'complete-media',1,'snapshot',body(source),INFO)
+    with db.connect() as c:
+        versions, summary = export.snapshots(c, [result['finalVersionId']])
+    assert [f['frameIndex'] for f in versions[0]['frames']]==[0,2] and summary['frameCount']==2
+    job=export.create(1,'export',dict(finalVersionIds=[result['finalVersionId']],format='yolo',splitRatio=.5))
+    export.run(job['exportId'])
+    with zipfile.ZipFile(export.download(job['exportId'],1)) as z:
+        manifest=json.loads(z.read('manifest.json'))
+        assert sorted(s['frameIndex'] for s in manifest['samples'])==[0,2]
+        assert manifest['sources'][0]['exportedFrames']==[0,2]
+        # The image of frame 2 really is frame 2 (brightness 50 + 30 * index), not the next one decoded.
+        sample=next(s for s in manifest['samples'] if s['frameIndex']==2)
+        image=cv2.imdecode(np.frombuffer(z.read(sample['image']),np.uint8),cv2.IMREAD_GRAYSCALE)
+        assert abs(float(image.mean())-110)<6

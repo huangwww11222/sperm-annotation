@@ -83,6 +83,13 @@ def freeze(directory, video, media_id, actor, key, body, info, sha=None):
             for obj in frame['objects']:
                 obj['annotationId'] = f"annotation:{media_id}:{frame['frameIndex']}:{obj['objectId']}"
                 obj['resolution'] = 'annotation-direct'
+        # The detector prelabel's check frames are the frames a person scanned for misses: only
+        # these go into a training set (decision 0007). Videos without a prelabel keep every frame.
+        from .detector_tracks import read_summary
+        checked = {item['frame'] for item in (read_summary(directory) or {}).get('checkFrames', [])}
+        for frame in frozen:
+            if frame['frameIndex'] in checked:
+                frame['checked'] = True
         same = c.execute('SELECT id FROM annotation_export_snapshots WHERE actor_id=? AND media_id=? AND source_revision=? AND snapshot_hash=? ORDER BY rowid DESC LIMIT 1',
                          (actor, media_id, revision, digest(frozen))).fetchone()
         if same:  # Unchanged content: exporting it again needs no second snapshot.

@@ -34,7 +34,7 @@ import type { MergeChoice, MergeEntry } from '../annotation/workspaceWrites'
 import '../annotation/annotation.css'
 import '../annotation/annotation-shell.css'
 import { completionFresh, currentCompletion, runCompletion, splitTrack, cancelExtend, checkFrames, currentCheckFrame, currentPrelabel, extendBusy, markFrameScanned, nextUnscannedFrame, prelabelErrors, reprelabelBusy, reprelabelCurrent, retryPrelabel, scanBusy, scanComplete, scannedCount } from '../stores/workspace/prelabel'
-import { enhancedView, isObjectDeleted, trackingResultState } from '../stores/workspace/state'
+import { enhancedView, trackingResultState } from '../stores/workspace/state'
 const {
   collaborationConflict, collaborationBusy, resolveCollaboration, syncWorkspace, downloadWorkspaceBackup, currentRemoteTracking, lastEditors, discardLocalDraft, storageWarning, headBoxBusy, headBoxError, cancelHeadBox, mediaAssets, selectedMediaId, submissionBusy, mediaImportBusy, importError, duplicateImport, reimportSaving, cancelDuplicateImport, confirmDuplicateImport, restoreImportIntent, activeTool, selectedObjectId, currentFrame, currentTime, frameInput, isPlaying,
   refreshLibrary, isAiBusy, statusMessage, toast, showToast, dismissToast, imageRef, videoRef, exactFrameImageRef, exactFrameUrl, exactFrameLoading, videoPlaybackFallback, annotationHitRef, fileInputRef, videoInputRef, packageInputRef, packageImportReport, importPackage,
@@ -102,7 +102,7 @@ const targetFrames = computed(() => {
   for (const o of annotationsByMedia.value[currentMediaId.value] ?? []) if (o.objectId != null) (out[o.objectId] ??= []).push(o.frameIndex ?? 0)
   return out
 })
-const reviewQueue = computed<QueueEntry[]>(() => reviewRound.value ? buildQueue(reviewRound.value.targets ?? [], targetFlags.value, manualTargets.value, targetFrames.value) : [])
+const reviewQueue = computed<QueueEntry[]>(() => reviewRound.value ? buildQueue(reviewRound.value.targets ?? [], targetFlags.value, manualTargets.value, targetFrames.value, checkFrames.value.map(item => item.frame)) : [])
 const queueIndex = ref(0)
 const answeredEntry = (entry: QueueEntry) => {
   const round = reviewRound.value
@@ -123,13 +123,6 @@ const entryBoxes = computed(() => {
     const b = o.bbox, w = media.width, h = media.height
     out.set(o.frameIndex ?? 0, [b.x / 100 * w, b.y / 100 * h, (b.x + b.width) / 100 * w, (b.y + b.height) / 100 * h])
   }
-  return out
-})
-// Frames inside the target with no box that nobody deleted on purpose: completion found nothing there.
-const entryMissing = computed(() => {
-  const frames = [...entryBoxes.value.keys()].sort((a, b) => a - b), entry = currentEntry.value, out: number[] = []
-  if (!entry || frames.length < 2) return out
-  for (let f = frames[0] + 1; f < frames[frames.length - 1]; f++) if (!entryBoxes.value.has(f) && !isObjectDeleted(currentMediaId.value, entry.objectId, f)) out.push(f)
   return out
 })
 const cardFrameReader = computed(() => { const id = selectedMedia.value?.serverMediaId, enhanced = enhancedView.value; return (fi: number) => readFrame(id!, fi, enhanced) })
@@ -970,7 +963,7 @@ onUnmounted(()=>{if(reviewRefresh)clearTimeout(reviewRefresh);cancelHeadBox();ca
               <AnnotationOverlay :objects="displayObjects" :selected="selectedObjectId" :width="stageSize.w" :height="stageSize.h" :draft="tempBbox" :labels="labels" :hidden="hiddenBoxes || (!!frameError && !exactFrameUrl)" />
             </div>
           </div>
-          <TargetReviewCard v-if="cardVisible && currentEntry && !reviewEnd" ref="reviewCard" :entry="currentEntry" :remaining="Math.max(1,openTargets)" :can-go-back="queueIndex>0" :boxes="entryBoxes" :missing="entryMissing" :media-width="selectedMedia?.width||1" :media-height="selectedMedia?.height||1" :read-frame="cardFrameReader" :answer="currentEntry.repeat?(reviewRound?.repeats?.[currentEntry.objectId]??null):(reviewRound?.results?.[currentEntry.objectId]??null)" :busy="cardBusy||review.busy.value" @answer="answerCard" @split="splitCard" @fix="fixInCanvas" @prev="prevCard" />
+          <TargetReviewCard v-if="cardVisible && currentEntry && !reviewEnd" ref="reviewCard" :entry="currentEntry" :remaining="Math.max(1,openTargets)" :can-go-back="queueIndex>0" :boxes="entryBoxes" :media-width="selectedMedia?.width||1" :media-height="selectedMedia?.height||1" :read-frame="cardFrameReader" :answer="currentEntry.repeat?(reviewRound?.repeats?.[currentEntry.objectId]??null):(reviewRound?.results?.[currentEntry.objectId]??null)" :busy="cardBusy||review.busy.value" @answer="answerCard" @split="splitCard" @fix="fixInCanvas" @prev="prevCard" />
           <Transition name="tr-end" :css="motionAllowed"><div v-if="cardVisible && reviewEnd && reviewEnd!=='passed' && reviewEnd!=='start'" class="review-end" data-testid="review-end">
             <template v-if="reviewEnd==='unknown'"><AppIcon name="alert" :size="28" /><h2>第 {{ (firstUnknownFrame??0)+1 }} 帧没有任何标注</h2><p>这一帧确实没有精子吗？</p><div class="review-end-actions"><button class="btn-secondary" @click="reviewView='canvas';seekFrame(firstUnknownFrame??0)">去这一帧补框</button><button class="btn-primary" :disabled="review.busy.value" @click="confirmUnknownEmpty">确认没有</button></div></template>
             <template v-else-if="reviewEnd==='playthrough'"><AppIcon name="play" :size="28" /><h2>最后一步</h2><p>快速播放一遍全片，看看有没有明显漏掉的。</p><div class="review-end-actions"><button class="btn-primary" data-testid="review-playthrough" :disabled="isAiBusy" @click="startPlaythrough">开始播放</button></div></template>
@@ -1089,7 +1082,7 @@ onUnmounted(()=>{if(reviewRefresh)clearTimeout(reviewRefresh);cancelHeadBox();ca
               <div class="completion-bar" role="progressbar" :aria-valuenow="currentCompletion?.done||0" :aria-valuemax="currentCompletion?.total||0"><i :style="{ width: `${currentCompletion?.total ? Math.round(100 * (currentCompletion.done||0) / currentCompletion.total) : 8}%` }" /></div>
             </template>
             <p v-else-if="currentCompletion?.state==='failed'" class="shell-card-note task-warn" role="alert">{{ currentCompletion.error }}</p>
-            <p v-else-if="currentCompletion?.state==='done'" class="shell-card-note">{{ currentCompletion.added ? `自动补上了 ${currentCompletion.added} 帧。` : '没有需要补的帧。' }}{{ currentCompletion.missing ? `还有 ${currentCompletion.missing} 帧没找到，审查时会标出来。` : '' }}</p>
+            <p v-else-if="currentCompletion?.state==='done'" class="shell-card-note">{{ currentCompletion.added ? `自动补上了 ${currentCompletion.added} 帧。` : '没有需要补的帧。' }}</p>
             <p v-else class="shell-card-note">看完了，点“提交审查”交给审查员。</p>
             <div class="check-steps" role="group" aria-label="要查漏的帧">
               <button v-for="(item,i) in checkFrames" :key="item.frame" class="check-step" :class="{done:!!item.scannedAt,current:item.frame===currentFrame}" :aria-current="item.frame===currentFrame?'step':undefined" :title="`第 ${item.frame+1} 帧${item.scannedAt?` · ${item.scannedByName||''}已看`:''}`" :aria-label="`第 ${i+1} 张，第 ${item.frame+1} 帧${item.scannedAt?'，已看':''}`" :disabled="isAiBusy" @click="seekFrame(item.frame)"><AppIcon v-if="item.scannedAt" name="check" :size="12" /><template v-else>{{ i+1 }}</template></button>
