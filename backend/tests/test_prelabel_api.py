@@ -46,7 +46,7 @@ def test_prelabel_publishes_tracks_without_sam3_and_refuses_to_overwrite(imports
     boxes = [a for f in result['frames'] for a in f['annotations']]
     assert {a['objectId'] for a in boxes} == {1} and boxes[0]['bbox'] == [25, 15, 35, 25]
     summary = client.get('/api/prelabel/' + mid).json()
-    assert summary['state'] == 'available' and summary['checkFrames'][0] == {'frame': 0, 'kind': 'fixed', 'hints': [[50.0, 40.0, 54.0, 44.0]]}
+    assert summary['state'] == 'available' and summary['checkFrames'][0] == {'frame': 0, 'kind': 'fixed'}
     assert summary['tracks'][0]['objectId'] == 1
     again = client.post('/api/prelabel/' + mid, headers={'Idempotency-Key': 'pre-2'})
     assert again.status_code == 409 and again.json()['detail']['code'] == 'PRELABEL_EXISTS'
@@ -123,13 +123,31 @@ def test_reset_annotations_discards_the_prelabel_and_its_scans(imports, fake_det
     assert all('scannedBy' not in c for c in client.get('/api/prelabel/' + mid).json()['checkFrames'])
 
 
-def test_check_frames_carry_model_candidates_no_box_covers(imports, fake_detector):
+def test_high_confidence_hint_candidates_cover_all_frames_independently_of_scans(imports, monkeypatch):
     client, video = imports
+    monkeypatch.setenv('HEAD_DETECTOR_CONF', '0.45')
+    common_head = [25, 15, 35, 25, .9]
+    monkeypatch.setattr(head_click, 'detect_batch', lambda images: [
+        [common_head, [40, 28, 44, 32, .44]],
+        [common_head, [50, 40, 54, 44, .45]],
+        [common_head],
+    ])
     mid = upload(client, video).json()['mediaId']
-    _wait(client, client.post('/api/prelabel/' + mid).json()['taskId'])
-    checks = client.get('/api/prelabel/' + mid).json()['checkFrames']
-    # The weak head at (52, 42) never became a target; the confident one is boxed.
-    assert all(c['hints'] == [[50.0, 40.0, 54.0, 44.0]] for c in checks)
+    result = _wait(client, client.post('/api/prelabel/' + mid).json()['taskId'])
+    assert result['status'] == 'success' and result['tracks'] == 1
+    # The stored run threshold still applies when the server configuration changes.
+    monkeypatch.setenv('HEAD_DETECTOR_CONF', '0.60')
+    summary = client.get(f'/api/prelabel/{mid}').json()
+    assert [frame['frame'] for frame in summary['checkFrames']] == [0, 2]
+    assert summary['hintCandidatesByFrame'] == {
+        '0': [[25.0, 15.0, 35.0, 25.0]],
+        '1': [[25.0, 15.0, 35.0, 25.0], [50.0, 40.0, 54.0, 44.0]],
+        '2': [[25.0, 15.0, 35.0, 25.0]],
+    }
+    scanned = client.put(f'/api/prelabel/{mid}/scans/0')
+    assert scanned.status_code == 200
+    assert scanned.json()['checkFrames'][0]['scannedAt']
+    assert scanned.json()['hintCandidatesByFrame'] == summary['hintCandidatesByFrame']
 
 
 def test_completion_task_publishes_a_proposal_and_writes_no_boxes(imports, fake_detector):

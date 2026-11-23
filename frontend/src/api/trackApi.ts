@@ -57,7 +57,7 @@ export interface DuplicateVideo {
   mediaId:string;videoName:string;canOverwrite:boolean;reason:string;workspaceRevision:number;media:TrackUploadResponse
 }
 
-export interface PrelabelCheckFrame { frame: number; kind: 'fixed' | 'event'; scannedBy?: number; scannedByName?: string | null; scannedAt?: string; hints?: number[][] }
+export interface PrelabelCheckFrame { frame: number; kind: 'fixed' | 'event'; scannedBy?: number; scannedByName?: string | null; scannedAt?: string }
 export interface PrelabelTrackFlag { kind: 'cross' | 'jump' | 'partial' | 'weak'; frame?: number; last?: number; with?: number }
 export interface PrelabelSummary {
   state: 'available' | 'none'
@@ -65,6 +65,7 @@ export interface PrelabelSummary {
   modelId?: string | null
   frameCount?: number
   checkFrames?: PrelabelCheckFrame[]
+  hintCandidatesByFrame?: Record<number, number[][]>
   tracks?: { objectId: number; first: number; last: number; flags: PrelabelTrackFlag[] }[]
 }
 

@@ -372,12 +372,18 @@ watch(() => [currentMediaId.value, currentFrame.value, scanBlocks.value.length, 
   blockIndex.value = Math.min(blockIndex.value, scanBlocks.value.length - 1)
   await nextTick(); requestAnimationFrame(() => { void showBlock(blockIndex.value, false) })
 })
-const scanHints = computed(() => {
-  const media = selectedMedia.value, hints = scanning.value ? currentCheckFrame.value?.hints ?? [] : []
-  if (!media?.width || !media.height || !hints.length) return []
-  const pct = hints.map(h => [h[0] / media.width! * 100, h[1] / media.height! * 100, h[2] / media.width! * 100, h[3] / media.height! * 100])
-  const boxes = displayObjects.value.filter(o => o.bbox).map(o => [o.bbox!.x, o.bbox!.y, o.bbox!.x + o.bbox!.width, o.bbox!.y + o.bbox!.height])
-  return openHints(pct, boxes, .1)
+const frameHints = computed(() => {
+  if (!isVideo.value || reviewing.value || (frameError.value && !exactFrameUrl.value)) return []
+  const { width, height } = selectedMedia.value ?? {}
+  const hints = currentPrelabel.value?.hintCandidatesByFrame?.[currentFrame.value] ?? []
+  if (!width || !height || !hints.length) return []
+  const boxes = displayObjects.value.flatMap(({ bbox }) => bbox ? [[
+    bbox.x * width / 100, bbox.y * height / 100,
+    (bbox.x + bbox.width) * width / 100, (bbox.y + bbox.height) * height / 100,
+  ]] : [])
+  return openHints(hints, boxes).map(([x1, y1, x2, y2]) => [
+    x1 / width * 100, y1 / height * 100, x2 / width * 100, y2 / height * 100,
+  ])
 })
 const stageSize = computed(() => ({ w: Math.round(base.value.w * zoom.value), h: Math.round(base.value.h * zoom.value) }))
 const stageStyle = computed(() => ({
@@ -980,7 +986,10 @@ onUnmounted(()=>{if(reviewRefresh)clearTimeout(reviewRefresh);cancelHeadBox();ca
               </template><img v-else :key="selectedMedia.id" ref="imageRef" :src="selectedMedia.url" :alt="selectedMedia.name" class="stage-media picture-enter" :style="{filter}" @load="onImageLoaded" /></template>
               <div v-else-if="reviewing" class="canvas-empty"><AppIcon name="folder" :size="36" /><h3>选择一段视频开始审查</h3><p>在左侧素材库里选择要审查的视频。</p></div><div v-else class="canvas-empty"><AppIcon name="upload" :size="36" /><h3>把注意力留给画面</h3><p>导入一段视频，开始精细标注。</p><button class="btn-primary" @click="openFilePicker('video')">导入视频</button></div>
               <div ref="annotationHitRef" data-testid="annotation-hit" class="annotation-hit" :class="{panning:spaceHeld||pan,selecting:activeTool==='select',locked:editingBlocked}" @click="stageClick" @pointerdown="pointerDown" @pointermove="pointerMove" @pointerup="pointerUp" @pointercancel="cancelPointer" @lostpointercapture="cancelPointer" @pointerleave="mousePixel=null" />
-              <div v-if="scanHints.length && !hiddenBoxes" class="scan-hints" aria-hidden="true"><i v-for="(h, n) in scanHints" :key="n" class="scan-hint" :style="{ left: `${(h[0] + h[2]) / 2}%`, top: `${(h[1] + h[3]) / 2}%`, width: `calc(${(h[2] - h[0]) * 2.2}% + 14px)`, aspectRatio: '1' }" /></div>
+              <div v-if="frameHints.length && !hiddenBoxes" class="frame-hints" aria-hidden="true">
+                <i v-for="([left, top, right, bottom], index) in frameHints" :key="index" class="frame-hint"
+                   :style="{ left: `${(left + right) / 2}%`, top: `${(top + bottom) / 2}%`, width: `calc(${right - left}% + 4px)`, height: `calc(${bottom - top}% + 4px)` }" />
+              </div>
               <AnnotationOverlay :objects="displayObjects" :selected="selectedObjectId" :width="stageSize.w" :height="stageSize.h" :draft="tempBbox" :labels="labels" :hidden="hiddenBoxes || (!!frameError && !exactFrameUrl)" />
             </div>
           </div>
@@ -1097,7 +1106,7 @@ onUnmounted(()=>{if(reviewRefresh)clearTimeout(reviewRefresh);cancelHeadBox();ca
           <div v-else-if="checkFrames.length" key="scan" class="task-body" data-testid="scan-task">
             <div class="task-eyebrow"><span>第 1 步 · 标注</span><span class="num">{{ scannedCount }} / {{ checkFrames.length }}</span></div>
             <h3 class="task-title">{{ scanComplete ? '都看完了' : '找漏掉的精子' }}</h3>
-            <p v-if="!scanComplete" class="shell-card-note">看这一块，没框到的头点一下就补上。黄色虚线圈是模型拿不准的地方。</p>
+            <p v-if="!scanComplete" class="shell-card-note">看这一块，没框到的头点一下就补上。黄色虚线框提示模型高置信度检出、还没有标注的位置。</p>
             <template v-else-if="completionRunning">
               <p class="shell-card-note">正在补全：在已有框的前后帧里再找一遍…</p>
               <div class="completion-bar" role="progressbar" :aria-valuenow="currentCompletion?.done||0" :aria-valuemax="currentCompletion?.total||0"><i :style="{ width: `${currentCompletion?.total ? Math.round(100 * (currentCompletion.done||0) / currentCompletion.total) : 8}%` }" /></div>
@@ -1207,8 +1216,11 @@ onUnmounted(()=>{if(reviewRefresh)clearTimeout(reviewRefresh);cancelHeadBox();ca
 .scan-cell.done { background:var(--accent); border-color:var(--accent); }
 .scan-cell.current { box-shadow:0 0 0 2px var(--accent); border-color:var(--accent); background:var(--accent-soft); }
 .scan-count { grid-column:1 / -1; color:var(--muted); font-size:var(--fs-xs); }
-.scan-hints { position:absolute; inset:0; pointer-events:none; z-index:3; }
-.scan-hint { position:absolute; transform:translate(-50%,-50%); border:2px dashed #ffc542; border-radius:50%; box-shadow:0 0 0 1px #0006; }
+.annotation-hit:not(.selecting, .panning, .locked) {
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='29' height='29' viewBox='0 0 29 29'%3E%3Cpath d='M14.5 3v8m0 7v8M3 14.5h8m7 0h8' stroke='white' stroke-width='5'/%3E%3Cpath d='M14.5 3v8m0 7v8M3 14.5h8m7 0h8' stroke='%23111' stroke-width='3'/%3E%3C/svg%3E") 14 14, crosshair;
+}
+.frame-hints { position:absolute; inset:0; pointer-events:none; z-index:3; }
+.frame-hint { position:absolute; transform:translate(-50%,-50%); min-width:12px; min-height:12px; border:2px dashed #ffd044; box-shadow:0 0 0 1px #302500; }
 .check-step { min-width:28px; height:28px; padding:0 6px; border-radius:var(--radius-sm); border:1.5px solid var(--accent); background:var(--surface); color:var(--accent); font-size:var(--fs-xs); font-weight:650; font-variant-numeric:tabular-nums; display:inline-grid; place-items:center; cursor:pointer; transition:background-color var(--dur-fast,.12s) var(--ease-out,ease), color var(--dur-fast,.12s) var(--ease-out,ease), box-shadow var(--dur-fast,.12s) var(--ease-out,ease); }
 .check-step:hover:not(:disabled) { background:var(--accent-soft); }
 .check-step.done { background:var(--accent); color:var(--on-accent); }
