@@ -79,7 +79,8 @@ def tracking_is_busy(media_id: str | None = None) -> bool:
                    for item in TASKS.values())
 
 
-MEDIA_HISTORY_TABLES = ("annotation_reviews", "annotation_review_exclusions", "annotation_export_snapshots", "media_revisions", "annotation_frame_scans")
+MEDIA_HISTORY_TABLES = ("annotation_reviews", "annotation_review_exclusions", "annotation_export_snapshots", "media_revisions", "annotation_frame_scans",
+                        "flow_media", "flow_runs")
 
 
 def _media_id_has_history(media_id: str) -> bool:
@@ -120,6 +121,8 @@ def startup() -> None:
     init_db()
     from .training_export import recover_interrupted
     recover_interrupted()
+    from .flow_export import recover_interrupted as recover_flow_exports
+    recover_flow_exports()
     TRACK_DATA_DIR.mkdir(parents=True, exist_ok=True)
     for root in (TRACK_DATA_DIR, LEGACY_TRACK_DATA_DIR):
         media_reimport.recover(root)
@@ -145,6 +148,8 @@ def shutdown() -> None:
     frames.close()
     from .training_export import shutdown as stop_training_exports
     stop_training_exports()
+    from .flow_export import shutdown as stop_flow_exports
+    stop_flow_exports()
     from .statistics_export_jobs import shutdown as stop_statistics_exports
     stop_statistics_exports()
     TRACK_EXECUTOR.shutdown(wait=False, cancel_futures=True)
@@ -1337,9 +1342,11 @@ def list_media(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     name_count: dict[str, int] = {}
     folders = media_library.paths()
+    from .flow_store import flow_ids
+    microfluidic = flow_ids()  # Judged in their own mode; the wet-mount library never sees them.
     for entry in iter_media_dirs():
         video_file = find_video(entry)
-        if not video_file:
+        if not video_file or entry.name in microfluidic:
             continue
         meta: dict[str, Any] = {}
         meta_file = entry / "media.json"
@@ -1559,6 +1566,9 @@ def start_prelabel(media_id: str, user: dict[str, Any] = Depends(current_user), 
     video = find_video(directory)
     if not video:
         raise HTTPException(404, '视频不存在')
+    from .flow_store import is_flow
+    if is_flow(media_id):
+        raise HTTPException(409, '这个视频是微流控模式，请到“微流控”页判定')
     if (directory / RESULT_FILE_NAME).is_file():
         raise HTTPException(409, {'code': 'PRELABEL_EXISTS', 'message': '这个视频已有 AI 标注结果；如需用新模型重新预标，请先清空标注'})
     info = source_media_info(directory)

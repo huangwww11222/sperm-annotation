@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import AppLayout from './layouts/AppLayout.vue'
 import AnnotatePage from './pages/AnnotatePage.vue'
+import FlowPage from './pages/FlowPage.vue'
 import ResultsPage from './pages/ResultsPage.vue'
 import LoginPage from './pages/LoginPage.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
@@ -50,6 +51,7 @@ watch(isAuthenticated, syncRoute)
   <AppLayout v-else>
     <!-- One instance for both stages: same canvas and frame, so switching does not reload the video. -->
     <AnnotatePage v-if="currentPath === '/annotate' || currentPath === '/review'" :mode="currentPath === '/review' ? 'review' : 'annotate'" />
+    <FlowPage v-else-if="currentPath === '/flow'" />
     <ResultsPage v-else-if="currentPath === '/results'" />
   </AppLayout>
   <ConfirmDialog />

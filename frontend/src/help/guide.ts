@@ -24,7 +24,7 @@ function table(caption: string) {
   }
   return rows.slice(2).map(([keys, action]) => ({ keys, action }))  // Header and separator rows.
 }
-export const shortcuts = { annotate: table('人工标注'), review: table('审查') }
+export const shortcuts = { annotate: table('人工标注'), review: table('审查'), flow: table('微流控') }
 
 /** Open state shared by the header button, the "?" key and focus mode. */
 export const helpOpen = ref(false)

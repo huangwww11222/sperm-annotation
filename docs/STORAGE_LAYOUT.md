@@ -30,6 +30,8 @@ annotation_export_snapshots 独立保存直接导出快照：账号/请求键、
 
 Docker 显式设定 `APP_DATA_DIR=/data/database`，业务日志位于宿主机 `APP_DATA_ROOT/database/logs`，与数据库一同持久化。源码默认路径不变。
 
+微流控：媒体目录 `flow/`（`targets.json`、`strips/`、整帧图）是可重算的找目标结果，整体原子替换，`.flow-*` 是中断残留，下次找目标时清理。判定在 SQLite `flow_media/flow_runs/flow_pages/flow_answers/flow_scans`，复查在 `flow_rechecks/flow_settles`，导入未画完小图的视频留有 `flow-import.json`；导出任务在 `flow_exports`，ZIP 为 `datasets` 下的 `flow_<id>.zip`。删除视频不删判定历史，被删视频的 mediaId 不再复用。
+
 修改 DB 路径不自动修改日志路径；修改变量不自动搬迁已有数据。不要将测试目录与业务目录混用。
 
 

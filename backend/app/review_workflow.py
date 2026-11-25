@@ -114,6 +114,10 @@ def migrate(conn):
     migrate_concentrated(conn)
     from .annotation_review import migrate as migrate_annotation_review
     migrate_annotation_review(conn)
+    from . import flow_export, flow_recheck, flow_store
+    flow_store.migrate(conn)
+    flow_recheck.migrate(conn)
+    flow_export.migrate(conn)
     conn.commit()
 
 

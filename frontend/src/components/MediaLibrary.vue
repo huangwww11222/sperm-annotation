@@ -3,10 +3,11 @@ import { computed, onMounted, ref } from 'vue'
 import AppIcon from './AppIcon.vue'
 import TrackingProgress from './TrackingProgress.vue'
 import FolderOrganizer from './FolderOrganizer.vue'
+import ImportProgress from './ImportProgress.vue'
 import { useWorkspace } from '../stores/workspace'
 import { useAuth } from '../stores/auth'
 import { useAnnotationReview, reviewFilterKey, reviewFilterOptions, type ReviewFilterKey } from '../stores/annotationReview'
-import { clearImportReport, importCounts, importCurrent, importItems, importPlan, importRunning, prepareImport, retryFailedImports, startImport } from '../stores/importQueue'
+import { prepareImport } from '../stores/importQueue'
 import type { MediaAsset } from '../types/annotation'
 import { glideRows } from '../utils/motion'
 
@@ -17,7 +18,7 @@ const { mediaAssets, selectedMediaId, isTrackingMedia, trackingProgressViewFor, 
 const review = useAnnotationReview()
 const auth = useAuth()
 
-const search = ref(''), status = ref<ReviewFilterKey | ''>(''), mine = ref(false), organizing = ref(false), reportOpen = ref(false)
+const search = ref(''), status = ref<ReviewFilterKey | ''>(''), mine = ref(false), organizing = ref(false)
 const folderInput = ref<HTMLInputElement | null>(null)
 onMounted(() => { if (folderInput.value) folderInput.value.webkitdirectory = true })
 function pickedFolder(event: Event) { const input = event.target as HTMLInputElement; prepareImport(input.files); input.value = '' }
@@ -74,7 +75,6 @@ const rows = computed<Row[]>(() => {
   return out
 })
 const select = (media: MediaAsset) => { if (!props.busy) emit('select', media.id) }
-const stateLabel: Record<string, string> = { waiting: '等待', uploading: '上传中', done: '成功', exists: '已存在', failed: '失败' }
 </script>
 
 <template>
@@ -86,21 +86,7 @@ const stateLabel: Record<string, string> = { waiting: '等待', uploading: '上�
       <button class="btn-secondary" :disabled="busy" @click="openFilePicker('image')">图片</button>
       <input ref="folderInput" type="file" hidden data-testid="folder-input" @change="pickedFolder" />
     </div>
-    <div v-if="importItems.length" class="library-import" data-testid="import-progress">
-      <div class="library-import-head">
-        <strong>{{ importRunning ? `导入中 ${importCounts.total - importCounts.left} / ${importCounts.total}` : '导入完成' }}</strong>
-        <span>成功 {{ importCounts.done }} · 已存在 {{ importCounts.exists }} · 失败 {{ importCounts.failed }}</span>
-      </div>
-      <template v-if="importCurrent"><small class="library-import-file" :title="importCurrent.name">{{ importCurrent.name }}</small><progress :max="1" :value="importCurrent.progress" /></template>
-      <div class="library-import-actions">
-        <button class="quiet-button" data-testid="import-report-toggle" @click="reportOpen = !reportOpen">{{ reportOpen ? '收起明细' : '查看明细' }}</button>
-        <button v-if="importCounts.failed && !importRunning" class="quiet-button" data-testid="import-retry" @click="retryFailedImports">重试失败项</button>
-        <button v-if="!importRunning" class="quiet-button" @click="clearImportReport(); reportOpen = false">清除</button>
-      </div>
-      <ul v-if="reportOpen" class="library-import-report" data-testid="import-report">
-        <li v-for="item in importItems" :key="item.id" :class="item.state"><b>{{ stateLabel[item.state] }}</b> <span :title="item.folderPath">{{ item.name }}</span><small v-if="item.message"> {{ item.message }}</small></li>
-      </ul>
-    </div>
+    <ImportProgress />
     <div class="asset-search"><input v-model="search" class="input" placeholder="查找素材…" aria-label="查找素材" /></div>
     <div class="library-filters">
       <select v-model="status" aria-label="按状态筛选" data-testid="library-status"><option value="">全部状态</option><option v-for="option in reviewFilterOptions" :key="option.key" :value="option.key">{{ option.label }}</option></select>
@@ -126,20 +112,6 @@ const stateLabel: Record<string, string> = { waiting: '等待', uploading: '上�
       <p v-if="!visible.length" class="sidebar-empty">{{ filtering ? '没有匹配素材' : '导入视频或图片开始标注' }}</p>
     </div>
     <FolderOrganizer v-if="organizing" @close="organizing = false" />
-    <Teleport to="body">
-      <div v-if="importPlan" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6" @keydown.esc.prevent="importPlan = null">
-        <section class="app-dialog w-[520px]" role="dialog" aria-modal="true" aria-label="确认导入" data-testid="import-confirm">
-          <h2>确认导入</h2>
-          <p data-testid="import-summary">视频 {{ importPlan.items.filter(item => item.kind === 'video').length }} 段 · 标注包 {{ importPlan.items.filter(item => item.kind === 'package').length }} 个 · 跳过其他文件 {{ importPlan.skipped.length }} 个</p>
-          <p v-if="importPlan.tooLarge.length" role="alert" class="text-[var(--danger)]">{{ importPlan.tooLarge.length }} 个文件超过大小上限，不会上传。</p>
-          <label class="block my-3">放到文件夹（留空为未分类）<input v-model="importPlan.folder" class="input w-full" data-testid="import-folder-name" /></label>
-          <label v-if="importPlan.hasSubfolders" class="flex gap-2 my-2"><input v-model="importPlan.keepSubfolders" type="checkbox" />保留子文件夹结构</label>
-          <label v-if="importPlan.existing.length" class="flex gap-2 my-2"><input v-model="importPlan.uploadExisting" type="checkbox" data-testid="import-upload-existing" />{{ importPlan.existing.length }} 段服务器已有同名同大小的视频，默认跳过；仍然上传并比对内容</label>
-          <p class="review-note">批量导入不会覆盖已有视频。上传时可以继续标注；关闭页面会中断，重新选择同一文件夹只传缺的。</p>
-          <div class="mt-5 flex justify-end gap-3"><button class="btn-secondary" @click="importPlan = null">取消</button><button class="btn-primary" data-testid="import-start" :disabled="!importPlan.items.length" @click="startImport">开始导入</button></div>
-        </section>
-      </div>
-    </Teleport>
   </div>
 </template>
 
@@ -155,15 +127,4 @@ const stateLabel: Record<string, string> = { waiting: '等待', uploading: '上�
 .library-folder small { color: var(--muted); font-size: 11px; }
 .library-caret { color: var(--muted); width: 12px; flex: none; text-align: center; transition: transform var(--dur-base) var(--ease-out); }
 .library-caret.open { transform: rotate(90deg); }
-.library-import { animation: rise-in var(--dur-base) var(--ease-out); margin: 0 12px 8px; padding: 8px; display: flex; flex-direction: column; gap: 4px; background: var(--surface-subtle); border: 1px solid var(--line); border-radius: var(--radius-sm, 5px); font-size: 12px; }
-.library-import-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 8px; }
-.library-import-head span, .library-import-file { color: var(--muted); }
-.library-import-file { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.library-import progress { width: 100%; }
-.library-import-actions { display: flex; flex-wrap: wrap; gap: 4px; }
-.library-import-report { max-height: 180px; overflow-y: auto; margin: 0; padding: 0; list-style: none; overflow-wrap: anywhere; }
-.library-import-report li { padding: 3px 0; border-top: 1px solid var(--line); }
-.library-import-report li.failed b { color: var(--danger); }
-.library-import-report li.done b { color: var(--success); }
-.library-import-report small { color: var(--muted); }
 </style>

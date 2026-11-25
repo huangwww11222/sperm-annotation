@@ -23,6 +23,10 @@ def register_review_routers(app) -> None:
     from .media_library import router as library_router
 
     app.include_router(library_router)
+    from .flow_routes import download_router as flow_download_router, router as flow_router
+
+    app.include_router(flow_router)
+    app.include_router(flow_download_router)
     from .db import _DB_LOCK
 
     with _DB_LOCK, connect() as conn:

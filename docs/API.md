@@ -27,6 +27,34 @@
 | `GET /api/datasets/annotations/{id}/preview` | 导出弹窗预览（取代 `completion-preview`）：`sourceRevision`、有框/空/未知帧，审查确认无目标的帧计为空 |
 | `POST /api/datasets/annotations/{id}/snapshot` | 同前；另要求最近一次审查通过且内容未变，否则 409 `REVIEW_REQUIRED` |
 
+微流控（`flow_routes.py`，决策 0008）：
+
+| 方法与路径 | 作用 |
+| --- | --- |
+| `GET/PUT /api/flow/media` | 列表；`{mediaIds,sample}` 移入并自动找目标，有湿片标注整体拒绝 409 `FLOW_HAS_WET_WORK` |
+| `POST /api/flow/media/remove` | 移回湿片，已有判定 409 `FLOW_HAS_ANSWERS` |
+| `POST /api/flow/media/{id}/find` | 重新找目标；已有判定须 `force:true` |
+| `GET /api/flow/media/{id}` | 页、已选、第二遍、答案、查漏；未找好 `FLOW_NOT_READY` |
+| `GET …/strips/{key}`、`…/scan-image` | `run`、`view=e/r`，同一 run 内不变，可长期缓存 |
+| `PUT …/pages/{page}`、`…/answers/{key}` | 带 `runId`、`revision`、`ms`；409 `FLOW_CONFLICT` / `FLOW_RUN_CHANGED` |
+| `PUT …/scan` | 整帧查漏的点（原图像素） |
+| `GET /api/flow/misses` | 实测漏标 |
+| `POST/GET/DELETE /api/flow/exports` | `{mediaIds,step,trainRatio,includeSourceVideos}`，需幂等键；没判完 409 `FLOW_NOT_DONE` |
+
+微流控导入与盲复查：
+
+| 方法与路径 | 作用 |
+| --- | --- |
+| `POST /api/flow/import-package` | 表单 `file`、`folderPath`；返回 `imported/skipped` |
+| `GET /api/flow/media/{id}?recheck=true` | 只含复查轮；`differences` 对比后才有 |
+| `POST …/recheck`、`DELETE …/recheck/{rid}` | 开始（已有则返回同一个）、作废 |
+| `POST …/recheck/{rid}/compare` | 复查判完后锁定并给出不一致；没判完 `FLOW_NOT_DONE` |
+| `PUT …/recheck/{rid}/settles/{key}` | `{answer,dropped,revision}` 定稿 |
+
+复查轮的 `runId` 形如 `<runId>~1`，页、答案、小图接口照用。锁定时返回 409 `FLOW_RECHECKING` / `FLOW_RECHECK_SHOWN` / `FLOW_RECHECK_GONE`。
+
+微流控坐标一律为原图像素，帧号从 0 开始；下载走 `/api/datasets/exports/flow/{id}/download`。
+
 本页是 API 地图与不变量，不复制全部类型定义。精确请求验证以已注册路由的 Pydantic 模型为准；开发时可读本地 FastAPI `/openapi.json`。旧原型中的示例接口不是活动接口。
 
 记录目标判定与帧确认的请求显式绑定开始时的 mediaId/reviewId 与目标号或帧号，切换视频或轮次后不发送旧操作的确认。旧审查采用的工作区人工框仍保留 `origin=review_adopted` / `reviewAdoptionKey`，只作历史来源，不再产生。
