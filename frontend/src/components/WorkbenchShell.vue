@@ -17,7 +17,9 @@ const props = withDefaults(defineProps<{
   drawerBusy?: boolean
   inspectorForced?: boolean
   inspectorBadge?: string | number
-}>(), { focused: false, focusKeepsInspector: false, drawerCount: 0, drawerForced: false, drawerBusy: false, inspectorForced: false, inspectorBadge: '' })
+  /** The page has nothing to inspect: no right panel and no button to open one. */
+  noInspector?: boolean
+}>(), { focused: false, focusKeepsInspector: false, drawerCount: 0, drawerForced: false, drawerBusy: false, inspectorForced: false, inspectorBadge: '', noInspector: false })
 
 const drawerOpen = defineModel<boolean>('drawerOpen', { default: false })
 const key = `workbench-${props.name}-inspector-collapsed`
@@ -28,7 +30,7 @@ watch(inspectorCollapsed, value => { try { localStorage.setItem(key, String(valu
 const headerReady = ref(false)
 onMounted(() => { headerReady.value = !!document.getElementById('app-header-context') })
 const drawerVisible = computed(() => !props.focused && (drawerOpen.value || props.drawerForced))
-const inspectorVisible = computed(() => (!props.focused || props.focusKeepsInspector) && (!inspectorCollapsed.value || props.inspectorForced))
+const inspectorVisible = computed(() => !props.noInspector && (!props.focused || props.focusKeepsInspector) && (!inspectorCollapsed.value || props.inspectorForced))
 defineExpose({ collapseInspector: () => { inspectorCollapsed.value = true } })
 // Panels glide only when toggled on their own. Focus mode and a forced pause panel change the layout in one step,
 // and the view anchoring in AnnotatePage needs the final size at once.
@@ -57,6 +59,6 @@ const panelsGlide = computed(() => motionAllowed.value && !focusSwitching.value)
       <button v-if="!inspectorForced" class="icon-button shell-collapse" title="收起面板" aria-label="收起检查面板" @click="inspectorCollapsed = true"><AppIcon name="panel" :size="15" /></button>
       <slot name="inspector" />
     </aside></Transition>
-    <button v-if="!inspectorVisible && (!focused || focusKeepsInspector)" class="shell-inspector-open" title="展开检查面板" aria-label="展开检查面板" @click="inspectorCollapsed = false"><AppIcon name="panel" :size="16" /><span v-if="inspectorBadge !== ''">{{ inspectorBadge }}</span></button>
+    <button v-if="!noInspector && !inspectorVisible && (!focused || focusKeepsInspector)" class="shell-inspector-open" title="展开检查面板" aria-label="展开检查面板" @click="inspectorCollapsed = false"><AppIcon name="panel" :size="16" /><span v-if="inspectorBadge !== ''">{{ inspectorBadge }}</span></button>
   </div>
 </template>

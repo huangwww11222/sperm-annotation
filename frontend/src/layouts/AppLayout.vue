@@ -12,8 +12,8 @@ const { user, logout } = useAuth()
 const { theme, toggleTheme } = useAppearance()
 const { showToast } = useWorkspace()
 // Workbench pages fill the window edge to edge; their context goes into the header.
-const workbenchRoute = computed(() => ['/annotate', '/review'].includes(routePath.value))
-const stage = computed(() => ({ '/annotate': 'annotate', '/review': 'review', '/results': 'results' } as Record<string, string>)[routePath.value] ?? null)
+const workbenchRoute = computed(() => ['/annotate', '/review', '/flow'].includes(routePath.value))
+const stage = computed(() => ({ '/annotate': 'annotate', '/review': 'review', '/flow': 'flow', '/results': 'results' } as Record<string, string>)[routePath.value] ?? null)
 // Both stages render the same canvas: say so at the moment of switching, not only in the colours.
 const stageEntered: Record<string, string> = { '/annotate': '已进入标注模式', '/review': '已进入审查模式：逐个确认目标，有错直接改' }
 watch(routePath, path => { if (stageEntered[path]) showToast(stageEntered[path]) }, { flush: 'post' })
@@ -27,6 +27,7 @@ async function signOut() { if (await router.canLeave()) { await logout(); await 
         <i class="workflow-thumb" aria-hidden="true" />
         <button aria-label="人工标注" :class="{active:stage==='annotate'}" :aria-current="stage==='annotate'?'page':undefined" title="第 1 步：标注" @click="router.push('/annotate')"><span>1</span>标注</button>
         <button aria-label="审查模式" :class="{active:stage==='review'}" :aria-current="stage==='review'?'page':undefined" title="第 2 步：审查" @click="router.push('/review')"><span>2</span>审查</button>
+        <button class="records-nav" aria-label="微流控" :class="{active:stage==='flow'}" :aria-current="stage==='flow'?'page':undefined" title="微流控视频：按目标判，不逐帧标" data-testid="nav-flow" @click="router.push('/flow')"><AppIcon name="film" :size="15" />微流控</button>
         <button class="records-nav" aria-label="标注记录" :class="{active:stage==='results'}" :aria-current="stage==='results'?'page':undefined" title="谁标了、谁审了，以及统计导出" @click="router.push('/results')"><AppIcon name="records" :size="15" />记录</button>
       </nav>
       <div id="app-header-context" class="app-header-context" />

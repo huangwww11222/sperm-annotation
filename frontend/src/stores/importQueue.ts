@@ -2,19 +2,23 @@
 // overwrites a video, and reports every file. The queue lives in page memory; after the
 // page closes, picking the same folder again skips what already arrived (same name and size).
 import { computed, reactive, ref } from 'vue'
+import { flowApi } from '../api/flowApi'
 import { trackApi } from '../api/trackApi'
 import { isVideoFile, mediaAssets, showToast } from './workspace/state'
 import { loadServerMedia } from './workspace/media'
 import { useAnnotationReview } from './annotationReview'
+import { useFlow } from './flow'
 
 export type ImportState = 'waiting' | 'uploading' | 'done' | 'exists' | 'failed'
 export interface ImportItem {
   id: number; file: File; kind: 'video' | 'package'; name: string; subPath: string
   folderPath: string; state: ImportState; progress: number; message: string
+  /** For the microfluidic page: put there after the upload, under its folder as the sample. */
+  flow: boolean
 }
 export interface ImportPlan {
   items: ImportItem[]; skipped: string[]; existing: ImportItem[]; tooLarge: ImportItem[]
-  folder: string; keepSubfolders: boolean; hasSubfolders: boolean; uploadExisting: boolean
+  folder: string; keepSubfolders: boolean; hasSubfolders: boolean; uploadExisting: boolean; flow: boolean
 }
 const GIB = 1024 ** 3, MAX_VIDEO = 2 * GIB, MAX_PACKAGE = 8 * GIB, RETRIES = 2
 const JUNK = new Set(['thumbs.db', 'desktop.ini'])
@@ -33,7 +37,7 @@ const relativeParts = (file: File) => (file.webkitRelativePath || file.name).spl
 const joinPath = (...parts: string[]) => parts.map(part => part.trim()).filter(Boolean).join('/')
 
 /** Sort picked files into a plan the user confirms; nothing is uploaded yet. */
-export function prepareImport(files: FileList | File[] | null) {
+export function prepareImport(files: FileList | File[] | null, flow = false) {
   const picked = Array.from(files ?? [])
   if (!picked.length) return
   const items: ImportItem[] = [], skipped: string[] = []
@@ -41,14 +45,14 @@ export function prepareImport(files: FileList | File[] | null) {
     const name = file.name, lower = name.toLowerCase(), parts = relativeParts(file)
     const kind = lower.endsWith('.zip') ? 'package' : isVideoFile(file) ? 'video' : null
     if (!kind || name.startsWith('.') || JUNK.has(lower) || !file.size) { skipped.push(parts.join('/')); continue }
-    items.push(reactive<ImportItem>({ id: nextId++, file, kind, name, subPath: parts.slice(1, -1).join('/'), folderPath: '', state: 'waiting', progress: 0, message: '' }))
+    items.push(reactive<ImportItem>({ id: nextId++, file, kind, name, subPath: parts.slice(1, -1).join('/'), folderPath: '', state: 'waiting', progress: 0, message: '', flow }))
   }
-  const known = new Set(mediaAssets.value.filter(media => media.sizeBytes).map(media => `${media.serverVideoName}|${media.sizeBytes}`))
+  const known = new Set(flow ? useFlow().items.value.map(item => `${item.videoName}|${item.sizeBytes}`) : mediaAssets.value.filter(media => media.sizeBytes).map(media => `${media.serverVideoName}|${media.sizeBytes}`))
   const existing = items.filter(item => item.kind === 'video' && known.has(`${item.name}|${item.file.size}`))
   const tooLarge = items.filter(item => item.file.size > (item.kind === 'video' ? MAX_VIDEO : MAX_PACKAGE))
   const fromFolder = !!picked[0]!.webkitRelativePath
   importPlan.value = {
-    items, skipped, existing, tooLarge, keepSubfolders: true, uploadExisting: false,
+    items, skipped, existing, tooLarge, keepSubfolders: true, uploadExisting: false, flow,
     folder: fromFolder ? relativeParts(picked[0]!)[0]! : '', hasSubfolders: items.some(item => item.subPath),
   }
 }
@@ -80,14 +84,21 @@ async function uploadOne(item: ImportItem) {
   const onProgress = (fraction: number) => { item.progress = fraction }
   if (item.kind === 'video') {
     const { status, data } = await trackApi.uploadWithProgress('/api/track/upload', item.file, item.folderPath, onProgress)
+    if (status === 409 && data?.code === 'DUPLICATE_VIDEO' && item.flow && !useFlow().items.value.some(entry => entry.mediaId === data.duplicate?.mediaId)) {
+      // The wet-mount list has it: judge it here instead. Refused by the server once it has work of its own there.
+      await flowApi.add([data.duplicate.mediaId], item.folderPath)
+      item.state = 'done'; item.message = '服务器已有同样内容的视频，已移到微流控'; return
+    }
     if (status === 409 && data?.code === 'DUPLICATE_VIDEO') {
       item.state = 'exists'; item.message = `服务器已有同样内容的视频「${data.duplicate?.videoName ?? ''}」，未覆盖`; return
     }
     if (status < 200 || status >= 300) throw Object.assign(new Error(data?.message || data?.detail || `上传失败（${status}）`), { status })
+    // A retry finds the uploaded video as a duplicate and only moves it.
+    if (item.flow) await flowApi.add([data.mediaId], item.folderPath)
     item.state = 'done'; item.message = '已导入'
     return
   }
-  const { status, data } = await trackApi.uploadWithProgress('/api/track/import-package', item.file, item.folderPath, onProgress)
+  const { status, data } = await trackApi.uploadWithProgress(item.flow ? '/api/flow/import-package' : '/api/track/import-package', item.file, item.folderPath, onProgress)
   if (status < 200 || status >= 300) throw Object.assign(new Error(data?.detail || data?.message || `标注包导入失败（${status}）`), { status })
   const imported = data.imported?.length ?? 0, skipped: { videoName: string; reason: string }[] = data.skipped ?? []
   item.state = imported || !skipped.length ? 'done' : 'exists'
@@ -116,7 +127,10 @@ async function run() {
           console.warn('[annotation.batch_import_retry]', { file: item.name, attempt: attempt + 1 })
         }
       }
-      if ((item.state as ImportState) === 'done') { await loadServerMedia({ keepView: true }); await review.loadSummary() }
+      if ((item.state as ImportState) === 'done') {
+        if (item.flow) await useFlow().load()
+        await loadServerMedia({ keepView: true }); if (!item.flow) await review.loadSummary()
+      }
     }
   } finally { importRunning.value = false }
   const { done, exists, failed } = importCounts.value

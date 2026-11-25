@@ -7,8 +7,8 @@ import { motionAllowed } from '../utils/motion'
 
 const props = defineProps<{ page: string }>()
 const icons = ['box', 'check', 'upload']
-const keyTab = ref<'annotate' | 'review'>('annotate')
-watch(helpOpen, open => { if (open) keyTab.value = props.page === '/review' ? 'review' : 'annotate' })
+const keyTab = ref<'annotate' | 'review' | 'flow'>('annotate')
+watch(helpOpen, open => { if (open) keyTab.value = props.page === '/review' ? 'review' : props.page === '/flow' ? 'flow' : 'annotate' })
 const keys = computed(() => shortcuts[keyTab.value])
 /** "Ctrl/⌘ + Shift + Z" → chips; "/" and "+" between keys stay as small separators. */
 const chips = (text: string) => text.split(/(\s+[+/]\s+)/).filter(Boolean).map(part => ({ sep: /^\s+[+/]\s+$/.test(part), text: part.trim() }))
@@ -53,9 +53,10 @@ function download() {
           </ol>
           <div class="help-keys-head">
             <h3>快捷键</h3>
-            <div class="help-tabs" role="tablist" :style="{ '--i': keyTab === 'review' ? 1 : 0 }"><i aria-hidden="true" />
+            <div class="help-tabs" role="tablist" :style="{ '--i': keyTab === 'flow' ? 2 : keyTab === 'review' ? 1 : 0 }"><i aria-hidden="true" />
               <button role="tab" :aria-selected="keyTab === 'annotate'" :class="{ on: keyTab === 'annotate' }" @click="keyTab = 'annotate'">标注</button>
               <button role="tab" :aria-selected="keyTab === 'review'" :class="{ on: keyTab === 'review' }" @click="keyTab = 'review'">审查</button>
+              <button role="tab" :aria-selected="keyTab === 'flow'" :class="{ on: keyTab === 'flow' }" @click="keyTab = 'flow'">微流控</button>
             </div>
           </div>
           <Transition name="help-swap" mode="out-in" :css="motionAllowed">
@@ -86,8 +87,8 @@ function download() {
 .help-steps p{margin:0;font-size:var(--fs-xs);line-height:1.6;color:var(--muted)}
 .help-keys-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
 .help-keys-head h3{margin:0;font-size:var(--fs-md);font-weight:650}
-.help-tabs{position:relative;display:grid;grid-template-columns:1fr 1fr;padding:2px;border-radius:var(--radius-md);background:var(--surface-subtle);box-shadow:inset 0 0 0 1px var(--line)}
-.help-tabs i{position:absolute;left:2px;top:2px;bottom:2px;width:calc(50% - 2px);border-radius:var(--radius-sm);background:var(--surface-raised);box-shadow:var(--shadow-sm);transform:translateX(calc(var(--i) * 100%));transition:transform var(--dur-base) var(--ease-glide)}
+.help-tabs{position:relative;display:grid;grid-template-columns:repeat(3,1fr);padding:2px;border-radius:var(--radius-md);background:var(--surface-subtle);box-shadow:inset 0 0 0 1px var(--line)}
+.help-tabs i{position:absolute;left:2px;top:2px;bottom:2px;width:calc((100% - 4px) / 3);border-radius:var(--radius-sm);background:var(--surface-raised);box-shadow:var(--shadow-sm);transform:translateX(calc(var(--i) * 100%));transition:transform var(--dur-base) var(--ease-glide)}
 .help-tabs button{position:relative;z-index:1;padding:4px 14px;font-size:var(--fs-xs);font-weight:600;color:var(--muted);transition:color var(--dur-fast) var(--ease-out)}
 .help-tabs button.on{color:var(--text)}
 .help-keys{margin:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:2px 20px}

@@ -146,13 +146,14 @@ kbd {font-family:var(--font-mono);font-size:10.5px;line-height:1.3;border:1px so
 .brand-mark {display:grid;place-items:center;width:28px;height:28px;border-radius:8px;color:var(--on-accent);background:linear-gradient(140deg,var(--accent-hover),var(--accent));box-shadow:inset 0 1px 0 #ffffff2e,0 1px 2px #0002}
 .app-brand h1 {margin:0;font-size:var(--fs-md);line-height:1.4;font-weight:700;letter-spacing:.02em;white-space:nowrap}
 .app-brand small {display:block;margin-top:2px;font-size:var(--fs-2xs);line-height:1.4;color:var(--muted)}
-.workflow-nav {position:relative;display:grid;grid-template-columns:repeat(3,1fr);align-items:center;gap:2px;padding:3px;border:1px solid var(--line);border-radius:10px;background:var(--surface-subtle);color:var(--muted);flex-shrink:0}
+.workflow-nav {position:relative;display:grid;grid-template-columns:repeat(4,1fr);align-items:center;gap:2px;padding:3px;border:1px solid var(--line);border-radius:10px;background:var(--surface-subtle);color:var(--muted);flex-shrink:0}
 .workflow-nav button {position:relative;display:flex;gap:7px;align-items:center;padding:4px 12px 4px 6px;min-height:28px;border-radius:7px;white-space:nowrap;font-size:var(--fs-sm);font-weight:600;color:var(--muted);transition:color var(--dur-base) var(--ease-standard),background-color var(--dur-fast) var(--ease-standard)}
-/* The pill itself slides between the two steps and the records page: a third of the box minus padding and gaps. */
-.workflow-thumb {position:absolute;left:3px;top:3px;bottom:3px;width:calc((100% - 10px) / 3);border-radius:7px;background:var(--accent);box-shadow:var(--shadow-md);opacity:0;transition:transform var(--dur-slow) var(--ease-glide),opacity var(--dur-fast) var(--ease-standard)}
+/* The pill itself slides between the two steps, the microfluidic and the records page: a quarter of the box minus padding and gaps. */
+.workflow-thumb {position:absolute;left:3px;top:3px;bottom:3px;width:calc((100% - 12px) / 4);border-radius:7px;background:var(--accent);box-shadow:var(--shadow-md);opacity:0;transition:transform var(--dur-slow) var(--ease-glide),opacity var(--dur-fast) var(--ease-standard)}
 .workflow-nav[data-stage=annotate] .workflow-thumb {opacity:1}
 .workflow-nav[data-stage=review] .workflow-thumb {opacity:1;transform:translateX(calc(100% + 2px))}
-.workflow-nav[data-stage=results] .workflow-thumb {opacity:1;transform:translateX(calc(200% + 4px))}
+.workflow-nav[data-stage=flow] .workflow-thumb {opacity:1;transform:translateX(calc(200% + 4px))}
+.workflow-nav[data-stage=results] .workflow-thumb {opacity:1;transform:translateX(calc(300% + 6px))}
 .workflow-nav button {justify-content:center}
 .workflow-nav .records-nav svg {flex:none}
 .workflow-nav button:hover {background:var(--surface-hover);color:var(--text)}
