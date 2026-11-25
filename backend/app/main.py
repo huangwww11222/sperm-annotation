@@ -1668,13 +1668,11 @@ def prelabel_summary(media_id: str, user: dict[str, Any] = Depends(current_user)
     summary['checkFrames'] = [{**item, **({'scannedBy': scans[item['frame']]['actorId'], 'scannedByName': names.get(scans[item['frame']]['actorId']),
                                             'scannedAt': scans[item['frame']]['at']} if item['frame'] in scans else {})}
                               for item in summary['checkFrames']]
-    # Use the threshold of the original run. The canvas hides candidates covered by its current boxes.
-    high = summary.get('high')
-    if high is None:
-        high = head_click.high_confidence()
+    # Reuse cached detections so a hint threshold change also applies to existing videos.
+    threshold = head_click.hint_confidence()
     hint_candidates: dict[int, list[list[float]]] = {}
     for frame, rows in enumerate(detector_tracks.read_detections(directory) or []):
-        boxes = [row[:4] for row in rows if len(row) == 5 and row[4] >= high]
+        boxes = [row[:4] for row in rows if len(row) == 5 and row[4] >= threshold]
         if boxes:
             hint_candidates[frame] = boxes
     summary['hintCandidatesByFrame'] = hint_candidates

@@ -123,21 +123,23 @@ def test_reset_annotations_discards_the_prelabel_and_its_scans(imports, fake_det
     assert all('scannedBy' not in c for c in client.get('/api/prelabel/' + mid).json()['checkFrames'])
 
 
-def test_high_confidence_hint_candidates_cover_all_frames_independently_of_scans(imports, monkeypatch):
+def test_hint_candidates_use_a_separate_threshold_on_all_frames(imports, monkeypatch):
     client, video = imports
     monkeypatch.setenv('HEAD_DETECTOR_CONF', '0.45')
+    monkeypatch.delenv('HEAD_DETECTOR_HINT_CONF', raising=False)
     common_head = [25, 15, 35, 25, .9]
     monkeypatch.setattr(head_click, 'detect_batch', lambda images: [
-        [common_head, [40, 28, 44, 32, .44]],
-        [common_head, [50, 40, 54, 44, .45]],
+        [common_head, [40, 28, 44, 32, .19]],
+        [common_head, [50, 40, 54, 44, .20]],
         [common_head],
     ])
     mid = upload(client, video).json()['mediaId']
     result = _wait(client, client.post('/api/prelabel/' + mid).json()['taskId'])
     assert result['status'] == 'success' and result['tracks'] == 1
-    # The stored run threshold still applies when the server configuration changes.
+    # A cached detection below the tracking threshold can be shown without a retrack.
     monkeypatch.setenv('HEAD_DETECTOR_CONF', '0.60')
     summary = client.get(f'/api/prelabel/{mid}').json()
+    assert summary['high'] == .45
     assert [frame['frame'] for frame in summary['checkFrames']] == [0, 2]
     assert summary['hintCandidatesByFrame'] == {
         '0': [[25.0, 15.0, 35.0, 25.0]],
@@ -148,6 +150,10 @@ def test_high_confidence_hint_candidates_cover_all_frames_independently_of_scans
     assert scanned.status_code == 200
     assert scanned.json()['checkFrames'][0]['scannedAt']
     assert scanned.json()['hintCandidatesByFrame'] == summary['hintCandidatesByFrame']
+    monkeypatch.setenv('HEAD_DETECTOR_HINT_CONF', '0.25')
+    updated = client.get(f'/api/prelabel/{mid}').json()
+    assert updated['hintCandidatesByFrame']['1'] == [[25.0, 15.0, 35.0, 25.0]]
+    assert updated['tracks'] == summary['tracks']
 
 
 def test_completion_task_publishes_a_proposal_and_writes_no_boxes(imports, fake_detector):

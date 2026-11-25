@@ -342,20 +342,38 @@ const blockIndex = ref(0)
 const blockCols = computed(() => Math.max(1, ...scanBlocks.value.map(b => b.col + 1)))
 const blockCells = computed(() => scanBlocks.value.map((b, i) => ({ ...b, i })).sort((a, b) => a.row - b.row || a.col - b.col))
 const lastBlock = computed(() => scanBlocks.value.length <= 1 || blockIndex.value >= scanBlocks.value.length - 1)
+let manualScanZoom = false
+let scanViewRevision = 0
+function keepManualScanZoom() {
+  if (!scanning.value) return
+  manualScanZoom = true
+  scanViewRevision++
+  // Stop a block's smooth scroll before applying the user's zoom anchor.
+  const scroller = scrollContainerRef.value
+  scroller?.scrollTo({ left: scroller.scrollLeft, top: scroller.scrollTop, behavior: 'auto' })
+}
 async function showBlock(i: number, smooth = true) {
   const b = scanBlocks.value[i], sc = scrollContainerRef.value, el = stageRef.value
   if (!b || !sc || !el || pointerActive || pan) return
+  const revision = ++scanViewRevision
   blockIndex.value = i
   cancelPendingPauseView()
-  // The stage may still have the shape of a frame size not known yet: fit it to this video first.
-  const media = selectedMedia.value
-  if (media?.width && media.height && Math.abs(base.value.w / base.value.h - media.width / media.height) > .01) { fit(); await nextTick() }
-  const target = Math.min(10, Math.max(.25, +Math.min(size.value.w / ((b.x1 - b.x0) * base.value.w), size.value.h / ((b.y1 - b.y0) * base.value.h)).toFixed(2)))
-  if (Math.abs(target - zoom.value) > .005) {
-    pauseStageMargins.value = null
-    if (target > zoom.value) zoomIn(target - zoom.value); else zoomOut(zoom.value - target)
-    await nextTick()
+  if (!manualScanZoom) {
+    // Fit a newly loaded frame's aspect ratio before choosing the block scale.
+    const media = selectedMedia.value
+    if (media?.width && media.height && Math.abs(base.value.w / base.value.h - media.width / media.height) > .01) {
+      fit()
+      await nextTick()
+      if (revision !== scanViewRevision) return
+    }
+    const target = Math.min(10, Math.max(.25, +Math.min(size.value.w / ((b.x1 - b.x0) * base.value.w), size.value.h / ((b.y1 - b.y0) * base.value.h)).toFixed(2)))
+    if (Math.abs(target - zoom.value) > .005) {
+      pauseStageMargins.value = null
+      if (target > zoom.value) zoomIn(target - zoom.value); else zoomOut(zoom.value - target)
+      await nextTick()
+    }
   }
+  if (revision !== scanViewRevision) return
   const r = el.getBoundingClientRect(), vp = sc.getBoundingClientRect()
   const left = sc.scrollLeft + r.left + b.x0 * r.width - vp.left - (sc.clientWidth - (b.x1 - b.x0) * r.width) / 2
   const top = sc.scrollTop + r.top + b.y0 * r.height - vp.top - (sc.clientHeight - (b.y1 - b.y0) * r.height) / 2
@@ -365,13 +383,21 @@ async function scanNext() {
   if (!lastBlock.value) { await showBlock(blockIndex.value + 1); return }
   await finishScan()
 }
-// A new check frame starts at its first block; a resized view keeps the block it was on.
-watch(() => `${currentMediaId.value}:${currentFrame.value}:${scanning.value}`, () => { blockIndex.value = 0 })
-watch(() => [currentMediaId.value, currentFrame.value, scanBlocks.value.length, blockCols.value, base.value.w], async () => {
+// A new check frame starts at its first block with automatic zoom.
+watch([currentMediaId, currentFrame, scanning], () => {
+  blockIndex.value = 0
+  manualScanZoom = false
+  scanViewRevision++
+})
+watch([currentMediaId, currentFrame, scanning, () => scanBlocks.value.length, blockCols, () => base.value.w], (_, __, onCleanup) => {
   if (scanBlocks.value.length < 2) return
   blockIndex.value = Math.min(blockIndex.value, scanBlocks.value.length - 1)
-  await nextTick(); requestAnimationFrame(() => { void showBlock(blockIndex.value, false) })
-})
+  if (manualScanZoom) return
+  const request = requestAnimationFrame(() => {
+    if (!manualScanZoom) void showBlock(blockIndex.value, false)
+  })
+  onCleanup(() => cancelAnimationFrame(request))
+}, { flush: 'post' })
 const frameHints = computed(() => {
   if (!isVideo.value || reviewing.value || (frameError.value && !exactFrameUrl.value)) return []
   const { width, height } = selectedMedia.value ?? {}
@@ -759,12 +785,13 @@ function fit() {
   const w = Math.max(1, Math.min(size.value.w-40, (size.value.h-40)*ratio))
   base.value = {w,h:w/ratio}
 }
-function fitView() { if(pointerActive||pan)return;cancelPendingPauseView(); cancelAnnotationGesture(); zoomReset(); fit(); scrollContainerRef.value?.scrollTo(0,0) }
+function fitView() { if(pointerActive||pan)return;keepManualScanZoom();cancelPendingPauseView(); cancelAnnotationGesture(); zoomReset(); fit(); scrollContainerRef.value?.scrollTo(0,0) }
 async function zoomAt(steps:number, point?:{x:number;y:number}) {
   if(pointerActive||pan)return
   cancelPendingPauseView()
   const el = stageRef.value, scroller = scrollContainerRef.value
   if (!el || !scroller) return
+  keepManualScanZoom()
   const old = el.getBoundingClientRect(), vp = scroller.getBoundingClientRect()
   const p = point || {x:vp.left+vp.width/2,y:vp.top+vp.height/2}, nx=(p.x-old.left)/old.width, ny=(p.y-old.top)/old.height
   pauseStageMargins.value=null
@@ -988,7 +1015,7 @@ onUnmounted(()=>{if(reviewRefresh)clearTimeout(reviewRefresh);cancelHeadBox();ca
               <div ref="annotationHitRef" data-testid="annotation-hit" class="annotation-hit" :class="{panning:spaceHeld||pan,selecting:activeTool==='select',locked:editingBlocked}" @click="stageClick" @pointerdown="pointerDown" @pointermove="pointerMove" @pointerup="pointerUp" @pointercancel="cancelPointer" @lostpointercapture="cancelPointer" @pointerleave="mousePixel=null" />
               <div v-if="frameHints.length && !hiddenBoxes" class="frame-hints" aria-hidden="true">
                 <i v-for="([left, top, right, bottom], index) in frameHints" :key="index" class="frame-hint"
-                   :style="{ left: `${(left + right) / 2}%`, top: `${(top + bottom) / 2}%`, width: `calc(${right - left}% + 4px)`, height: `calc(${bottom - top}% + 4px)` }" />
+                   :style="{ left: `${(left + right) / 2}%`, top: `${(top + bottom) / 2}%`, width: `calc(${(right - left) * 2.2}% + 14px)` }" />
               </div>
               <AnnotationOverlay :objects="displayObjects" :selected="selectedObjectId" :width="stageSize.w" :height="stageSize.h" :draft="tempBbox" :labels="labels" :hidden="hiddenBoxes || (!!frameError && !exactFrameUrl)" />
             </div>
@@ -1106,7 +1133,7 @@ onUnmounted(()=>{if(reviewRefresh)clearTimeout(reviewRefresh);cancelHeadBox();ca
           <div v-else-if="checkFrames.length" key="scan" class="task-body" data-testid="scan-task">
             <div class="task-eyebrow"><span>第 1 步 · 标注</span><span class="num">{{ scannedCount }} / {{ checkFrames.length }}</span></div>
             <h3 class="task-title">{{ scanComplete ? '都看完了' : '找漏掉的精子' }}</h3>
-            <p v-if="!scanComplete" class="shell-card-note">看这一块，没框到的头点一下就补上。黄色虚线框提示模型高置信度检出、还没有标注的位置。</p>
+            <p v-if="!scanComplete" class="shell-card-note">看这一块，没框到的头点一下就补上。黄色虚线圈提示模型检到、还没有标注的位置。</p>
             <template v-else-if="completionRunning">
               <p class="shell-card-note">正在补全：在已有框的前后帧里再找一遍…</p>
               <div class="completion-bar" role="progressbar" :aria-valuenow="currentCompletion?.done||0" :aria-valuemax="currentCompletion?.total||0"><i :style="{ width: `${currentCompletion?.total ? Math.round(100 * (currentCompletion.done||0) / currentCompletion.total) : 8}%` }" /></div>
@@ -1220,7 +1247,7 @@ onUnmounted(()=>{if(reviewRefresh)clearTimeout(reviewRefresh);cancelHeadBox();ca
   cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='29' height='29' viewBox='0 0 29 29'%3E%3Cpath d='M14.5 3v8m0 7v8M3 14.5h8m7 0h8' stroke='white' stroke-width='5'/%3E%3Cpath d='M14.5 3v8m0 7v8M3 14.5h8m7 0h8' stroke='%23111' stroke-width='3'/%3E%3C/svg%3E") 14 14, crosshair;
 }
 .frame-hints { position:absolute; inset:0; pointer-events:none; z-index:3; }
-.frame-hint { position:absolute; transform:translate(-50%,-50%); min-width:12px; min-height:12px; border:2px dashed #ffd044; box-shadow:0 0 0 1px #302500; }
+.frame-hint { position:absolute; transform:translate(-50%,-50%); aspect-ratio:1; border-radius:50%; border:2px dashed #ffc542; box-shadow:0 0 0 1px #0006; }
 .check-step { min-width:28px; height:28px; padding:0 6px; border-radius:var(--radius-sm); border:1.5px solid var(--accent); background:var(--surface); color:var(--accent); font-size:var(--fs-xs); font-weight:650; font-variant-numeric:tabular-nums; display:inline-grid; place-items:center; cursor:pointer; transition:background-color var(--dur-fast,.12s) var(--ease-out,ease), color var(--dur-fast,.12s) var(--ease-out,ease), box-shadow var(--dur-fast,.12s) var(--ease-out,ease); }
 .check-step:hover:not(:disabled) { background:var(--accent-soft); }
 .check-step.done { background:var(--accent); color:var(--on-accent); }

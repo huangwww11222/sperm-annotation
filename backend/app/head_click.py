@@ -120,6 +120,11 @@ def low_confidence():
     return min(high_confidence(),_threshold('HEAD_DETECTOR_LOW_CONF',0.10))
 
 
+def hint_confidence():
+    """Minimum cached detection score for a possible missed head on the canvas."""
+    return _threshold('HEAD_DETECTOR_HINT_CONF', 0.20)
+
+
 INPUT_LONG_SIDE=1024
 
 
